@@ -1,7 +1,7 @@
 import os, random, time, datetime, pytz, io
 import numpy as np
 import pandas as pd
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, Image
 import requests
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
@@ -18,14 +18,13 @@ CARD_BG   = (250,250,250)
 TEXT_MAIN = (20,20,22)
 TEXT_MUT  = (92,95,102)
 GRID      = (225,228,232)
-UP_COL    = (20,170,90)     # support / lows
-DOWN_COL  = (230,70,70)     # resistance / highs
+UP_COL    = (20,170,90)     # support
+DOWN_COL  = (230,70,70)     # resistance
 ACCENT    = (40,120,255)    # neutral left strip
 
 # Data windows (DAILY)
-CHART_LOOKBACK   = 90     # bars shown and used for pivots
+CHART_LOOKBACK   = 90     # bars shown & used for pivots
 SUMMARY_LOOKBACK = 30     # for % text only
-PROJECTION_DAYS  = 7      # forward projection length
 YAHOO_PERIOD     = "1y"
 STOOQ_MAX_DAYS   = 250
 
@@ -81,7 +80,7 @@ def load_font(size=42, bold=False):
     except: return ImageFont.load_default()
 
 F_TITLE = load_font(65,  bold=True)
-F_SUB   = load_font(30,  bold=False)
+F_SUB   = load_font(30,  bold=False)   # smaller subtitle
 F_TICK  = load_font(54,  bold=True)
 F_NUM   = load_font(46,  bold=True)
 F_CHG   = load_font(34,  bold=True)
@@ -94,25 +93,7 @@ def y_map(v, vmin, vmax, y0, y1):
 
 def clamp(v, a, b): return max(a, min(b, v))
 
-def draw_dashed_line(d, pts, color, width=3, dash_len=8, gap_len=6, clip=None):
-    if len(pts) < 2: return
-    if clip is not None: x0c,y0c,x1c,y1c = clip
-    for i in range(len(pts)-1):
-        x0,y0=pts[i]; x1,y1=pts[i+1]
-        if clip is not None:
-            y0 = clamp(y0, y0c, y1c); y1 = clamp(y1, y0c, y1c)
-            x0 = clamp(x0, x0c, x1c); x1 = clamp(x1, x0c, x1c)
-        dx,dy=x1-x0,y1-y0; dist=(dx*dx+dy*dy)**0.5
-        if dist<=0.5: continue
-        ux,uy=dx/dist,dy/dist; step=dash_len+gap_len
-        nsteps=int(dist//step)+1
-        for k in range(nsteps):
-            start=k*step; end=min(start+dash_len,dist)
-            xs,ys=x0+ux*start, y0+uy*start
-            xe,ye=x0+ux*end,   y0+uy*end
-            d.line([(xs,ys),(xe,ye)], fill=color, width=width)
-
-# -------- Pivots & anchored trendlines --------
+# -------- Pivots & Support/Resistance --------
 def _pivot_points(arr, window=3, mode="high"):
     """Unique local extrema pivots."""
     arr = np.asarray(arr, dtype=float); n = len(arr)
@@ -128,67 +109,42 @@ def _pivot_points(arr, window=3, mode="high"):
     if not idxs: return np.array([],dtype=int), np.array([],dtype=float)
     return np.array(idxs,dtype=int), np.array(vals,dtype=float)
 
-def _line_through_two_points(p1x, p1y, p2x, p2y):
-    """Return slope a and intercept b for y = a*x + b through two points."""
-    if p2x == p1x:  # vertical fallback (treat as near-vertical with tiny slope)
-        a = 0.0
-        b = (p1y + p2y) / 2.0
-    else:
-        a = (p2y - p1y) / (p2x - p1x)
-        b = p1y - a * p1x
-    return a, b
+def pick_key_levels(values, last_close, max_levels=3, min_sep_ratio=0.007):
+    """
+    From a list of candidate levels (floats), select up to max_levels,
+    ensuring each chosen level differs from others by at least min_sep_ratio (0.7% by default).
+    Preference: most recent (we assume values are passed in recency order), then proximity to price.
+    """
+    if len(values) == 0: return []
+    # First: dedupe by proximity (iterate from most recent end)
+    chosen = []
+    for v in values[::-1]:  # recent first
+        if all(abs(v - c)/((v+c)/2.0) >= min_sep_ratio for c in chosen):
+            chosen.append(float(v))
+        if len(chosen) >= max_levels:
+            break
+    # If we picked more than needed (unlikely), keep closest to last_close
+    chosen.sort(key=lambda x: abs(x - last_close))
+    return chosen[:max_levels]
 
-def calc_trendlines_anchored(df, look=CHART_LOOKBACK, window=3, extend=PROJECTION_DAYS):
-    """
-    Build upper/lower trendlines that pass EXACTLY through the two most recent pivot highs/lows.
-    Returns dict with fits and pivot arrays; falls back to flat line at last pivot if <2 pivots.
-    """
-    if df is None or len(df) < 10: return None
+def get_support_resistance(df, look=CHART_LOOKBACK, window=3, max_levels=3):
     use = df.iloc[-look:].copy()
-    highs = use["High"].values; lows = use["Low"].values; closes = use["Close"].values
-    n = len(use)
-    if n < 10: return None
-
+    highs = use["High"].values
+    lows  = use["Low"].values
+    closes = use["Close"].values
+    last_close = float(closes[-1])
+    # pivots
     h_idx, h_val = _pivot_points(highs, window=window, mode="high")
     l_idx, l_val = _pivot_points(lows,  window=window, mode="low")
-
-    # choose the two MOST RECENT pivots for each line
-    def anchored_fit(idx_arr, val_arr, default_series):
-        if len(idx_arr) >= 2:
-            i1, i2 = np.sort(idx_arr)[-2:]   # last two
-            v1, v2 = val_arr[idx_arr.argsort()[-2:]]  # match order
-            a, b = _line_through_two_points(int(i1), float(v1), int(i2), float(v2))
-        elif len(idx_arr) == 1:
-            # flat line at single pivot level
-            a, b = 0.0, float(val_arr[-1])
-        else:
-            # fallback: horizontal line at last close (rare)
-            a, b = 0.0, float(default_series[-1])
-        return a, b
-
-    ah, bh = anchored_fit(h_idx, h_val, highs)
-    al, bl = anchored_fit(l_idx, l_val, lows)
-
-    x_hist = np.arange(n)
-    x_proj = np.arange(n + extend)
-    high_fit = ah * x_proj + bh
-    low_fit  = al * x_proj + bl
-
-    # keep ordering (upper above lower)
-    mid = (low_fit + high_fit) / 2.0
-    sep = np.maximum((high_fit - low_fit)/2.0, 1e-3)
-    low_fit  = np.minimum(low_fit,  mid - sep)
-    high_fit = np.maximum(high_fit, mid + sep)
-
-    return {
-        "x_idx": x_proj,
-        "low_fit": low_fit,
-        "high_fit": high_fit,
-        "last_close": closes[-1],
-        "n_hist": len(x_hist),
-        "pivot_high_idx": h_idx, "pivot_high_val": h_val,
-        "pivot_low_idx":  l_idx, "pivot_low_val":  l_val
-    }
+    # Order by recency (use indices as x)
+    h_order = np.argsort(h_idx) if len(h_idx)>0 else []
+    l_order = np.argsort(l_idx) if len(l_idx)>0 else []
+    h_vals_ordered = h_val[h_order] if len(h_idx)>0 else np.array([])
+    l_vals_ordered = l_val[l_order] if len(l_idx)>0 else np.array([])
+    # pick levels
+    res_levels = pick_key_levels(h_vals_ordered, last_close, max_levels=max_levels)
+    sup_levels = pick_key_levels(l_vals_ordered, last_close, max_levels=max_levels)
+    return sup_levels, res_levels
 
 # -------- Data (DAILY) --------
 def to_stooq_symbol(t): return f"{t.lower()}.us"
@@ -234,7 +190,9 @@ def clean_and_summarize(df):
     dfs = df.iloc[-SUMMARY_LOOKBACK:].copy()
     last = float(dfc["Close"].iloc[-1])
     chg30 = (last/float(dfs["Close"].iloc[0]) - 1.0) * 100.0 if len(dfs)>1 else 0.0
-    return (dfc, last, chg30)
+    # compute support/resistance here to avoid recomputation
+    sup_levels, res_levels = get_support_resistance(dfc, look=CHART_LOOKBACK, window=3, max_levels=3)
+    return (dfc, last, chg30, sup_levels, res_levels)
 
 def fetch_all_daily(tickers):
     out = {t: None for t in tickers}
@@ -246,7 +204,7 @@ def fetch_all_daily(tickers):
     return out
 
 # -------- Draw card --------
-def draw_card(d, box, ticker, df, last, chg30):
+def draw_card(d, box, ticker, df, last, chg30, sup_levels, res_levels):
     x0,y0,x1,y1 = box
     # container
     d.rounded_rectangle((x0+6,y0+6,x1+6,y1+6), radius=14, fill=(230,230,230))
@@ -286,37 +244,23 @@ def draw_card(d, box, ticker, df, last, chg30):
         if bot-top<2: bot=top+2
         d.rectangle((cx-body//2, top, cx+body//2, bot), fill=col)
 
-    # anchored trendlines (exactly through candle highs/lows)
-    tl = calc_trendlines_anchored(df, look=CHART_LOOKBACK, window=3, extend=PROJECTION_DAYS)
-    if tl:
-        x_idx, low_fit, high_fit = tl["x_idx"], tl["low_fit"], tl["high_fit"]
-        n_hist = tl["n_hist"]
+    # --- Support & Resistance lines (no price labels) ---
+    def draw_level(y_val, color, width=3):
+        y = clamp(y_map(y_val, vmin, vmax, cy0, cy1), cy0, cy1)
+        d.line([(cx0, y), (cx1, y)], fill=color, width=width)
 
-        # include projection so dashed ends at cx1
-        step_tr = (cx1-cx0)/max(1,len(x_idx))
-        low_pts, high_pts = [], []
-        for i in range(len(x_idx)):
-            cx = int(cx0 + i*step_tr + step_tr*0.5)
-            if cx < cx0 or cx > cx1: continue
-            ly = clamp(y_map(low_fit[i],  vmin,vmax,cy0,cy1), cy0,cy1)
-            hy = clamp(y_map(high_fit[i], vmin,vmax,cy0,cy1), cy0,cy1)
-            low_pts.append((cx,ly)); high_pts.append((cx,hy))
+    for r in res_levels:  # resistance first (red)
+        draw_level(r, DOWN_COL, width=3)
+    for s in sup_levels:  # support (green)
+        draw_level(s, UP_COL, width=3)
 
-        clip_box = (cx0,cy0,cx1,cy1)
-        if len(low_pts)>=2:
-            d.line(low_pts[:max(2,n_hist)], fill=UP_COL, width=3)
-            draw_dashed_line(d, low_pts[max(1,n_hist-1):], UP_COL, width=3, clip=clip_box)
-        if len(high_pts)>=2:
-            d.line(high_pts[:max(2,n_hist)], fill=DOWN_COL, width=3)
-            draw_dashed_line(d, high_pts[max(1,n_hist-1):], DOWN_COL, width=3, clip=clip_box)
-
-    d.text((cx0, cy1+4), f"{CHART_LOOKBACK} daily bars • anchored trendlines (+{PROJECTION_DAYS})", fill=TEXT_MUT, font=F_META)
+    d.text((cx0, cy1+4), f"{CHART_LOOKBACK} daily bars • support/resistance", fill=TEXT_MUT, font=F_META)
 
 # -------- Page render --------
 def render_image(path, data_map):
     img = Image.new("RGB", (CANVAS_W, CANVAS_H), BG); d = ImageDraw.Draw(img)
     d.text((64,50), "ONES TO WATCH", fill=TEXT_MAIN, font=F_TITLE)
-    d.text((64,120), "Daily charts • anchored trendlines", fill=TEXT_MUT, font=F_SUB)
+    d.text((64,120), "Daily charts • key support & resistance", fill=TEXT_MUT, font=F_SUB)
 
     if os.path.exists(LOGO_PATH):
         try:
@@ -336,8 +280,8 @@ def render_image(path, data_map):
             d.rectangle((x,y,x+12,y+card_h), fill=ACCENT)
             d.text((x+40,y+40), f"{t} – data unavailable", fill=DOWN_COL, font=F_TICK)
         else:
-            df,last,chg30 = payload
-            draw_card(d,(x,y,x+w,y+card_h), t, df, last, chg30)
+            df,last,chg30,sups,ress = payload
+            draw_card(d,(x,y,x+w,y+card_h), t, df, last, chg30, sups, ress)
         y += card_h + margin
 
     d.text((64, CANVAS_H-30), "Ideas only – Not financial advice", fill=TEXT_MUT, font=F_META)
