@@ -48,22 +48,19 @@ TICKERS = weighted_sample(POOL, N_TICKERS, seed=today_seed)
 OUTPUT_DIR= "output"
 DOCS_DIR  = "docs"
 LOGO_PATH = "assets/logo.png"
-PAGES_URL = "https://yoitskraft.github.io/trendwatchdesk-bot/"
+PAGES_URL = "https://<your-username>.github.io/trendwatchdesk-bot/"
 
 # -------- HTTP session --------
 def make_session():
     s = requests.Session()
-    s.headers.update({
-        "User-Agent": "Mozilla/5.0"
-    })
+    s.headers.update({"User-Agent": "Mozilla/5.0"})
     retry = Retry(
         total=5, connect=5, read=5, backoff_factor=0.6,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET", "POST"]
     )
-    adapter = HTTPAdapter(max_retries=retry)
-    s.mount("http://", adapter)
-    s.mount("https://", adapter)
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
+    s.mount("http://", adapter); s.mount("https://", adapter)
     return s
 
 SESS = make_session()
@@ -71,13 +68,10 @@ SESS = make_session()
 # -------- FONTS --------
 def load_font(size=42, bold=False):
     pref = "fonts/Roboto-Bold.ttf" if bold else "fonts/Roboto-Regular.ttf"
-    if os.path.exists(pref):
-        return ImageFont.truetype(pref, size)
+    if os.path.exists(pref): return ImageFont.truetype(pref, size)
     fam = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
-    try:
-        return ImageFont.truetype(fam, size)
-    except:
-        return ImageFont.load_default()
+    try: return ImageFont.truetype(fam, size)
+    except: return ImageFont.load_default()
 
 F_TITLE = load_font(65,  bold=True)
 F_SUB   = load_font(38,  bold=False)
@@ -113,14 +107,12 @@ def recommend_signal(close_series):
     if ema10 < ema20 or (r is not None and r >= 70): return "SELL"
     return "HOLD"
 
-# --- Trendline calc with projection
+# --- Trendline calc with projection (+5 days)
 def calc_trendlines(df, look=30, extend=5):
     if df is None or len(df) < 10: return None
     use = df.iloc[-look:].copy()
-    highs = use["High"].values
-    lows  = use["Low"].values
-    closes = use["Close"].values
-    n = len(use)
+    highs = use["High"].values; lows  = use["Low"].values; closes = use["Close"].values
+    n = len(use); 
     if n < 10: return None
     x = np.arange(n)
     try:
@@ -129,13 +121,8 @@ def calc_trendlines(df, look=30, extend=5):
         x_proj = np.arange(n + extend)
         low_fit  = a_low  * x_proj + b_low
         high_fit = a_high * x_proj + b_high
-        return {
-            "x_idx": x_proj,
-            "low_fit": low_fit,
-            "high_fit": high_fit,
-            "last_close": closes[-1],
-            "n_hist": n
-        }
+        return {"x_idx": x_proj, "low_fit": low_fit, "high_fit": high_fit,
+                "last_close": closes[-1], "n_hist": n}
     except Exception:
         return None
 
@@ -146,8 +133,7 @@ def fetch_stooq(t):
     sym = to_stooq_symbol(t)
     url = f"https://stooq.com/q/d/l/?s={sym}&i=d"
     try:
-        r = SESS.get(url, timeout=10)
-        r.raise_for_status()
+        r = SESS.get(url, timeout=10); r.raise_for_status()
         df = pd.read_csv(io.StringIO(r.text))
         if df is None or df.empty: return None
         df = df.rename(columns=str.title)
@@ -164,15 +150,12 @@ def fetch_stooq(t):
 def fetch_yahoo(t, tries=4, base_sleep=1.5):
     for k in range(tries):
         try:
-            df = yf.download(
-                tickers=t, period="60d", interval="1d",
-                auto_adjust=False, progress=False, session=SESS
-            )
-            if df is not None and not df.empty:
-                return df
+            df = yf.download(tickers=t, period="60d", interval="1d",
+                             auto_adjust=False, progress=False, session=SESS)
+            if df is not None and not df.empty: return df
         except Exception as e:
             msg = str(e)
-            if "429" in msg:
+            if "429" in msg or "Too Many Requests" in msg:
                 wait = base_sleep * (k + 1) * 2
                 print(f"[429] Yahoo rate limited for {t}, waiting {wait:.1f}s…")
                 time.sleep(wait)
@@ -197,20 +180,39 @@ def fetch_all_30d(tickers):
     out = {t: None for t in tickers}
     for t in tickers:
         df = fetch_stooq(t)
-        if df is None:
-            df = fetch_yahoo(t)
+        if df is None: df = fetch_yahoo(t)
         payload = clean_and_summarize(df) if df is not None else None
         out[t] = payload
-        time.sleep(2.0)
+        time.sleep(2.0)  # polite gap
     return out
 
-# -------- Drawing --------
+# -------- Drawing helpers --------
 def y_map(v, vmin, vmax, y0, y1):
     if vmax - vmin < 1e-6: return (y0+y1)//2
     return int(y1 - (v - vmin) * (y1 - y0) / (vmax - vmin))
 
+def draw_dashed_line(d, pts, color, width=3, dash_len=8, gap_len=6):
+    """Draw a dashed polyline compatible with PIL (no dash kw)."""
+    if len(pts) < 2: return
+    for i in range(len(pts)-1):
+        x0,y0 = pts[i]; x1,y1 = pts[i+1]
+        dx, dy = x1-x0, y1-y0
+        dist = (dx*dx + dy*dy) ** 0.5
+        if dist == 0: continue
+        ux, uy = dx/dist, dy/dist
+        step = dash_len + gap_len
+        nsteps = int(dist // step) + 1
+        for k in range(nsteps):
+            start = k*step
+            end   = min(start + dash_len, dist)
+            xs, ys = x0 + ux*start, y0 + uy*start
+            xe, ye = x0 + ux*end,   y0 + uy*end
+            d.line([(xs,ys),(xe,ye)], fill=color, width=width)
+
+# -------- Draw card --------
 def draw_card(d, box, ticker, df, last, chg30, sig):
     x0,y0,x1,y1 = box
+    # container + shadow
     d.rounded_rectangle((x0+6,y0+6,x1+6,y1+6), radius=14, fill=(230,230,230))
     d.rounded_rectangle((x0,y0,x1,y1), radius=14, fill=CARD_BG)
     strip_col = {"BUY":UP_COL, "SELL":DOWN_COL, "HOLD":HOLD_COL}[sig]
@@ -224,15 +226,18 @@ def draw_card(d, box, ticker, df, last, chg30, sig):
     d.text((info_x, info_y+105), f"{sign}{chg30:.2f}% past 30d",
            fill=(UP_COL if chg30>=0 else DOWN_COL), font=F_CHG)
 
+    # chart area
     cx0=x0+380; cx1=x1-pad; cy0=y0+pad; cy1=y1-pad-18
     d.rectangle((cx0,cy0,cx1,cy1), fill=(255,255,255))
     vmin=float(df["Low"].min()); vmax=float(df["High"].max())
     n=len(df); step=(cx1-cx0)/max(1,n); wick=max(1,int(step*0.12)); body=max(3,int(step*0.4))
 
+    # grid
     for gy in (0.25,0.5,0.75):
         y=int(cy0 + gy*(cy1-cy0))
         d.line([(cx0+4,y),(cx1-4,y)], fill=GRID, width=1)
 
+    # candles
     for i,row in enumerate(df.itertuples(index=False)):
         o,h,l,c = float(row.Open), float(row.High), float(row.Low), float(row.Close)
         cx=int(cx0+i*step+step*0.5)
@@ -244,30 +249,33 @@ def draw_card(d, box, ticker, df, last, chg30, sig):
         if bot-top<2: bot=top+2
         d.rectangle((cx-body//2, top, cx+body//2, bot), fill=col)
 
+    # trendlines with projection (solid history + dashed projection)
     tl = calc_trendlines(df, look=min(30, len(df)), extend=5)
     if tl:
-        x_idx, low_fit, high_fit, n_hist, last_close = tl["x_idx"], tl["low_fit"], tl["high_fit"], tl["n_hist"], tl["last_close"]
+        x_idx, low_fit, high_fit = tl["x_idx"], tl["low_fit"], tl["high_fit"]
+        n_hist, last_close = tl["n_hist"], tl["last_close"]
         low_pts, high_pts = [], []
         for i in range(len(x_idx)):
             cx = int(cx0 + i*step + step*0.5)
             ly = y_map(low_fit[i],  vmin, vmax, cy0, cy1)
             hy = y_map(high_fit[i], vmin, vmax, cy0, cy1)
-            low_pts.append((cx, ly))
-            high_pts.append((cx, hy))
+            low_pts.append((cx, ly)); high_pts.append((cx, hy))
         if len(low_pts) >= 2:
             d.line(low_pts[:n_hist], fill=UP_COL, width=3)
-            d.line(low_pts[n_hist-1:], fill=UP_COL, width=3, dash=(8,6))
+            draw_dashed_line(d, low_pts[n_hist-1:], UP_COL, width=3, dash_len=8, gap_len=6)
         if len(high_pts) >= 2:
             d.line(high_pts[:n_hist], fill=DOWN_COL, width=3)
-            d.line(high_pts[n_hist-1:], fill=DOWN_COL, width=3, dash=(8,6))
+            draw_dashed_line(d, high_pts[n_hist-1:], DOWN_COL, width=3, dash_len=8, gap_len=6)
 
+        # breakout labels vs last historical fit values
         if last_close > high_fit[n_hist-1]:
             d.text((cx0+10, cy0+10), "Bullish breakout ↑", fill=UP_COL, font=F_CHG)
         elif last_close < low_fit[n_hist-1]:
             d.text((cx0+10, cy0+10), "Bearish breakdown ↓", fill=DOWN_COL, font=F_CHG)
 
-    d.text((cx0, cy1+4), "30 days + trendlines", fill=TEXT_MUT, font=F_META)
+    d.text((cx0, cy1+4), "30 days + projected trendlines", fill=TEXT_MUT, font=F_META)
 
+# -------- Page render --------
 def render_image(path, data_map):
     img = Image.new("RGB",(CANVAS_W,CANVAS_H), BG)
     d   = ImageDraw.Draw(img)
@@ -306,6 +314,7 @@ def render_image(path, data_map):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     img.save(path, "PNG", optimize=True)
 
+# -------- Docs/RSS --------
 def write_docs(latest_filename, ts_str):
     os.makedirs(DOCS_DIR, exist_ok=True)
 
@@ -349,7 +358,7 @@ img{{max-width:100%;height:auto;border-radius:12px;
     with open(os.path.join(DOCS_DIR, "feed.xml"), "w", encoding="utf-8") as f:
         f.write(feed)
 
-
+# -------- Main --------
 if __name__ == "__main__":
     now = datetime.datetime.now(pytz.timezone(TIMEZONE))
     datestr = now.strftime("%Y%m%d")
