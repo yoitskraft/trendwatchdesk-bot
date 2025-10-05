@@ -348,11 +348,17 @@ img{{max-width:100%;height:auto;border-radius:12px;
 </rss>"""
     with open(os.path.join(DOCS_DIR, "feed.xml"), "w", encoding="utf-8") as f:
         f.write(feed)
-    feed = f"""<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0"><channel>
-<title>{BRAND_NAME} – Daily</title>
-<link>{PAGES_URL}</link>
-<description>Daily image for Instagram automation.</description>
-<item>
-  <title>Ones to Watch {ts_str}</title>
-  <link>{PAGES_URL}output/{latest
+
+
+if __name__ == "__main__":
+    now = datetime.datetime.now(pytz.timezone(TIMEZONE))
+    datestr = now.strftime("%Y%m%d")
+    out_name = f"twd_{datestr}.png"
+    out_path = os.path.join(OUTPUT_DIR, out_name)
+
+    data_map = fetch_all_30d(TICKERS)
+    render_image(out_path, data_map)
+
+    ts_str = now.strftime("%a, %d %b %Y %H:%M:%S %z")
+    write_docs(out_name, ts_str)
+    print("done:", out_path)
