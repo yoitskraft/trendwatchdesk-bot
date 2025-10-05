@@ -18,17 +18,17 @@ CARD_BG   = (250,250,250)
 TEXT_MAIN = (20,20,22)
 TEXT_MUT  = (92,95,102)
 GRID      = (225,228,232)
-UP_COL    = (20,170,90)     # candle up
-DOWN_COL  = (230,70,70)     # candle down
-ACCENT    = (40,120,255)    # left strip
+UP_COL    = (20,170,90)      # candle up / positive %
+DOWN_COL  = (230,70,70)      # candle down / negative %
+ACCENT    = (40,120,255)     # left strip
 
-# Shaded zone (semi-transparent)
-ZONE_FILL = (60, 120, 255, 42)   # soft blue, alpha 42/255
+# Shaded S/R zone (semi-transparent)
+ZONE_FILL = (60, 120, 255, 42)   # soft blue, alpha ~16%
 ZONE_EDGE = (60, 120, 255, 96)   # slightly stronger border
 
 # Data windows (DAILY)
-CHART_LOOKBACK   = 90     # bars shown & used for pivots
-SUMMARY_LOOKBACK = 30     # for % text only
+CHART_LOOKBACK   = 90
+SUMMARY_LOOKBACK = 30
 YAHOO_PERIOD     = "1y"
 STOOQ_MAX_DAYS   = 250
 
@@ -39,7 +39,6 @@ POOL = {
     "ORCL": 2, "NKE": 1, "PYPL": 1, "INTC": 2, "CRM": 2, "KO": 2
 }
 N_TICKERS = 3
-
 today_seed = datetime.date.today().strftime("%Y%m%d")
 
 def weighted_sample(pool: dict, n: int, seed: str):
@@ -83,12 +82,13 @@ def load_font(size=42, bold=False):
     try: return ImageFont.truetype(fam, size)
     except: return ImageFont.load_default()
 
-F_TITLE = load_font(65,  bold=True)
-F_SUB   = load_font(30,  bold=False)   # smaller subtitle
-F_TICK  = load_font(54,  bold=True)
-F_NUM   = load_font(46,  bold=True)
-F_CHG   = load_font(34,  bold=True)
-F_META  = load_font(24,  bold=False)
+F_TITLE      = load_font(65,  bold=True)
+F_SUB        = load_font(30,  bold=False)   # subtitle
+F_TICK       = load_font(54,  bold=True)
+F_NUM        = load_font(46,  bold=True)
+F_CHG        = load_font(28,  bold=True)   # smaller % text
+F_META       = load_font(22,  bold=False)  # card footer (smaller)
+F_META_PAGE  = load_font(24,  bold=False)  # bottom page disclaimer
 
 # -------- Utilities --------
 def y_map(v, vmin, vmax, y0, y1):
@@ -113,10 +113,8 @@ def _pivot_points(arr, window=3, mode="high"):
     if not idxs: return np.array([],dtype=int), np.array([],dtype=float)
     return np.array(idxs,dtype=int), np.array(vals,dtype=float)
 
-def pick_key_levels(values, last_close, max_levels=3, min_sep_ratio=0.007):
-    """
-    Deduplicate and pick up to max_levels candidate levels by recency & separation.
-    """
+def pick_key_levels(values, last_close, max_levels=5, min_sep_ratio=0.007):
+    """Deduplicate and pick levels by recency & separation, then by proximity."""
     if len(values) == 0: return []
     chosen = []
     for v in values[::-1]:  # recent first
@@ -147,21 +145,15 @@ def get_support_resistance(df, look=CHART_LOOKBACK, window=3, max_levels=5):
     return sup_levels, res_levels, last_close
 
 def nearest_support_resistance(sup_levels, res_levels, last_close):
-    """
-    Pick the closest support BELOW and closest resistance ABOVE.
-    If a side is missing, returns None for that side.
-    """
+    """Closest support BELOW and closest resistance ABOVE (fallback to absolute nearest if missing)."""
     sup_below = None
     res_above = None
     if sup_levels:
         below = [s for s in sup_levels if s <= last_close]
-        if below:
-            sup_below = max(below, key=lambda s: s)  # nearest from below
+        if below: sup_below = max(below, key=lambda s: s)
     if res_levels:
         above = [r for r in res_levels if r >= last_close]
-        if above:
-            res_above = min(above, key=lambda r: r)  # nearest from above
-    # If neither side satisfies strictly below/above, fall back to nearest overall
+        if above: res_above = min(above, key=lambda r: r)
     if sup_below is None and sup_levels:
         sup_below = min(sup_levels, key=lambda s: abs(s - last_close))
     if res_above is None and res_levels:
@@ -231,13 +223,15 @@ def draw_card(d, img, box, ticker, df, last, chg30, sup_level, res_level):
     # container
     d.rounded_rectangle((x0+6,y0+6,x1+6,y1+6), radius=14, fill=(230,230,230))
     d.rounded_rectangle((x0,y0,x1,y1), radius=14, fill=CARD_BG)
-    # neutral accent strip
     d.rectangle((x0,y0,x0+12,y1), fill=ACCENT)
 
     pad=24; info_x=x0+pad; info_y=y0+pad
     d.text((info_x,info_y), ticker, fill=TEXT_MAIN, font=F_TICK)
     d.text((info_x,info_y+60), f"{last:,.2f} USD", fill=TEXT_MAIN, font=F_NUM)
-    d.text((info_x,info_y+105), f"{chg30:+.2f}% past {SUMMARY_LOOKBACK}d", fill=TEXT_MUT, font=F_CHG)
+
+    # % text smaller + colored by sign
+    chg_col = UP_COL if chg30 >= 0 else DOWN_COL
+    d.text((info_x,info_y+105), f"{chg30:+.2f}% past {SUMMARY_LOOKBACK}d", fill=chg_col, font=F_CHG)
 
     # chart area
     cx0=x0+380; cx1=x1-pad; cy0=y0+pad; cy1=y1-pad-18
@@ -282,7 +276,7 @@ def draw_card(d, img, box, ticker, df, last, chg30, sup_level, res_level):
             y_bot = min(cy1, y_bot + pad_h)
         odraw.rectangle((cx0, y_top, cx1, y_bot), fill=ZONE_FILL, outline=ZONE_EDGE, width=1)
     else:
-        # only one side found: draw a thin zone around that level (~0.3% of range)
+        # one-sided: draw a slim band around that level
         level = sup_level if sup_level is not None else res_level
         if level is not None:
             y_mid = clamp(y_map(level, vmin, vmax, cy0, cy1), cy0, cy1)
@@ -291,14 +285,14 @@ def draw_card(d, img, box, ticker, df, last, chg30, sup_level, res_level):
             y_bot = min(cy1, y_mid + band//2)
             odraw.rectangle((cx0, y_top, cx1, y_bot), fill=ZONE_FILL, outline=ZONE_EDGE, width=1)
 
-    # composite overlay
     img.alpha_composite(overlay)
 
+    # smaller footer label on each card
     d.text((cx0, cy1+4), f"{CHART_LOOKBACK} daily bars • shaded S/R zone", fill=TEXT_MUT, font=F_META)
 
 # -------- Page render --------
 def render_image(path, data_map):
-    # use RGBA so we can alpha composite the shaded zone
+    # RGBA to allow alpha compositing
     img = Image.new("RGBA", (CANVAS_W, CANVAS_H), BG + (255,))
     d = ImageDraw.Draw(img)
     d.text((64,50), "ONES TO WATCH", fill=TEXT_MAIN, font=F_TITLE)
@@ -317,7 +311,6 @@ def render_image(path, data_map):
     for t in TICKERS:
         payload = data_map.get(t)
         if not payload:
-            # card shell
             d.rounded_rectangle((x+6,y+6,x+w+6,y+card_h+6),14,fill=(230,230,230))
             d.rounded_rectangle((x,y,x+w,y+card_h),14,fill=CARD_BG)
             d.rectangle((x,y,x+12,y+card_h), fill=ACCENT)
@@ -327,10 +320,9 @@ def render_image(path, data_map):
             draw_card(d, img, (x,y,x+w,y+card_h), t, df, last, chg30, sup, res)
         y += card_h + margin
 
-    d.text((64, CANVAS_H-30), "Ideas only – Not financial advice", fill=TEXT_MUT, font=F_META)
+    d.text((64, CANVAS_H-30), "Ideas only – Not financial advice", fill=TEXT_MUT, font=F_META_PAGE)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    # convert to RGB for PNG save while preserving alpha over white
     out = Image.new("RGB", img.size, (255,255,255))
     out.paste(img, mask=img.split()[-1])
     out.save(path, "PNG", optimize=True)
