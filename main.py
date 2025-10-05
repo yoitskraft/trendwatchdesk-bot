@@ -308,20 +308,46 @@ def render_image(path, data_map):
 
 def write_docs(latest_filename, ts_str):
     os.makedirs(DOCS_DIR, exist_ok=True)
+
+    # HTML page
     html = f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{BRAND_NAME} – Ones to Watch</title>
-<style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;margin:0;padding:24px;background:#fff;color:#111}}
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;
+      margin:0;padding:24px;background:#fff;color:#111}}
 .wrapper{{max-width:1080px;margin:0 auto;text-align:center}}
-img{{max-width:100%;height:auto;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.08)}}</style></head>
+img{{max-width:100%;height:auto;border-radius:12px;
+     box-shadow:0 10px 30px rgba(0,0,0,.08)}}
+</style></head>
 <body><div class="wrapper">
 <h1>{BRAND_NAME} – Ones to Watch</h1>
 <p>Latest post image below. Subscribe via <a href="feed.xml">RSS</a>.</p>
 <img src="../output/{latest_filename}" alt="daily image"/>
 <p style="color:#666;font-size:14px">Ideas only – Not financial advice</p>
 </div></body></html>"""
-    with open(os.path.join(DOCS_DIR,"index.html"),"w",encoding="utf-8") as f: f.write(html)
+    with open(os.path.join(DOCS_DIR, "index.html"), "w", encoding="utf-8") as f:
+        f.write(html)
 
+    # RSS feed
+    feed = f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>{BRAND_NAME} – Daily</title>
+    <link>{PAGES_URL}</link>
+    <description>Daily image for Instagram automation.</description>
+    <item>
+      <title>Ones to Watch {ts_str}</title>
+      <link>{PAGES_URL}output/{latest_filename}</link>
+      <guid isPermaLink="false">{ts_str}</guid>
+      <pubDate>{ts_str}</pubDate>
+      <enclosure url="{PAGES_URL}output/{latest_filename}" type="image/png" />
+      <description>Daily watchlist image.</description>
+    </item>
+  </channel>
+</rss>"""
+    with open(os.path.join(DOCS_DIR, "feed.xml"), "w", encoding="utf-8") as f:
+        f.write(feed)
     feed = f"""<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"><channel>
 <title>{BRAND_NAME} – Daily</title>
