@@ -104,7 +104,7 @@ def recommend_signal(close_series, sup):
     if dn or ob or (prox is not None and prox < -1.5): return "SELL"
     return "HOLD"
 
-# -------- Robust DATA fetch --------
+# -------- Robust Yahoo session --------
 def _make_session():
     s = requests.Session()
     s.headers.update({
@@ -138,7 +138,8 @@ def _summarize(df):
     sig = recommend_signal(df30["Close"].values, sup)
     return (df30, last, chg30, sup, sig)
 
-def _fetch_single(t, tries=3, sleep_sec=1.2):
+def _fetch_single(t, tries=4, base_sleep=1.5):
+    """Per-ticker fetch with hardened session and 429 backoff."""
     sess = _make_session()
     for k in range(tries):
         try:
@@ -148,18 +149,29 @@ def _fetch_single(t, tries=3, sleep_sec=1.2):
             )
             if df is not None and not df.empty:
                 out = _summarize(df)
-                if out: return out
+                if out:
+                    return out
             else:
                 print(f"[warn] {t} returned empty frame (try {k+1}/{tries})")
         except Exception as e:
-            print(f"[warn] single fetch {t} failed (try {k+1}/{tries}):", repr(e))
-        time.sleep(sleep_sec * (k+1))
+            msg = str(e)
+            if "429" in msg or "Too Many Requests" in msg:
+                wait = base_sleep * (k + 1) * 2
+                print(f"[429] rate limited for {t}, waiting {wait:.1f}s…")
+                time.sleep(wait)
+            else:
+                print(f"[warn] fetch {t} failed (try {k+1}/{tries}):", repr(e))
+        # small baseline sleep regardless
+        time.sleep(base_sleep)
     return None
 
 def fetch_all_30d(tickers):
+    """Force per-ticker fetch + throttle between symbols to avoid 429."""
     out = {t: None for t in tickers}
-    for t in tickers:
+    for idx, t in enumerate(tickers):
         out[t] = _fetch_single(t)
+        # throttle between tickers (tune if needed)
+        time.sleep(3.0)
     return out
 
 def y_map(v, vmin, vmax, y0, y1):
@@ -196,7 +208,7 @@ def draw_card(d, box, ticker, df, last, chg30, sup, sig):
         yO=y_map(o,vmin,vmax,cy0,cy1); yC=y_map(c,vmin,vmax,cy0,cy1)
         col = UP_COL if c>=o else DOWN_COL
         d.line([(cx,yH),(cx,yL)], fill=col, width=wick)
-        top=min(yO,yC); bot=max(yO,yC); 
+        top=min(yO,yC); bot=max(yO,yC)
         if bot-top<2: bot=top+2
         d.rectangle((cx-body//2, top, cx+body//2, bot), fill=col)
     if sup:
