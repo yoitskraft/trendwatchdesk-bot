@@ -1,0 +1,35 @@
+name: TrendWatchDesk Daily
+
+on:
+  schedule:
+    - cron: "30 7 * * 1-5"   # 07:30 UTC (≈ 08:30 London weekdays)
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run generator
+        env:
+          TZ: Europe/London
+          PAGES_BASE: https://yoitskraft.github.io/trendwatchdesk-bot
+        run: python main.py
+
+      - name: Commit outputs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/*.png docs/feed.xml
+          git commit -m "Daily update" || echo "No changes"
+          git push
