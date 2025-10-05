@@ -48,7 +48,7 @@ TICKERS = weighted_sample(POOL, N_TICKERS, seed=today_seed)
 OUTPUT_DIR= "output"
 DOCS_DIR  = "docs"
 LOGO_PATH = "assets/logo.png"
-PAGES_URL = "https://<your-username>.github.io/trendwatchdesk-bot/"
+PAGES_URL = "https://yoitskraft.github.io/trendwatchdesk-bot/"
 
 # -------- HTTP session --------
 def make_session():
