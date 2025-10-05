@@ -1,11 +1,11 @@
-import os, random, time, datetime, pytz
+import os, random, time, datetime, pytz, io
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
-import yfinance as yf
 import requests
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
+import yfinance as yf
 
 # -------- CONFIG --------
 BRAND_NAME = "TrendWatchDesk"
@@ -49,7 +49,26 @@ TICKERS = weighted_sample(POOL, N_TICKERS, seed=today_seed)
 OUTPUT_DIR= "output"
 DOCS_DIR  = "docs"
 LOGO_PATH = "assets/logo.png"            # optional
-PAGES_URL = "https://<your-username>.github.io/trendwatchdesk-bot/"
+PAGES_URL = "https://yoitskraft.github.io/trendwatchdesk-bot/"
+
+# -------- HTTP session --------
+def make_session():
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    })
+    retry = Retry(
+        total=5, connect=5, read=5, backoff_factor=0.6,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET", "POST"]
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
+    s.mount("http://", adapter)
+    s.mount("https://", adapter)
+    return s
+
+SESS = make_session()
 
 # -------- FONTS --------
 def load_font(size=42, bold=False):
@@ -104,81 +123,91 @@ def recommend_signal(close_series, sup):
     if dn or ob or (prox is not None and prox < -1.5): return "SELL"
     return "HOLD"
 
-# -------- Robust Yahoo session --------
-def _make_session():
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    })
-    retry = Retry(
-        total=5, connect=5, read=5, backoff_factor=0.6,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET", "POST"]
-    )
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
-    s.mount("http://", adapter)
-    s.mount("https://", adapter)
-    return s
+# -------- Data sources --------
+def to_stooq_symbol(t):
+    # Stooq uses lowercase + ".us" for US stocks
+    return f"{t.lower()}.us"
 
-def _clean_frame(df):
-    if df is None or df.empty: return None
+def fetch_stooq(t):
+    """Return OHLC DataFrame from Stooq (last 60d), or None."""
+    sym = to_stooq_symbol(t)
+    url = f"https://stooq.com/q/d/l/?s={sym}&i=d"
+    try:
+        r = SESS.get(url, timeout=10)
+        r.raise_for_status()
+        # CSV columns: Date,Open,High,Low,Close,Volume
+        df = pd.read_csv(io.StringIO(r.text))
+        if df is None or df.empty: 
+            return None
+        # Normalize columns & set dtype
+        df = df.rename(columns=str.title)
+        keep = [c for c in ["Open","High","Low","Close","Date"] if c in df.columns]
+        if len(keep) < 4:
+            return None
+        df = df[keep].dropna()
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        df = df.dropna(subset=["Date"]).set_index("Date").sort_index()
+        # last 60 calendar days; charts use last 30
+        df = df.iloc[-60:]
+        return df
+    except Exception as e:
+        print(f"[warn] Stooq fetch failed for {t}: {e}")
+        return None
+
+def fetch_yahoo(t, tries=4, base_sleep=1.5):
+    """Per-ticker Yahoo (fallback) with backoff; returns DataFrame or None."""
+    for k in range(tries):
+        try:
+            df = yf.download(
+                tickers=t, period="45d", interval="1d",
+                auto_adjust=False, progress=False, session=SESS
+            )
+            if df is not None and not df.empty:
+                return df
+        except Exception as e:
+            msg = str(e)
+            if "429" in msg or "Too Many Requests" in msg:
+                wait = base_sleep * (k + 1) * 2
+                print(f"[429] Yahoo rate limited for {t}, waiting {wait:.1f}s…")
+                time.sleep(wait)
+            else:
+                print(f"[warn] Yahoo fetch {t} failed (try {k+1}/{tries}): {repr(e)}")
+        time.sleep(base_sleep)
+    return None
+
+def clean_and_summarize(df):
     cols = [c for c in ["Open","High","Low","Close"] if c in df.columns]
-    if len(cols) < 4: return None
+    if len(cols) < 4: 
+        return None
     df = df[["Open","High","Low","Close"]].dropna()
-    if df.empty: return None
-    return df.iloc[-30:]
-
-def _summarize(df):
-    df30 = _clean_frame(df)
-    if df30 is None: return None
+    if df.empty: 
+        return None
+    df30 = df.iloc[-30:].copy()
+    if df30.empty: 
+        return None
     last = float(df30["Close"].iloc[-1])
     chg30 = (last/float(df30["Close"].iloc[0]) - 1.0) * 100.0
     sup = support_level(df30, 30)
     sig = recommend_signal(df30["Close"].values, sup)
     return (df30, last, chg30, sup, sig)
 
-def _fetch_single(t, tries=4, base_sleep=1.5):
-    """Per-ticker fetch with hardened session and 429 backoff."""
-    sess = _make_session()
-    for k in range(tries):
-        try:
-            df = yf.download(
-                tickers=t, period="45d", interval="1d",
-                auto_adjust=False, progress=False, session=sess
-            )
-            if df is not None and not df.empty:
-                out = _summarize(df)
-                if out:
-                    return out
-            else:
-                print(f"[warn] {t} returned empty frame (try {k+1}/{tries})")
-        except Exception as e:
-            msg = str(e)
-            if "429" in msg or "Too Many Requests" in msg:
-                wait = base_sleep * (k + 1) * 2
-                print(f"[429] rate limited for {t}, waiting {wait:.1f}s…")
-                time.sleep(wait)
-            else:
-                print(f"[warn] fetch {t} failed (try {k+1}/{tries}):", repr(e))
-        # small baseline sleep regardless
-        time.sleep(base_sleep)
-    return None
-
 def fetch_all_30d(tickers):
-    """Force per-ticker fetch + throttle between symbols to avoid 429."""
+    """Stooq-first; Yahoo fallback; light throttle between symbols."""
     out = {t: None for t in tickers}
-    for idx, t in enumerate(tickers):
-        out[t] = _fetch_single(t)
-        # throttle between tickers (tune if needed)
-        time.sleep(3.0)
+    for t in tickers:
+        df = fetch_stooq(t)
+        if df is None:
+            df = fetch_yahoo(t)
+        payload = clean_and_summarize(df) if df is not None else None
+        out[t] = payload
+        time.sleep(2.0)  # polite gap between symbols
     return out
 
+# -------- Drawing --------
 def y_map(v, vmin, vmax, y0, y1):
     if vmax - vmin < 1e-6: return (y0+y1)//2
     return int(y1 - (v - vmin) * (y1 - y0) / (vmax - vmin))
 
-# -------- DRAW --------
 def draw_card(d, box, ticker, df, last, chg30, sup, sig):
     x0,y0,x1,y1 = box
     d.rounded_rectangle((x0+6,y0+6,x1+6,y1+6), radius=14, fill=(230,230,230))
