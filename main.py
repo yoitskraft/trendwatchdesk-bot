@@ -1,8 +1,11 @@
-import os, random, datetime, pytz
+import os, random, time, datetime, pytz
 import numpy as np
 import pandas as pd
-from PIL import Image, ImageDraw, ImageFont, Image
+from PIL import Image, ImageDraw, ImageFont
 import yfinance as yf
+import requests
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
 
 # -------- CONFIG --------
 BRAND_NAME = "TrendWatchDesk"
@@ -32,9 +35,7 @@ def weighted_sample(pool: dict, n: int, seed: str):
     weights = list(pool.values())
     expanded = [t for t,w in zip(tickers,weights) for _ in range(max(1,int(w)))]
     rnd = random.Random(seed)
-    # Ensure we don't request more than unique tickers
     n = min(n, len(set(expanded)))
-    # sample from expanded then deduplicate while preserving order
     picked = []
     while len(picked) < n and expanded:
         t = rnd.choice(expanded)
@@ -48,7 +49,7 @@ TICKERS = weighted_sample(POOL, N_TICKERS, seed=today_seed)
 OUTPUT_DIR= "output"
 DOCS_DIR  = "docs"
 LOGO_PATH = "assets/logo.png"            # optional
-PAGES_URL = "https://yoitskraft.github.io/trendwatchdesk-bot/"
+PAGES_URL = "https://<your-username>.github.io/trendwatchdesk-bot/"
 
 # -------- FONTS --------
 def load_font(size=42, bold=False):
@@ -103,42 +104,62 @@ def recommend_signal(close_series, sup):
     if dn or ob or (prox is not None and prox < -1.5): return "SELL"
     return "HOLD"
 
-# -------- DATA (batch) --------
+# -------- Robust DATA fetch --------
+def _make_session():
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    })
+    retry = Retry(
+        total=5, connect=5, read=5, backoff_factor=0.6,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET", "POST"]
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
+    s.mount("http://", adapter)
+    s.mount("https://", adapter)
+    return s
+
+def _clean_frame(df):
+    if df is None or df.empty: return None
+    cols = [c for c in ["Open","High","Low","Close"] if c in df.columns]
+    if len(cols) < 4: return None
+    df = df[["Open","High","Low","Close"]].dropna()
+    if df.empty: return None
+    return df.iloc[-30:]
+
+def _summarize(df):
+    df30 = _clean_frame(df)
+    if df30 is None: return None
+    last = float(df30["Close"].iloc[-1])
+    chg30 = (last/float(df30["Close"].iloc[0]) - 1.0) * 100.0
+    sup = support_level(df30, 30)
+    sig = recommend_signal(df30["Close"].values, sup)
+    return (df30, last, chg30, sup, sig)
+
+def _fetch_single(t, tries=3, sleep_sec=1.2):
+    sess = _make_session()
+    for k in range(tries):
+        try:
+            df = yf.download(
+                tickers=t, period="45d", interval="1d",
+                auto_adjust=False, progress=False, session=sess
+            )
+            if df is not None and not df.empty:
+                out = _summarize(df)
+                if out: return out
+            else:
+                print(f"[warn] {t} returned empty frame (try {k+1}/{tries})")
+        except Exception as e:
+            print(f"[warn] single fetch {t} failed (try {k+1}/{tries}):", repr(e))
+        time.sleep(sleep_sec * (k+1))
+    return None
+
 def fetch_all_30d(tickers):
     out = {t: None for t in tickers}
-    if not tickers: return out
-    try:
-        raw = yf.download(
-            tickers=tickers, period="45d", interval="1d",
-            group_by="ticker", auto_adjust=False, threads=True, progress=False
-        )
-    except Exception as e:
-        print("[error] yf.download failed:", e)
-        return out
-
-    def get_tdf(sym):
-        try:
-            if isinstance(raw.columns, pd.MultiIndex):
-                tdf = raw[sym].dropna()
-            else:
-                tdf = raw.dropna()
-            if tdf.empty: return None
-            cols = [c for c in ["Open","High","Low","Close"] if c in tdf.columns]
-            if len(cols) < 4: return None
-            tdf = tdf[["Open","High","Low","Close"]].copy()
-            tdf = tdf.iloc[-30:]
-            if tdf.empty: return None
-            last = float(tdf["Close"].iloc[-1])
-            chg30 = (last/float(tdf["Close"].iloc[0]) - 1.0) * 100.0
-            sup = support_level(tdf, 30)
-            sig = recommend_signal(tdf["Close"].values, sup)
-            return (tdf, last, chg30, sup, sig)
-        except Exception as e:
-            print(f"[warn] parsing {sym} failed:", e)
-            return None
-
     for t in tickers:
-        out[t] = get_tdf(t)
+        out[t] = _fetch_single(t)
     return out
 
 def y_map(v, vmin, vmax, y0, y1):
@@ -197,6 +218,7 @@ def render_image(path, data_map):
     d.text((64,165),"BUY",  fill=UP_COL,   font=F_TAG)
     d.text((160,165),"SELL", fill=DOWN_COL, font=F_TAG)
     d.text((290,165),"HOLD", fill=HOLD_COL, font=F_TAG)
+
     if os.path.exists(LOGO_PATH):
         try:
             logo = Image.open(LOGO_PATH).convert("RGBA")
@@ -220,6 +242,7 @@ def render_image(path, data_map):
             df,last,chg30,sup,sig = payload
             draw_card(d,(x,y,x+w,y+card_h),t,df,last,chg30,sup,sig)
         y+=card_h+margin
+
     d.text((64, CANVAS_H-30), "Ideas only – Not financial advice", fill=TEXT_MUT, font=F_META)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
