@@ -18,16 +18,16 @@ CARD_BG   = (250,250,250)
 TEXT_MAIN = (20,20,22)
 TEXT_MUT  = (92,95,102)
 GRID      = (225,228,232)
-UP_COL    = (20,170,90)     # lows / support (green)
-DOWN_COL  = (230,70,70)     # highs / resistance (red)
-ACCENT    = (40,120,255)    # neutral accent for left strip
+UP_COL    = (20,170,90)     # support / lows
+DOWN_COL  = (230,70,70)     # resistance / highs
+ACCENT    = (40,120,255)    # neutral left strip
 
 # Data windows (DAILY)
-CHART_LOOKBACK   = 90     # days shown in chart & used for trendlines/pivots
-SUMMARY_LOOKBACK = 30     # for % change note
-PROJECTION_DAYS  = 7      # projected trendlines forward days
-YAHOO_PERIOD     = "1y"   # ensure enough data for daily candles
-STOOQ_MAX_DAYS   = 250    # fetch and slice
+CHART_LOOKBACK   = 90     # bars shown and used for pivots
+SUMMARY_LOOKBACK = 30     # for % text only
+PROJECTION_DAYS  = 7      # forward projection length
+YAHOO_PERIOD     = "1y"
+STOOQ_MAX_DAYS   = 250
 
 # Weighted random ticker pool
 POOL = {
@@ -55,7 +55,7 @@ TICKERS = weighted_sample(POOL, N_TICKERS, seed=today_seed)
 OUTPUT_DIR= "output"
 DOCS_DIR  = "docs"
 LOGO_PATH = "assets/logo.png"
-PAGES_URL = "https://yoitskraft.github.io/trendwatchdesk-bot/"
+PAGES_URL = "https://<your-username>.github.io/trendwatchdesk-bot/"
 
 # -------- HTTP session --------
 def make_session():
@@ -81,7 +81,7 @@ def load_font(size=42, bold=False):
     except: return ImageFont.load_default()
 
 F_TITLE = load_font(65,  bold=True)
-F_SUB   = load_font(30,  bold=False)   # smaller subtitle
+F_SUB   = load_font(30,  bold=False)
 F_TICK  = load_font(54,  bold=True)
 F_NUM   = load_font(46,  bold=True)
 F_CHG   = load_font(34,  bold=True)
@@ -112,20 +112,9 @@ def draw_dashed_line(d, pts, color, width=3, dash_len=8, gap_len=6, clip=None):
             xe,ye=x0+ux*end,   y0+uy*end
             d.line([(xs,ys),(xe,ye)], fill=color, width=width)
 
-# -------- Indicators (for 30d % text only) --------
-def rsi(series, period=14):
-    s = pd.Series(series).dropna()
-    if len(s) < period + 1: return None
-    d = s.diff()
-    gain = np.where(d>0, d, 0.0); loss = np.where(d<0, -d, 0.0)
-    up = pd.Series(gain).rolling(period).mean()
-    dn = pd.Series(loss).rolling(period).mean()
-    rs = up / (dn + 1e-9)
-    out = 100.0 - (100.0 / (1.0 + rs))
-    return float(out.iloc[-1])
-
-# -------- Trendlines (pivot-based) & pivots --------
+# -------- Pivots & anchored trendlines --------
 def _pivot_points(arr, window=3, mode="high"):
+    """Unique local extrema pivots."""
     arr = np.asarray(arr, dtype=float); n = len(arr)
     idxs, vals = [], []
     for i in range(window, n-window):
@@ -139,38 +128,67 @@ def _pivot_points(arr, window=3, mode="high"):
     if not idxs: return np.array([],dtype=int), np.array([],dtype=float)
     return np.array(idxs,dtype=int), np.array(vals,dtype=float)
 
-def calc_trendlines(df, look=CHART_LOOKBACK, window=3, max_points=5, extend=PROJECTION_DAYS):
+def _line_through_two_points(p1x, p1y, p2x, p2y):
+    """Return slope a and intercept b for y = a*x + b through two points."""
+    if p2x == p1x:  # vertical fallback (treat as near-vertical with tiny slope)
+        a = 0.0
+        b = (p1y + p2y) / 2.0
+    else:
+        a = (p2y - p1y) / (p2x - p1x)
+        b = p1y - a * p1x
+    return a, b
+
+def calc_trendlines_anchored(df, look=CHART_LOOKBACK, window=3, extend=PROJECTION_DAYS):
+    """
+    Build upper/lower trendlines that pass EXACTLY through the two most recent pivot highs/lows.
+    Returns dict with fits and pivot arrays; falls back to flat line at last pivot if <2 pivots.
+    """
     if df is None or len(df) < 10: return None
     use = df.iloc[-look:].copy()
     highs = use["High"].values; lows = use["Low"].values; closes = use["Close"].values
-    n = len(use); 
+    n = len(use)
     if n < 10: return None
 
-    h_idx,h_val = _pivot_points(highs, window=window, mode="high")
-    l_idx,l_val = _pivot_points(lows,  window=window, mode="low")
+    h_idx, h_val = _pivot_points(highs, window=window, mode="high")
+    l_idx, l_val = _pivot_points(lows,  window=window, mode="low")
 
-    if len(h_idx) >= 2:
-        sel = np.argsort(h_idx)[-max_points:]; ah,bh = np.polyfit(h_idx[sel], h_val[sel], 1)
-    else:
-        ah,bh = np.polyfit(np.arange(n), highs, 1)
-    if len(l_idx) >= 2:
-        sel = np.argsort(l_idx)[-max_points:]; al,bl = np.polyfit(l_idx[sel], l_val[sel], 1)
-    else:
-        al,bl = np.polyfit(np.arange(n), lows, 1)
+    # choose the two MOST RECENT pivots for each line
+    def anchored_fit(idx_arr, val_arr, default_series):
+        if len(idx_arr) >= 2:
+            i1, i2 = np.sort(idx_arr)[-2:]   # last two
+            v1, v2 = val_arr[idx_arr.argsort()[-2:]]  # match order
+            a, b = _line_through_two_points(int(i1), float(v1), int(i2), float(v2))
+        elif len(idx_arr) == 1:
+            # flat line at single pivot level
+            a, b = 0.0, float(val_arr[-1])
+        else:
+            # fallback: horizontal line at last close (rare)
+            a, b = 0.0, float(default_series[-1])
+        return a, b
 
-    x_hist = np.arange(n); x_proj = np.arange(n + extend)
-    high_fit = ah * x_proj + bh; low_fit = al * x_proj + bl
+    ah, bh = anchored_fit(h_idx, h_val, highs)
+    al, bl = anchored_fit(l_idx, l_val, lows)
 
-    # enforce ordering (avoid inverted lines)
+    x_hist = np.arange(n)
+    x_proj = np.arange(n + extend)
+    high_fit = ah * x_proj + bh
+    low_fit  = al * x_proj + bl
+
+    # keep ordering (upper above lower)
     mid = (low_fit + high_fit) / 2.0
     sep = np.maximum((high_fit - low_fit)/2.0, 1e-3)
     low_fit  = np.minimum(low_fit,  mid - sep)
     high_fit = np.maximum(high_fit, mid + sep)
 
-    return {"x_idx": x_proj, "low_fit": low_fit, "high_fit": high_fit,
-            "last_close": closes[-1], "n_hist": len(x_hist),
-            "pivot_high_idx": h_idx, "pivot_high_val": h_val,
-            "pivot_low_idx":  l_idx, "pivot_low_val":  l_val}
+    return {
+        "x_idx": x_proj,
+        "low_fit": low_fit,
+        "high_fit": high_fit,
+        "last_close": closes[-1],
+        "n_hist": len(x_hist),
+        "pivot_high_idx": h_idx, "pivot_high_val": h_val,
+        "pivot_low_idx":  l_idx, "pivot_low_val":  l_val
+    }
 
 # -------- Data (DAILY) --------
 def to_stooq_symbol(t): return f"{t.lower()}.us"
@@ -227,38 +245,6 @@ def fetch_all_daily(tickers):
         time.sleep(2.0)
     return out
 
-# -------- Swing labels --------
-def draw_swing_labels(d, cx0, cy0, cx1, cy1, vmin, vmax, piv_idx, piv_val, color, step, n_hist, side="high"):
-    """
-    Label last 3 swing highs/lows with price. Draw a small dot and a tight label.
-    side: 'high' uses label above, 'low' uses label below to avoid overlap with wick.
-    """
-    if len(piv_idx) == 0: return
-    sel = np.argsort(piv_idx)[-3:]  # last 3 pivots
-    for i in sel:
-        idx = int(piv_idx[i])
-        if idx >= n_hist:  # only label within historical window
-            continue
-        cx = int(cx0 + idx*step + step*0.5)
-        if cx < cx0 or cx > cx1: continue
-        py = clamp(y_map(float(piv_val[i]), vmin, vmax, cy0, cy1), cy0, cy1)
-        # dot
-        r = 5
-        d.ellipse((cx-r, py-r, cx+r, py+r), fill=color)
-        # label
-        price_txt = f"{float(piv_val[i]):,.2f}"
-        tw, th = d.textbbox((0,0), price_txt, font=F_META)[2:]
-        pad = 6
-        if side == "high":
-            lx, ly = cx - tw//2, py - th - 10
-        else:
-            lx, ly = cx - tw//2, py + 10
-        # keep inside chart
-        lx = clamp(lx, cx0+4, cx1 - tw - 4)
-        ly = clamp(ly, cy0+2, cy1 - th - 2)
-        d.rounded_rectangle((lx-pad, ly-pad, lx+tw+pad, ly+th+pad), radius=6, fill=(255,255,255))
-        d.text((lx, ly), price_txt, fill=color, font=F_META)
-
 # -------- Draw card --------
 def draw_card(d, box, ticker, df, last, chg30):
     x0,y0,x1,y1 = box
@@ -300,15 +286,13 @@ def draw_card(d, box, ticker, df, last, chg30):
         if bot-top<2: bot=top+2
         d.rectangle((cx-body//2, top, cx+body//2, bot), fill=col)
 
-    # trendlines (daily, 90d) + projection
-    tl = calc_trendlines(df, look=CHART_LOOKBACK, window=3, max_points=5, extend=PROJECTION_DAYS)
+    # anchored trendlines (exactly through candle highs/lows)
+    tl = calc_trendlines_anchored(df, look=CHART_LOOKBACK, window=3, extend=PROJECTION_DAYS)
     if tl:
         x_idx, low_fit, high_fit = tl["x_idx"], tl["low_fit"], tl["high_fit"]
-        n_hist, last_close = tl["n_hist"], tl["last_close"]
-        ph_i, ph_v = tl["pivot_high_idx"], tl["pivot_high_val"]
-        pl_i, pl_v = tl["pivot_low_idx"],  tl["pivot_low_val"]
+        n_hist = tl["n_hist"]
 
-        # trendline step includes projection so dashed ends at cx1
+        # include projection so dashed ends at cx1
         step_tr = (cx1-cx0)/max(1,len(x_idx))
         low_pts, high_pts = [], []
         for i in range(len(x_idx)):
@@ -326,17 +310,13 @@ def draw_card(d, box, ticker, df, last, chg30):
             d.line(high_pts[:max(2,n_hist)], fill=DOWN_COL, width=3)
             draw_dashed_line(d, high_pts[max(1,n_hist-1):], DOWN_COL, width=3, clip=clip_box)
 
-        # swing price labels (last 3 highs in red, last 3 lows in green)
-        draw_swing_labels(d, cx0, cy0, cx1, cy1, vmin, vmax, ph_i, ph_v, DOWN_COL, step_candle, n_hist, side="high")
-        draw_swing_labels(d, cx0, cy0, cx1, cy1, vmin, vmax, pl_i, pl_v, UP_COL,   step_candle, n_hist, side="low")
-
-    d.text((cx0, cy1+4), f"{CHART_LOOKBACK} daily bars • trendlines • swing prices", fill=TEXT_MUT, font=F_META)
+    d.text((cx0, cy1+4), f"{CHART_LOOKBACK} daily bars • anchored trendlines (+{PROJECTION_DAYS})", fill=TEXT_MUT, font=F_META)
 
 # -------- Page render --------
 def render_image(path, data_map):
     img = Image.new("RGB", (CANVAS_W, CANVAS_H), BG); d = ImageDraw.Draw(img)
     d.text((64,50), "ONES TO WATCH", fill=TEXT_MAIN, font=F_TITLE)
-    d.text((64,120), "Daily charts • trendlines • swing levels", fill=TEXT_MUT, font=F_SUB)
+    d.text((64,120), "Daily charts • anchored trendlines", fill=TEXT_MUT, font=F_SUB)
 
     if os.path.exists(LOGO_PATH):
         try:
