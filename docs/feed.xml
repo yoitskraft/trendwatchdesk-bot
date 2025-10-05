@@ -1,8 +1,11 @@
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version='1.0' encoding='utf-8'?>
 <rss version="2.0">
   <channel>
     <title>TrendWatchDesk</title>
     <link>https://example.com/</link>
     <description>Daily Stocks to Watch</description>
-  </channel>
+  <item><title>TrendWatchDesk — Ones to Watch 05 Oct 2025</title><link>https://&lt;your-username&gt;.github.io/trendwatchdesk-bot/twd_20251005.png</link><description>TrendWatchDesk — Ones to Watch 05 Oct 2025
+Upside: UNH, XOM, PFE
+Possible Sell: AMD, META, TSLA
+Not financial advice.</description><pubDate>Sun, 05 Oct 2025 15:13:00 GMT</pubDate></item></channel>
 </rss>
