@@ -5,11 +5,17 @@ on:
     - cron: "30 7 * * 1-5"   # 07:30 UTC (≈ 08:30 London weekdays)
   workflow_dispatch:
 
+  permissions:
+  contents: write 
+
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+       with:
+          fetch-depth: 0
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
