@@ -18,9 +18,14 @@ CARD_BG   = (250,250,250)
 TEXT_MAIN = (20,20,22)
 TEXT_MUT  = (92,95,102)
 GRID      = (225,228,232)
-UP_COL    = (20,170,90)     # support
-DOWN_COL  = (230,70,70)     # resistance
+UP_COL    = (20,170,90)     # candle up body
+DOWN_COL  = (230,70,70)     # candle down body
 ACCENT    = (40,120,255)    # neutral left strip
+
+# Fainter S/R colors
+SR_SUP_COL = (160, 210, 175)   # lighter green
+SR_RES_COL = (240, 160, 160)   # lighter red
+SR_WIDTH   = 2                  # thinner lines
 
 # Data windows (DAILY)
 CHART_LOOKBACK   = 90     # bars shown & used for pivots
@@ -112,18 +117,16 @@ def _pivot_points(arr, window=3, mode="high"):
 def pick_key_levels(values, last_close, max_levels=3, min_sep_ratio=0.007):
     """
     From a list of candidate levels (floats), select up to max_levels,
-    ensuring each chosen level differs from others by at least min_sep_ratio (0.7% by default).
-    Preference: most recent (we assume values are passed in recency order), then proximity to price.
+    ensuring each chosen level differs from others by at least min_sep_ratio (~0.7%).
+    Preference: most recent (values passed in recency order), then proximity to price.
     """
     if len(values) == 0: return []
-    # First: dedupe by proximity (iterate from most recent end)
     chosen = []
     for v in values[::-1]:  # recent first
         if all(abs(v - c)/((v+c)/2.0) >= min_sep_ratio for c in chosen):
             chosen.append(float(v))
         if len(chosen) >= max_levels:
             break
-    # If we picked more than needed (unlikely), keep closest to last_close
     chosen.sort(key=lambda x: abs(x - last_close))
     return chosen[:max_levels]
 
@@ -136,15 +139,15 @@ def get_support_resistance(df, look=CHART_LOOKBACK, window=3, max_levels=3):
     # pivots
     h_idx, h_val = _pivot_points(highs, window=window, mode="high")
     l_idx, l_val = _pivot_points(lows,  window=window, mode="low")
-    # Order by recency (use indices as x)
+    # recency order
     h_order = np.argsort(h_idx) if len(h_idx)>0 else []
     l_order = np.argsort(l_idx) if len(l_idx)>0 else []
     h_vals_ordered = h_val[h_order] if len(h_idx)>0 else np.array([])
     l_vals_ordered = l_val[l_order] if len(l_idx)>0 else np.array([])
-    # pick levels
+    # pick top levels (before final nearest-2 filter)
     res_levels = pick_key_levels(h_vals_ordered, last_close, max_levels=max_levels)
     sup_levels = pick_key_levels(l_vals_ordered, last_close, max_levels=max_levels)
-    return sup_levels, res_levels
+    return sup_levels, res_levels, last_close
 
 # -------- Data (DAILY) --------
 def to_stooq_symbol(t): return f"{t.lower()}.us"
@@ -190,9 +193,12 @@ def clean_and_summarize(df):
     dfs = df.iloc[-SUMMARY_LOOKBACK:].copy()
     last = float(dfc["Close"].iloc[-1])
     chg30 = (last/float(dfs["Close"].iloc[0]) - 1.0) * 100.0 if len(dfs)>1 else 0.0
-    # compute support/resistance here to avoid recomputation
-    sup_levels, res_levels = get_support_resistance(dfc, look=CHART_LOOKBACK, window=3, max_levels=3)
-    return (dfc, last, chg30, sup_levels, res_levels)
+    sup_levels, res_levels, last_close = get_support_resistance(dfc, look=CHART_LOOKBACK, window=3, max_levels=3)
+    # pick NEAREST 2 levels TOTAL (support or resistance)
+    combined = [(lvl, 'res') for lvl in res_levels] + [(lvl, 'sup') for lvl in sup_levels]
+    combined.sort(key=lambda x: abs(x[0] - last_close))
+    nearest2 = combined[:2]
+    return (dfc, last, chg30, nearest2)
 
 def fetch_all_daily(tickers):
     out = {t: None for t in tickers}
@@ -204,7 +210,7 @@ def fetch_all_daily(tickers):
     return out
 
 # -------- Draw card --------
-def draw_card(d, box, ticker, df, last, chg30, sup_levels, res_levels):
+def draw_card(d, box, ticker, df, last, chg30, nearest_levels):
     x0,y0,x1,y1 = box
     # container
     d.rounded_rectangle((x0+6,y0+6,x1+6,y1+6), radius=14, fill=(230,230,230))
@@ -244,17 +250,16 @@ def draw_card(d, box, ticker, df, last, chg30, sup_levels, res_levels):
         if bot-top<2: bot=top+2
         d.rectangle((cx-body//2, top, cx+body//2, bot), fill=col)
 
-    # --- Support & Resistance lines (no price labels) ---
-    def draw_level(y_val, color, width=3):
+    # --- Nearest 2 S/R lines (fainter, no labels) ---
+    def draw_level(y_val, kind):
         y = clamp(y_map(y_val, vmin, vmax, cy0, cy1), cy0, cy1)
-        d.line([(cx0, y), (cx1, y)], fill=color, width=width)
+        col = SR_RES_COL if kind == 'res' else SR_SUP_COL
+        d.line([(cx0, y), (cx1, y)], fill=col, width=SR_WIDTH)
 
-    for r in res_levels:  # resistance first (red)
-        draw_level(r, DOWN_COL, width=3)
-    for s in sup_levels:  # support (green)
-        draw_level(s, UP_COL, width=3)
+    for lvl, kind in nearest_levels:
+        draw_level(lvl, kind)
 
-    d.text((cx0, cy1+4), f"{CHART_LOOKBACK} daily bars • support/resistance", fill=TEXT_MUT, font=F_META)
+    d.text((cx0, cy1+4), f"{CHART_LOOKBACK} daily bars • nearest 2 S/R levels", fill=TEXT_MUT, font=F_META)
 
 # -------- Page render --------
 def render_image(path, data_map):
@@ -280,8 +285,8 @@ def render_image(path, data_map):
             d.rectangle((x,y,x+12,y+card_h), fill=ACCENT)
             d.text((x+40,y+40), f"{t} – data unavailable", fill=DOWN_COL, font=F_TICK)
         else:
-            df,last,chg30,sups,ress = payload
-            draw_card(d,(x,y,x+w,y+card_h), t, df, last, chg30, sups, ress)
+            df,last,chg30,nearest = payload
+            draw_card(d,(x,y,x+w,y+card_h), t, df, last, chg30, nearest)
         y += card_h + margin
 
     d.text((64, CANVAS_H-30), "Ideas only – Not financial advice", fill=TEXT_MUT, font=F_META)
