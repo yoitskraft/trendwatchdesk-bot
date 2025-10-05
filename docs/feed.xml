@@ -1,14 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"><channel>
 <title>TrendWatchDesk – Daily</title>
-<link>https://yoitskraft.github.io/trendwatchdesk-bot/</link>
+<link>https://<your-username>.github.io/trendwatchdesk-bot/</link>
 <description>Daily image for Instagram automation.</description>
 <item>
-  <title>Ones to Watch Sun, 05 Oct 2025 19:20:55 +0100</title>
-  <link>https://yoitskraft.github.io/trendwatchdesk-bot/output/twd_20251005.png</link>
-  <guid isPermaLink="false">Sun, 05 Oct 2025 19:20:55 +0100</guid>
-  <pubDate>Sun, 05 Oct 2025 19:20:55 +0100</pubDate>
-  <enclosure url="https://yoitskraft.github.io/trendwatchdesk-bot/output/twd_20251005.png" type="image/png" />
+  <title>Ones to Watch Sun, 05 Oct 2025 19:28:39 +0100</title>
+  <link>https://<your-username>.github.io/trendwatchdesk-bot/output/twd_20251005.png</link>
+  <guid isPermaLink="false">Sun, 05 Oct 2025 19:28:39 +0100</guid>
+  <pubDate>Sun, 05 Oct 2025 19:28:39 +0100</pubDate>
+  <enclosure url="https://<your-username>.github.io/trendwatchdesk-bot/output/twd_20251005.png" type="image/png" />
   <description>Daily watchlist image.</description>
 </item>
 </channel></rss>
