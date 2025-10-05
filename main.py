@@ -16,15 +16,15 @@ CANVAS_W, CANVAS_H = 1080, 1350
 BG        = (255,255,255)
 CARD_BG   = (250,250,250)
 TEXT_MAIN = (20,20,22)
-TEXT_MUT  = (92,95,102)
+TEXT_MUT  = (160,165,175)   # lighter grey
 GRID      = (225,228,232)
-UP_COL    = (20,170,90)      # candle up / positive %
-DOWN_COL  = (230,70,70)      # candle down / negative %
-ACCENT    = (40,120,255)     # left strip
+UP_COL    = (20,170,90)     # positive
+DOWN_COL  = (230,70,70)     # negative
+ACCENT    = (40,120,255)    # left strip
 
-# Shaded S/R zone (semi-transparent)
-ZONE_FILL = (60, 120, 255, 42)   # soft blue, alpha ~16%
-ZONE_EDGE = (60, 120, 255, 96)   # slightly stronger border
+# Shaded S/R zone
+ZONE_FILL = (60, 120, 255, 42)
+ZONE_EDGE = (60, 120, 255, 96)
 
 # Data windows (DAILY)
 CHART_LOOKBACK   = 90
@@ -32,7 +32,7 @@ SUMMARY_LOOKBACK = 30
 YAHOO_PERIOD     = "1y"
 STOOQ_MAX_DAYS   = 250
 
-# Weighted random ticker pool
+# Weighted ticker pool
 POOL = {
     "NVDA": 5, "MSFT": 4, "TSLA": 3, "AMZN": 5, "META": 4, "GOOG": 4, "AMD": 3,
     "UNH": 2, "AAPL": 5, "NFLX": 2, "BABA": 2, "JPM": 2, "DIS": 2, "BA": 1,
@@ -63,11 +63,9 @@ PAGES_URL = "https://<your-username>.github.io/trendwatchdesk-bot/"
 def make_session():
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0"})
-    retry = Retry(
-        total=5, connect=5, read=5, backoff_factor=0.6,
-        status_forcelist=[429,500,502,503,504],
-        allowed_methods=["GET","POST"]
-    )
+    retry = Retry(total=5, connect=5, read=5, backoff_factor=0.6,
+                  status_forcelist=[429,500,502,503,504],
+                  allowed_methods=["GET","POST"])
     adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
     s.mount("http://", adapter); s.mount("https://", adapter)
     return s
@@ -83,12 +81,12 @@ def load_font(size=42, bold=False):
     except: return ImageFont.load_default()
 
 F_TITLE      = load_font(65,  bold=True)
-F_SUB        = load_font(30,  bold=False)   # subtitle
+F_SUB        = load_font(30,  bold=False)
 F_TICK       = load_font(54,  bold=True)
 F_NUM        = load_font(46,  bold=True)
-F_CHG        = load_font(28,  bold=True)   # smaller % text
-F_META       = load_font(22,  bold=False)  # card footer (smaller)
-F_META_PAGE  = load_font(24,  bold=False)  # bottom page disclaimer
+F_CHG        = load_font(28,  bold=True)   # % change text
+F_META       = load_font(18,  bold=False)  # smaller footer on cards
+F_META_PAGE  = load_font(24,  bold=False)  # page disclaimer
 
 # -------- Utilities --------
 def y_map(v, vmin, vmax, y0, y1):
@@ -99,7 +97,6 @@ def clamp(v, a, b): return max(a, min(b, v))
 
 # -------- Pivots & Support/Resistance --------
 def _pivot_points(arr, window=3, mode="high"):
-    """Unique local extrema pivots."""
     arr = np.asarray(arr, dtype=float); n = len(arr)
     idxs, vals = [], []
     for i in range(window, n-window):
@@ -114,10 +111,9 @@ def _pivot_points(arr, window=3, mode="high"):
     return np.array(idxs,dtype=int), np.array(vals,dtype=float)
 
 def pick_key_levels(values, last_close, max_levels=5, min_sep_ratio=0.007):
-    """Deduplicate and pick levels by recency & separation, then by proximity."""
     if len(values) == 0: return []
     chosen = []
-    for v in values[::-1]:  # recent first
+    for v in values[::-1]:
         if all(abs(v - c)/((v+c)/2.0) >= min_sep_ratio for c in chosen):
             chosen.append(float(v))
         if len(chosen) >= max_levels:
@@ -131,21 +127,17 @@ def get_support_resistance(df, look=CHART_LOOKBACK, window=3, max_levels=5):
     lows  = use["Low"].values
     closes = use["Close"].values
     last_close = float(closes[-1])
-    # pivots
     h_idx, h_val = _pivot_points(highs, window=window, mode="high")
     l_idx, l_val = _pivot_points(lows,  window=window, mode="low")
-    # recency order
     h_order = np.argsort(h_idx) if len(h_idx)>0 else []
     l_order = np.argsort(l_idx) if len(l_idx)>0 else []
     h_vals_ordered = h_val[h_order] if len(h_idx)>0 else np.array([])
     l_vals_ordered = l_val[l_order] if len(l_idx)>0 else np.array([])
-    # pick levels
     res_levels = pick_key_levels(h_vals_ordered, last_close, max_levels=max_levels)
     sup_levels = pick_key_levels(l_vals_ordered, last_close, max_levels=max_levels)
     return sup_levels, res_levels, last_close
 
 def nearest_support_resistance(sup_levels, res_levels, last_close):
-    """Closest support BELOW and closest resistance ABOVE (fallback to absolute nearest if missing)."""
     sup_below = None
     res_above = None
     if sup_levels:
@@ -220,20 +212,17 @@ def fetch_all_daily(tickers):
 # -------- Draw card --------
 def draw_card(d, img, box, ticker, df, last, chg30, sup_level, res_level):
     x0,y0,x1,y1 = box
-    # container
-    d.rounded_rectangle((x0+6,y0+6,x1+6,y1+6), radius=14, fill=(230,230,230))
-    d.rounded_rectangle((x0,y0,x1,y1), radius=14, fill=CARD_BG)
+    d.rounded_rectangle((x0+6,y0+6,x1+6,y1+6),14,fill=(230,230,230))
+    d.rounded_rectangle((x0,y0,x1,y1),14,fill=CARD_BG)
     d.rectangle((x0,y0,x0+12,y1), fill=ACCENT)
 
     pad=24; info_x=x0+pad; info_y=y0+pad
     d.text((info_x,info_y), ticker, fill=TEXT_MAIN, font=F_TICK)
     d.text((info_x,info_y+60), f"{last:,.2f} USD", fill=TEXT_MAIN, font=F_NUM)
 
-    # % text smaller + colored by sign
     chg_col = UP_COL if chg30 >= 0 else DOWN_COL
     d.text((info_x,info_y+105), f"{chg30:+.2f}% past {SUMMARY_LOOKBACK}d", fill=chg_col, font=F_CHG)
 
-    # chart area
     cx0=x0+380; cx1=x1-pad; cy0=y0+pad; cy1=y1-pad-18
     d.rectangle((cx0,cy0,cx1,cy1), fill=(255,255,255))
 
@@ -241,12 +230,10 @@ def draw_card(d, img, box, ticker, df, last, chg30, sup_level, res_level):
     n=len(df)
     step_candle=(cx1-cx0)/max(1,n); wick=max(1,int(step_candle*0.12)); body=max(3,int(step_candle*0.4))
 
-    # grid
     for gy in (0.25,0.5,0.75):
         y=int(cy0 + gy*(cy1-cy0))
         d.line([(cx0+4,y),(cx1-4,y)], fill=GRID, width=1)
 
-    # candles
     for i,row in enumerate(df.itertuples(index=False)):
         o,h,l,c = float(row.Open), float(row.High), float(row.Low), float(row.Close)
         cx=int(cx0+i*step_candle+step_candle*0.5)
@@ -260,39 +247,35 @@ def draw_card(d, img, box, ticker, df, last, chg30, sup_level, res_level):
         if bot-top<2: bot=top+2
         d.rectangle((cx-body//2, top, cx+body//2, bot), fill=col)
 
-    # --- Shaded S/R zone ---
     overlay = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0,0,0,0))
     odraw = ImageDraw.Draw(overlay)
 
     if sup_level is not None and res_level is not None:
         y_sup = clamp(y_map(sup_level, vmin, vmax, cy0, cy1), cy0, cy1)
         y_res = clamp(y_map(res_level, vmin, vmax, cy0, cy1), cy0, cy1)
-        y_top = min(y_sup, y_res)
-        y_bot = max(y_sup, y_res)
-        # ensure at least thin band if too close
+        y_top, y_bot = min(y_sup, y_res), max(y_sup, y_res)
         if abs(y_bot - y_top) < 6:
             pad_h = 3
             y_top = max(cy0, y_top - pad_h)
             y_bot = min(cy1, y_bot + pad_h)
         odraw.rectangle((cx0, y_top, cx1, y_bot), fill=ZONE_FILL, outline=ZONE_EDGE, width=1)
     else:
-        # one-sided: draw a slim band around that level
         level = sup_level if sup_level is not None else res_level
         if level is not None:
             y_mid = clamp(y_map(level, vmin, vmax, cy0, cy1), cy0, cy1)
-            band = max(4, int((cy1 - cy0) * 0.01))  # ~1% of chart height
+            band = max(4, int((cy1 - cy0) * 0.01))
             y_top = max(cy0, y_mid - band//2)
             y_bot = min(cy1, y_mid + band//2)
             odraw.rectangle((cx0, y_top, cx1, y_bot), fill=ZONE_FILL, outline=ZONE_EDGE, width=1)
 
     img.alpha_composite(overlay)
 
-    # smaller footer label on each card
-    d.text((cx0, cy1+4), f"{CHART_LOOKBACK} daily bars • shaded S/R zone", fill=TEXT_MUT, font=F_META)
+    # footer caption smaller, lighter, closer
+    d.text((cx0, cy1+2), f"{CHART_LOOKBACK} daily bars • shaded S/R zone",
+           fill=TEXT_MUT, font=F_META)
 
 # -------- Page render --------
 def render_image(path, data_map):
-    # RGBA to allow alpha compositing
     img = Image.new("RGBA", (CANVAS_W, CANVAS_H), BG + (255,))
     d = ImageDraw.Draw(img)
     d.text((64,50), "ONES TO WATCH", fill=TEXT_MAIN, font=F_TITLE)
@@ -331,53 +314,4 @@ def render_image(path, data_map):
 def write_docs(latest_filename, ts_str):
     os.makedirs(DOCS_DIR, exist_ok=True)
     html = f"""<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{BRAND_NAME} – Ones to Watch</title>
-<style>
-body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;
-      margin:0;padding:24px;background:#fff;color:#111}}
-.wrapper{{max-width:1080px;margin:0 auto;text-align:center}}
-img{{max-width:100%;height:auto;border-radius:12px;
-     box-shadow:0 10px 30px rgba(0,0,0,.08)}}
-</style></head>
-<body>
-<div class="wrapper">
-<h1>{BRAND_NAME} – Ones to Watch</h1>
-<p>Latest post image below. Subscribe via <a href="feed.xml">RSS</a>.</p>
-<img src="../output/{latest_filename}" alt="daily image"/>
-<p style="color:#666;font-size:14px">Ideas only – Not financial advice</p>
-</div>
-</body></html>"""
-    with open(os.path.join(DOCS_DIR, "index.html"), "w", encoding="utf-8") as f: f.write(html)
-
-    feed = f"""<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0">
-  <channel>
-    <title>{BRAND_NAME} – Daily</title>
-    <link>{PAGES_URL}</link>
-    <description>Daily image for Instagram automation.</description>
-    <item>
-      <title>Ones to Watch {ts_str}</title>
-      <link>{PAGES_URL}output/{latest_filename}</link>
-      <guid isPermaLink="false">{ts_str}</guid>
-      <pubDate>{ts_str}</pubDate>
-      <enclosure url="{PAGES_URL}output/{latest_filename}" type="image/png" />
-      <description>Daily watchlist image.</description>
-    </item>
-  </channel>
-</rss>"""
-    with open(os.path.join(DOCS_DIR, "feed.xml"), "w", encoding="utf-8") as f: f.write(feed)
-
-# -------- Main --------
-if __name__ == "__main__":
-    now = datetime.datetime.now(pytz.timezone(TIMEZONE))
-    datestr = now.strftime("%Y%m%d")
-    out_name = f"twd_{datestr}.png"
-    out_path = os.path.join(OUTPUT_DIR, out_name)
-
-    data_map = fetch_all_daily(TICKERS)
-    render_image(out_path, data_map)
-
-    ts_str = now.strftime("%a, %d %b %Y %H:%M:%S %z")
-    write_docs(out_name, ts_str)
-    print("done:", out_path)
+<meta name="viewport" content="width=device-width,initial-scale
