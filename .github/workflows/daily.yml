@@ -33,7 +33,7 @@ jobs:
       - name: Run generator
         env:
           TZ: Europe/London
-          PAGES_BASE: https://<your-username>.github.io/trendwatchdesk-bot
+          PAGES_BASE: https://yoitskraft.github.io/trendwatchdesk-bot
         run: python main.py
 
       - name: Commit outputs
