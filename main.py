@@ -18,16 +18,16 @@ CARD_BG   = (250,250,250)
 TEXT_MAIN = (20,20,22)
 TEXT_MUT  = (92,95,102)
 GRID      = (225,228,232)
-UP_COL    = (20,170,90)     # bullish
-DOWN_COL  = (230,70,70)     # bearish
-HOLD_COL  = (130,130,130)
+UP_COL    = (20,170,90)     # lows / support (green)
+DOWN_COL  = (230,70,70)     # highs / resistance (red)
+ACCENT    = (40,120,255)    # neutral accent for left strip
 
-# Data & chart windows (DAILY)
-CHART_LOOKBACK = 90     # days shown in mini-chart & used for trendlines
-SUMMARY_LOOKBACK = 30   # for % change line + signal
-PROJECTION_DAYS = 7     # projected trendlines forward days
-YAHOO_PERIOD    = "1y"  # ensure enough data for daily candles
-STOOQ_MAX_DAYS  = 250   # fetch and slice
+# Data windows (DAILY)
+CHART_LOOKBACK   = 90     # days shown in chart & used for trendlines/pivots
+SUMMARY_LOOKBACK = 30     # for % change note
+PROJECTION_DAYS  = 7      # projected trendlines forward days
+YAHOO_PERIOD     = "1y"   # ensure enough data for daily candles
+STOOQ_MAX_DAYS   = 250    # fetch and slice
 
 # Weighted random ticker pool
 POOL = {
@@ -55,7 +55,7 @@ TICKERS = weighted_sample(POOL, N_TICKERS, seed=today_seed)
 OUTPUT_DIR= "output"
 DOCS_DIR  = "docs"
 LOGO_PATH = "assets/logo.png"
-PAGES_URL = "https://yoitskraft.github.io/trendwatchdesk-bot/"
+PAGES_URL = "https://<your-username>.github.io/trendwatchdesk-bot/"
 
 # -------- HTTP session --------
 def make_session():
@@ -63,7 +63,7 @@ def make_session():
     s.headers.update({"User-Agent": "Mozilla/5.0"})
     retry = Retry(
         total=5, connect=5, read=5, backoff_factor=0.6,
-        status_forcelist=[429, 500, 502, 503, 504],
+        status_forcelist=[429,500,502,503,504],
         allowed_methods=["GET","POST"]
     )
     adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
@@ -86,10 +86,33 @@ F_TICK  = load_font(54,  bold=True)
 F_NUM   = load_font(46,  bold=True)
 F_CHG   = load_font(34,  bold=True)
 F_META  = load_font(24,  bold=False)
-F_TAG   = load_font(30,  bold=True)
-F_BADGE = load_font(26,  bold=True)
 
-# -------- Indicators --------
+# -------- Utilities --------
+def y_map(v, vmin, vmax, y0, y1):
+    if vmax - vmin < 1e-6: return (y0 + y1)//2
+    return int(y1 - (v - vmin) * (y1 - y0) / (vmax - vmin))
+
+def clamp(v, a, b): return max(a, min(b, v))
+
+def draw_dashed_line(d, pts, color, width=3, dash_len=8, gap_len=6, clip=None):
+    if len(pts) < 2: return
+    if clip is not None: x0c,y0c,x1c,y1c = clip
+    for i in range(len(pts)-1):
+        x0,y0=pts[i]; x1,y1=pts[i+1]
+        if clip is not None:
+            y0 = clamp(y0, y0c, y1c); y1 = clamp(y1, y0c, y1c)
+            x0 = clamp(x0, x0c, x1c); x1 = clamp(x1, x0c, x1c)
+        dx,dy=x1-x0,y1-y0; dist=(dx*dx+dy*dy)**0.5
+        if dist<=0.5: continue
+        ux,uy=dx/dist,dy/dist; step=dash_len+gap_len
+        nsteps=int(dist//step)+1
+        for k in range(nsteps):
+            start=k*step; end=min(start+dash_len,dist)
+            xs,ys=x0+ux*start, y0+uy*start
+            xe,ye=x0+ux*end,   y0+uy*end
+            d.line([(xs,ys),(xe,ye)], fill=color, width=width)
+
+# -------- Indicators (for 30d % text only) --------
 def rsi(series, period=14):
     s = pd.Series(series).dropna()
     if len(s) < period + 1: return None
@@ -101,20 +124,7 @@ def rsi(series, period=14):
     out = 100.0 - (100.0 / (1.0 + rs))
     return float(out.iloc[-1])
 
-def ema_series(series, span):
-    return pd.Series(series).ewm(span=span, adjust=False).mean()
-
-def recommend_signal(close_series):
-    s = pd.Series(close_series).dropna()
-    if len(s) < 25: return "HOLD"
-    ema10 = ema_series(s, 10).iloc[-1]
-    ema20 = ema_series(s, 20).iloc[-1]
-    r     = rsi(s, 14)
-    if ema10 > ema20 and (r is None or r <= 65): return "BUY"
-    if ema10 < ema20 or (r is not None and r >= 70): return "SELL"
-    return "HOLD"
-
-# -------- Trendlines (pivot-based) --------
+# -------- Trendlines (pivot-based) & pivots --------
 def _pivot_points(arr, window=3, mode="high"):
     arr = np.asarray(arr, dtype=float); n = len(arr)
     idxs, vals = [], []
@@ -158,14 +168,16 @@ def calc_trendlines(df, look=CHART_LOOKBACK, window=3, max_points=5, extend=PROJ
     high_fit = np.maximum(high_fit, mid + sep)
 
     return {"x_idx": x_proj, "low_fit": low_fit, "high_fit": high_fit,
-            "last_close": closes[-1], "n_hist": len(x_hist)}
+            "last_close": closes[-1], "n_hist": len(x_hist),
+            "pivot_high_idx": h_idx, "pivot_high_val": h_val,
+            "pivot_low_idx":  l_idx, "pivot_low_val":  l_val}
 
 # -------- Data (DAILY) --------
 def to_stooq_symbol(t): return f"{t.lower()}.us"
 
 def fetch_stooq_daily(t):
     try:
-        url = f"https://stooq.com/q/d/l/?s={to_stooq_symbol(t)}&i=d"  # daily
+        url = f"https://stooq.com/q/d/l/?s={to_stooq_symbol(t)}&i=d"
         r = SESS.get(url, timeout=10); r.raise_for_status()
         df = pd.read_csv(io.StringIO(r.text))
         if df is None or df.empty: return None
@@ -204,8 +216,7 @@ def clean_and_summarize(df):
     dfs = df.iloc[-SUMMARY_LOOKBACK:].copy()
     last = float(dfc["Close"].iloc[-1])
     chg30 = (last/float(dfs["Close"].iloc[0]) - 1.0) * 100.0 if len(dfs)>1 else 0.0
-    sig = recommend_signal(dfs["Close"].values if len(dfs)>1 else dfc["Close"].values)
-    return (dfc, last, chg30, sig)
+    return (dfc, last, chg30)
 
 def fetch_all_daily(tickers):
     out = {t: None for t in tickers}
@@ -216,61 +227,53 @@ def fetch_all_daily(tickers):
         time.sleep(2.0)
     return out
 
-# -------- Drawing helpers --------
-def y_map(v, vmin, vmax, y0, y1):
-    if vmax - vmin < 1e-6: return (y0 + y1)//2
-    return int(y1 - (v - vmin) * (y1 - y0) / (vmax - vmin))
-
-def clamp(v, a, b): return max(a, min(b, v))
-
-def draw_dashed_line(d, pts, color, width=3, dash_len=8, gap_len=6, clip=None):
-    if len(pts) < 2: return
-    if clip is not None: x0c,y0c,x1c,y1c = clip
-    for i in range(len(pts)-1):
-        x0,y0=pts[i]; x1,y1=pts[i+1]
-        if clip is not None:
-            y0 = clamp(y0, y0c, y1c); y1 = clamp(y1, y0c, y1c)
-            x0 = clamp(x0, x0c, x1c); x1 = clamp(x1, x0c, x1c)
-        dx,dy=x1-x0,y1-y0; dist=(dx*dx+dy*dy)**0.5
-        if dist<=0.5: continue
-        ux,uy=dx/dist,dy/dist; step=dash_len+gap_len
-        nsteps=int(dist//step)+1
-        for k in range(nsteps):
-            start=k*step; end=min(start+dash_len,dist)
-            xs,ys=x0+ux*start, y0+uy*start
-            xe,ye=x0+ux*end,   y0+uy*end
-            d.line([(xs,ys),(xe,ye)], fill=color, width=width)
-
-def draw_pill_badge(d, x, y, text, fill, font):
-    # Rounded pill with white text
-    tw, th = d.textbbox((0,0), text, font=font)[2:]
-    padx, pady = 10, 6
-    d.rounded_rectangle((x, y, x + tw + 2*padx, y + th + 2*pady), radius=10, fill=fill)
-    d.text((x + padx, y + pady), text, fill=(255,255,255), font=font)
+# -------- Swing labels --------
+def draw_swing_labels(d, cx0, cy0, cx1, cy1, vmin, vmax, piv_idx, piv_val, color, step, n_hist, side="high"):
+    """
+    Label last 3 swing highs/lows with price. Draw a small dot and a tight label.
+    side: 'high' uses label above, 'low' uses label below to avoid overlap with wick.
+    """
+    if len(piv_idx) == 0: return
+    sel = np.argsort(piv_idx)[-3:]  # last 3 pivots
+    for i in sel:
+        idx = int(piv_idx[i])
+        if idx >= n_hist:  # only label within historical window
+            continue
+        cx = int(cx0 + idx*step + step*0.5)
+        if cx < cx0 or cx > cx1: continue
+        py = clamp(y_map(float(piv_val[i]), vmin, vmax, cy0, cy1), cy0, cy1)
+        # dot
+        r = 5
+        d.ellipse((cx-r, py-r, cx+r, py+r), fill=color)
+        # label
+        price_txt = f"{float(piv_val[i]):,.2f}"
+        tw, th = d.textbbox((0,0), price_txt, font=F_META)[2:]
+        pad = 6
+        if side == "high":
+            lx, ly = cx - tw//2, py - th - 10
+        else:
+            lx, ly = cx - tw//2, py + 10
+        # keep inside chart
+        lx = clamp(lx, cx0+4, cx1 - tw - 4)
+        ly = clamp(ly, cy0+2, cy1 - th - 2)
+        d.rounded_rectangle((lx-pad, ly-pad, lx+tw+pad, ly+th+pad), radius=6, fill=(255,255,255))
+        d.text((lx, ly), price_txt, fill=color, font=F_META)
 
 # -------- Draw card --------
-def draw_card(d, box, ticker, df, last, chg30, sig):
+def draw_card(d, box, ticker, df, last, chg30):
     x0,y0,x1,y1 = box
     # container
     d.rounded_rectangle((x0+6,y0+6,x1+6,y1+6), radius=14, fill=(230,230,230))
     d.rounded_rectangle((x0,y0,x1,y1), radius=14, fill=CARD_BG)
-
-    # signal color + left strip
-    strip_col = {"BUY":UP_COL,"SELL":DOWN_COL,"HOLD":HOLD_COL}[sig]
-    d.rectangle((x0,y0,x0+12,y1), fill=strip_col)
+    # neutral accent strip
+    d.rectangle((x0,y0,x0+12,y1), fill=ACCENT)
 
     pad=24; info_x=x0+pad; info_y=y0+pad
-    # Ticker
     d.text((info_x,info_y), ticker, fill=TEXT_MAIN, font=F_TICK)
-    # Sig badge (keeps color consistent with strip)
-    tick_w = d.textbbox((0,0), ticker, font=F_TICK)[2]
-    draw_pill_badge(d, info_x + tick_w + 14, info_y + 6, sig, strip_col, F_BADGE)
-
-    # Price + % (percent in signal color so visuals match the recommendation)
     d.text((info_x,info_y+60), f"{last:,.2f} USD", fill=TEXT_MAIN, font=F_NUM)
-    d.text((info_x,info_y+105), f"{chg30:+.2f}% past {SUMMARY_LOOKBACK}d", fill=strip_col, font=F_CHG)
+    d.text((info_x,info_y+105), f"{chg30:+.2f}% past {SUMMARY_LOOKBACK}d", fill=TEXT_MUT, font=F_CHG)
 
-    # chart area (daily candles)
+    # chart area
     cx0=x0+380; cx1=x1-pad; cy0=y0+pad; cy1=y1-pad-18
     d.rectangle((cx0,cy0,cx1,cy1), fill=(255,255,255))
 
@@ -278,6 +281,7 @@ def draw_card(d, box, ticker, df, last, chg30, sig):
     n=len(df)
     step_candle=(cx1-cx0)/max(1,n); wick=max(1,int(step_candle*0.12)); body=max(3,int(step_candle*0.4))
 
+    # grid
     for gy in (0.25,0.5,0.75):
         y=int(cy0 + gy*(cy1-cy0))
         d.line([(cx0+4,y),(cx1-4,y)], fill=GRID, width=1)
@@ -296,12 +300,15 @@ def draw_card(d, box, ticker, df, last, chg30, sig):
         if bot-top<2: bot=top+2
         d.rectangle((cx-body//2, top, cx+body//2, bot), fill=col)
 
-    # trendlines (daily, 90-day window) + projection
+    # trendlines (daily, 90d) + projection
     tl = calc_trendlines(df, look=CHART_LOOKBACK, window=3, max_points=5, extend=PROJECTION_DAYS)
     if tl:
         x_idx, low_fit, high_fit = tl["x_idx"], tl["low_fit"], tl["high_fit"]
         n_hist, last_close = tl["n_hist"], tl["last_close"]
+        ph_i, ph_v = tl["pivot_high_idx"], tl["pivot_high_val"]
+        pl_i, pl_v = tl["pivot_low_idx"],  tl["pivot_low_val"]
 
+        # trendline step includes projection so dashed ends at cx1
         step_tr = (cx1-cx0)/max(1,len(x_idx))
         low_pts, high_pts = [], []
         for i in range(len(x_idx)):
@@ -319,24 +326,17 @@ def draw_card(d, box, ticker, df, last, chg30, sig):
             d.line(high_pts[:max(2,n_hist)], fill=DOWN_COL, width=3)
             draw_dashed_line(d, high_pts[max(1,n_hist-1):], DOWN_COL, width=3, clip=clip_box)
 
-        # badge (small, fixed in top padding so it never overlaps candles)
-        last_y_high = high_fit[n_hist-1]; last_y_low = low_fit[n_hist-1]
-        bullish = last_close > last_y_high; bearish = last_close < last_y_low
-        if bullish:
-            draw_pill_badge(d, cx0+10, cy0+8, "Bullish breakout ↑", UP_COL, F_BADGE)
-        elif bearish:
-            draw_pill_badge(d, cx0+10, cy0+8, "Bearish breakdown ↓", DOWN_COL, F_BADGE)
+        # swing price labels (last 3 highs in red, last 3 lows in green)
+        draw_swing_labels(d, cx0, cy0, cx1, cy1, vmin, vmax, ph_i, ph_v, DOWN_COL, step_candle, n_hist, side="high")
+        draw_swing_labels(d, cx0, cy0, cx1, cy1, vmin, vmax, pl_i, pl_v, UP_COL,   step_candle, n_hist, side="low")
 
-    d.text((cx0, cy1+4), f"{CHART_LOOKBACK} daily bars + projected trendlines", fill=TEXT_MUT, font=F_META)
+    d.text((cx0, cy1+4), f"{CHART_LOOKBACK} daily bars • trendlines • swing prices", fill=TEXT_MUT, font=F_META)
 
 # -------- Page render --------
 def render_image(path, data_map):
     img = Image.new("RGB", (CANVAS_W, CANVAS_H), BG); d = ImageDraw.Draw(img)
     d.text((64,50), "ONES TO WATCH", fill=TEXT_MAIN, font=F_TITLE)
-    d.text((64,120), "Daily charts • trendlines & breakouts", fill=TEXT_MUT, font=F_SUB)
-    d.text((64,165), "BUY",  fill=UP_COL,   font=F_TAG)
-    d.text((160,165), "SELL", fill=DOWN_COL, font=F_TAG)
-    d.text((290,165), "HOLD", fill=HOLD_COL, font=F_TAG)
+    d.text((64,120), "Daily charts • trendlines • swing levels", fill=TEXT_MUT, font=F_SUB)
 
     if os.path.exists(LOGO_PATH):
         try:
@@ -353,11 +353,11 @@ def render_image(path, data_map):
         if not payload:
             d.rounded_rectangle((x+6,y+6,x+w+6,y+card_h+6),14,fill=(230,230,230))
             d.rounded_rectangle((x,y,x+w,y+card_h),14,fill=CARD_BG)
-            d.rectangle((x,y,x+12,y+card_h), fill=HOLD_COL)
+            d.rectangle((x,y,x+12,y+card_h), fill=ACCENT)
             d.text((x+40,y+40), f"{t} – data unavailable", fill=DOWN_COL, font=F_TICK)
         else:
-            df,last,chg30,sig = payload
-            draw_card(d,(x,y,x+w,y+card_h), t, df, last, chg30, sig)
+            df,last,chg30 = payload
+            draw_card(d,(x,y,x+w,y+card_h), t, df, last, chg30)
         y += card_h + margin
 
     d.text((64, CANVAS_H-30), "Ideas only – Not financial advice", fill=TEXT_MUT, font=F_META)
