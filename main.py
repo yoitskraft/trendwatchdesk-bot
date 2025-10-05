@@ -17,10 +17,9 @@ CARD_BG   = (250,250,250)
 TEXT_MAIN = (20,20,22)
 TEXT_MUT  = (92,95,102)
 GRID      = (225,228,232)
-UP_COL    = (20,170,90)
-DOWN_COL  = (230,70,70)
+UP_COL    = (20,170,90)     # bullish
+DOWN_COL  = (230,70,70)     # bearish
 HOLD_COL  = (130,130,130)
-SUPPORT   = (0,0,0)
 
 # ---------- Weighted random ticker pool ----------
 POOL = {
@@ -48,22 +47,21 @@ TICKERS = weighted_sample(POOL, N_TICKERS, seed=today_seed)
 
 OUTPUT_DIR= "output"
 DOCS_DIR  = "docs"
-LOGO_PATH = "assets/logo.png"            # optional
+LOGO_PATH = "assets/logo.png"
 PAGES_URL = "https://<your-username>.github.io/trendwatchdesk-bot/"
 
 # -------- HTTP session --------
 def make_session():
     s = requests.Session()
     s.headers.update({
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0"
     })
     retry = Retry(
         total=5, connect=5, read=5, backoff_factor=0.6,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET", "POST"]
     )
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
+    adapter = HTTPAdapter(max_retries=retry)
     s.mount("http://", adapter)
     s.mount("https://", adapter)
     return s
@@ -105,31 +103,44 @@ def rsi(series, period=14):
 def ema_series(series, span):
     return pd.Series(series).ewm(span=span, adjust=False).mean()
 
-def support_level(df, look=30):
-    if df is None or df.empty: return None
-    return float(df["Low"].iloc[-look:].min())
-
-def resistance_level(df, look=30):
-    if df is None or df.empty: return None
-    return float(df["High"].iloc[-look:].max())
-
-def recommend_signal(close_series, sup):
+def recommend_signal(close_series):
     s = pd.Series(close_series).dropna()
     if len(s) < 25: return "HOLD"
     ema10 = ema_series(s, 10).iloc[-1]
     ema20 = ema_series(s, 20).iloc[-1]
-    last  = float(s.iloc[-1])
     r     = rsi(s, 14)
-    prox = None if not sup else (last - sup) / sup * 100.0
-    up, dn = (ema10 > ema20), (ema10 < ema20)
-    ob, ok = (r is not None and r >= 70), (r is not None and 40 <= r <= 65)
-    if up and ok and (prox is None or prox <= 1.5): return "BUY"
-    if dn or ob or (prox is not None and prox < -1.5): return "SELL"
+    if ema10 > ema20 and (r is None or r <= 65): return "BUY"
+    if ema10 < ema20 or (r is not None and r >= 70): return "SELL"
     return "HOLD"
 
+# --- Trendline calc with projection
+def calc_trendlines(df, look=30, extend=5):
+    if df is None or len(df) < 10: return None
+    use = df.iloc[-look:].copy()
+    highs = use["High"].values
+    lows  = use["Low"].values
+    closes = use["Close"].values
+    n = len(use)
+    if n < 10: return None
+    x = np.arange(n)
+    try:
+        a_low,  b_low  = np.polyfit(x, lows,  1)
+        a_high, b_high = np.polyfit(x, highs, 1)
+        x_proj = np.arange(n + extend)
+        low_fit  = a_low  * x_proj + b_low
+        high_fit = a_high * x_proj + b_high
+        return {
+            "x_idx": x_proj,
+            "low_fit": low_fit,
+            "high_fit": high_fit,
+            "last_close": closes[-1],
+            "n_hist": n
+        }
+    except Exception:
+        return None
+
 # -------- Data sources --------
-def to_stooq_symbol(t):
-    return f"{t.lower()}.us"
+def to_stooq_symbol(t): return f"{t.lower()}.us"
 
 def fetch_stooq(t):
     sym = to_stooq_symbol(t)
@@ -138,17 +149,14 @@ def fetch_stooq(t):
         r = SESS.get(url, timeout=10)
         r.raise_for_status()
         df = pd.read_csv(io.StringIO(r.text))
-        if df is None or df.empty: 
-            return None
+        if df is None or df.empty: return None
         df = df.rename(columns=str.title)
         keep = [c for c in ["Open","High","Low","Close","Date"] if c in df.columns]
-        if len(keep) < 4:
-            return None
+        if len(keep) < 4: return None
         df = df[keep].dropna()
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         df = df.dropna(subset=["Date"]).set_index("Date").sort_index()
-        df = df.iloc[-60:]
-        return df
+        return df.iloc[-60:]
     except Exception as e:
         print(f"[warn] Stooq fetch failed for {t}: {e}")
         return None
@@ -157,14 +165,14 @@ def fetch_yahoo(t, tries=4, base_sleep=1.5):
     for k in range(tries):
         try:
             df = yf.download(
-                tickers=t, period="45d", interval="1d",
+                tickers=t, period="60d", interval="1d",
                 auto_adjust=False, progress=False, session=SESS
             )
             if df is not None and not df.empty:
                 return df
         except Exception as e:
             msg = str(e)
-            if "429" in msg or "Too Many Requests" in msg:
+            if "429" in msg:
                 wait = base_sleep * (k + 1) * 2
                 print(f"[429] Yahoo rate limited for {t}, waiting {wait:.1f}s…")
                 time.sleep(wait)
@@ -175,20 +183,15 @@ def fetch_yahoo(t, tries=4, base_sleep=1.5):
 
 def clean_and_summarize(df):
     cols = [c for c in ["Open","High","Low","Close"] if c in df.columns]
-    if len(cols) < 4: 
-        return None
+    if len(cols) < 4: return None
     df = df[["Open","High","Low","Close"]].dropna()
-    if df.empty: 
-        return None
+    if df.empty: return None
     df30 = df.iloc[-30:].copy()
-    if df30.empty: 
-        return None
+    if df30.empty: return None
     last = float(df30["Close"].iloc[-1])
     chg30 = (last/float(df30["Close"].iloc[0]) - 1.0) * 100.0
-    sup = support_level(df30, 30)
-    res = resistance_level(df30, 30)
-    sig = recommend_signal(df30["Close"].values, sup)
-    return (df30, last, chg30, sup, res, sig)
+    sig = recommend_signal(df30["Close"].values)
+    return (df30, last, chg30, sig)
 
 def fetch_all_30d(tickers):
     out = {t: None for t in tickers}
@@ -206,20 +209,7 @@ def y_map(v, vmin, vmax, y0, y1):
     if vmax - vmin < 1e-6: return (y0+y1)//2
     return int(y1 - (v - vmin) * (y1 - y0) / (vmax - vmin))
 
-def draw_dashed_line(d, p0, p1, color, width=2, dash_len=10, gap_len=6):
-    x0,y0 = p0; x1,y1 = p1
-    if y0 == y1:
-        x = x0
-        while x < x1:
-            d.line([(x, y0), (min(x+dash_len, x1), y1)], fill=color, width=width)
-            x += dash_len + gap_len
-    else:
-        y = y0
-        while y < y1:
-            d.line([(x0, y), (x1, min(y+dash_len, y1))], fill=color, width=width)
-            y += dash_len + gap_len
-
-def draw_card(d, box, ticker, df, last, chg30, sup, res, sig):
+def draw_card(d, box, ticker, df, last, chg30, sig):
     x0,y0,x1,y1 = box
     d.rounded_rectangle((x0+6,y0+6,x1+6,y1+6), radius=14, fill=(230,230,230))
     d.rounded_rectangle((x0,y0,x1,y1), radius=14, fill=CARD_BG)
@@ -238,9 +228,11 @@ def draw_card(d, box, ticker, df, last, chg30, sup, res, sig):
     d.rectangle((cx0,cy0,cx1,cy1), fill=(255,255,255))
     vmin=float(df["Low"].min()); vmax=float(df["High"].max())
     n=len(df); step=(cx1-cx0)/max(1,n); wick=max(1,int(step*0.12)); body=max(3,int(step*0.4))
+
     for gy in (0.25,0.5,0.75):
         y=int(cy0 + gy*(cy1-cy0))
         d.line([(cx0+4,y),(cx1-4,y)], fill=GRID, width=1)
+
     for i,row in enumerate(df.itertuples(index=False)):
         o,h,l,c = float(row.Open), float(row.High), float(row.Low), float(row.Close)
         cx=int(cx0+i*step+step*0.5)
@@ -252,35 +244,35 @@ def draw_card(d, box, ticker, df, last, chg30, sup, res, sig):
         if bot-top<2: bot=top+2
         d.rectangle((cx-body//2, top, cx+body//2, bot), fill=col)
 
-    # --- BUY (Support) level ---
-    if sup:
-        ys = y_map(sup, vmin, vmax, cy0, cy1)
-        draw_dashed_line(d, (cx0+4,ys), (cx1-70,ys), UP_COL, width=3, dash_len=12, gap_len=6)
-        label = f"BUY {sup:,.2f}"
-        tw,th = d.textbbox((0,0), label, font=F_CHG)[2:]
-        bx0 = cx1 - (tw + 20) - 8
-        by0 = max(ys - th//2 - 6, cy0 + 6); by0 = min(by0, cy1 - th - 6)
-        d.rounded_rectangle((bx0,by0,bx0+tw+20,by0+th+12), radius=8, fill=UP_COL)
-        d.text((bx0+10,by0+6), label, fill=(255,255,255), font=F_CHG)
+    tl = calc_trendlines(df, look=min(30, len(df)), extend=5)
+    if tl:
+        x_idx, low_fit, high_fit, n_hist, last_close = tl["x_idx"], tl["low_fit"], tl["high_fit"], tl["n_hist"], tl["last_close"]
+        low_pts, high_pts = [], []
+        for i in range(len(x_idx)):
+            cx = int(cx0 + i*step + step*0.5)
+            ly = y_map(low_fit[i],  vmin, vmax, cy0, cy1)
+            hy = y_map(high_fit[i], vmin, vmax, cy0, cy1)
+            low_pts.append((cx, ly))
+            high_pts.append((cx, hy))
+        if len(low_pts) >= 2:
+            d.line(low_pts[:n_hist], fill=UP_COL, width=3)
+            d.line(low_pts[n_hist-1:], fill=UP_COL, width=3, dash=(8,6))
+        if len(high_pts) >= 2:
+            d.line(high_pts[:n_hist], fill=DOWN_COL, width=3)
+            d.line(high_pts[n_hist-1:], fill=DOWN_COL, width=3, dash=(8,6))
 
-    # --- SELL (Resistance) level ---
-    if res:
-        yr = y_map(res, vmin, vmax, cy0, cy1)
-        draw_dashed_line(d, (cx0+4,yr), (cx1-70,yr), DOWN_COL, width=3, dash_len=12, gap_len=6)
-        rlabel = f"SELL {res:,.2f}"
-        rtw,rth = d.textbbox((0,0), rlabel, font=F_CHG)[2:]
-        rbx0 = cx1 - (rtw + 20) - 8
-        rby0 = max(yr - rth//2 - 6, cy0 + 6); rby0 = min(rby0, cy1 - rth - 6)
-        d.rounded_rectangle((rbx0,rby0,rbx0+rtw+20,rby0+rth+12), radius=8, fill=DOWN_COL)
-        d.text((rbx0+10,rby0+6), rlabel, fill=(255,255,255), font=F_CHG)
+        if last_close > high_fit[n_hist-1]:
+            d.text((cx0+10, cy0+10), "Bullish breakout ↑", fill=UP_COL, font=F_CHG)
+        elif last_close < low_fit[n_hist-1]:
+            d.text((cx0+10, cy0+10), "Bearish breakdown ↓", fill=DOWN_COL, font=F_CHG)
 
-    d.text((cx0, cy1+4), "30 days", fill=TEXT_MUT, font=F_META)
+    d.text((cx0, cy1+4), "30 days + trendlines", fill=TEXT_MUT, font=F_META)
 
 def render_image(path, data_map):
     img = Image.new("RGB",(CANVAS_W,CANVAS_H), BG)
     d   = ImageDraw.Draw(img)
     d.text((64,50), "ONES TO WATCH", fill=TEXT_MAIN, font=F_TITLE)
-    d.text((64,120),"KEY BUY LEVELS THIS WEEK", fill=TEXT_MUT, font=F_SUB)
+    d.text((64,120),"TRENDLINES & BREAKOUTS", fill=TEXT_MUT, font=F_SUB)
     d.text((64,165),"BUY",  fill=UP_COL,   font=F_TAG)
     d.text((160,165),"SELL", fill=DOWN_COL, font=F_TAG)
     d.text((290,165),"HOLD", fill=HOLD_COL, font=F_TAG)
@@ -305,8 +297,8 @@ def render_image(path, data_map):
             d.rectangle((x,y,x+12,y+card_h), fill=HOLD_COL)
             d.text((x+40,y+40), f"{t} – data unavailable", fill=DOWN_COL, font=F_TICK)
         else:
-            df,last,chg30,sup,res,sig = payload
-            draw_card(d,(x,y,x+w,y+card_h),t,df,last,chg30,sup,res,sig)
+            df,last,chg30,sig = payload
+            draw_card(d,(x,y,x+w,y+card_h),t,df,last,chg30,sig)
         y+=card_h+margin
 
     d.text((64, CANVAS_H-30), "Ideas only – Not financial advice", fill=TEXT_MUT, font=F_META)
@@ -337,24 +329,4 @@ img{{max-width:100%;height:auto;border-radius:12px;box-shadow:0 10px 30px rgba(0
 <description>Daily image for Instagram automation.</description>
 <item>
   <title>Ones to Watch {ts_str}</title>
-  <link>{PAGES_URL}output/{latest_filename}</link>
-  <guid isPermaLink="false">{ts_str}</guid>
-  <pubDate>{ts_str}</pubDate>
-  <enclosure url="{PAGES_URL}output/{latest_filename}" type="image/png" />
-  <description>Daily watchlist image.</description>
-</item>
-</channel></rss>"""
-    with open(os.path.join(DOCS_DIR,"feed.xml"),"w",encoding="utf-8") as f: f.write(feed)
-
-if __name__ == "__main__":
-    now = datetime.datetime.now(pytz.timezone(TIMEZONE))
-    datestr = now.strftime("%Y%m%d")
-    out_name = f"twd_{datestr}.png"
-    out_path = os.path.join(OUTPUT_DIR, out_name)
-
-    data_map = fetch_all_30d(TICKERS)
-    render_image(out_path, data_map)
-
-    ts_str = now.strftime("%a, %d %b %Y %H:%M:%S %z")
-    write_docs(out_name, ts_str)
-    print("done:", out_path)
+  <link>{PAGES_URL}output/{latest
