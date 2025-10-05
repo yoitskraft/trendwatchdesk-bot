@@ -18,14 +18,13 @@ CARD_BG   = (250,250,250)
 TEXT_MAIN = (20,20,22)
 TEXT_MUT  = (92,95,102)
 GRID      = (225,228,232)
-UP_COL    = (20,170,90)     # candle up body
-DOWN_COL  = (230,70,70)     # candle down body
-ACCENT    = (40,120,255)    # neutral left strip
+UP_COL    = (20,170,90)     # candle up
+DOWN_COL  = (230,70,70)     # candle down
+ACCENT    = (40,120,255)    # left strip
 
-# Fainter S/R colors
-SR_SUP_COL = (160, 210, 175)   # lighter green
-SR_RES_COL = (240, 160, 160)   # lighter red
-SR_WIDTH   = 2                  # thinner lines
+# Shaded zone (semi-transparent)
+ZONE_FILL = (60, 120, 255, 42)   # soft blue, alpha 42/255
+ZONE_EDGE = (60, 120, 255, 96)   # slightly stronger border
 
 # Data windows (DAILY)
 CHART_LOOKBACK   = 90     # bars shown & used for pivots
@@ -116,9 +115,7 @@ def _pivot_points(arr, window=3, mode="high"):
 
 def pick_key_levels(values, last_close, max_levels=3, min_sep_ratio=0.007):
     """
-    From a list of candidate levels (floats), select up to max_levels,
-    ensuring each chosen level differs from others by at least min_sep_ratio (~0.7%).
-    Preference: most recent (values passed in recency order), then proximity to price.
+    Deduplicate and pick up to max_levels candidate levels by recency & separation.
     """
     if len(values) == 0: return []
     chosen = []
@@ -130,7 +127,7 @@ def pick_key_levels(values, last_close, max_levels=3, min_sep_ratio=0.007):
     chosen.sort(key=lambda x: abs(x - last_close))
     return chosen[:max_levels]
 
-def get_support_resistance(df, look=CHART_LOOKBACK, window=3, max_levels=3):
+def get_support_resistance(df, look=CHART_LOOKBACK, window=3, max_levels=5):
     use = df.iloc[-look:].copy()
     highs = use["High"].values
     lows  = use["Low"].values
@@ -144,10 +141,32 @@ def get_support_resistance(df, look=CHART_LOOKBACK, window=3, max_levels=3):
     l_order = np.argsort(l_idx) if len(l_idx)>0 else []
     h_vals_ordered = h_val[h_order] if len(h_idx)>0 else np.array([])
     l_vals_ordered = l_val[l_order] if len(l_idx)>0 else np.array([])
-    # pick top levels (before final nearest-2 filter)
+    # pick levels
     res_levels = pick_key_levels(h_vals_ordered, last_close, max_levels=max_levels)
     sup_levels = pick_key_levels(l_vals_ordered, last_close, max_levels=max_levels)
     return sup_levels, res_levels, last_close
+
+def nearest_support_resistance(sup_levels, res_levels, last_close):
+    """
+    Pick the closest support BELOW and closest resistance ABOVE.
+    If a side is missing, returns None for that side.
+    """
+    sup_below = None
+    res_above = None
+    if sup_levels:
+        below = [s for s in sup_levels if s <= last_close]
+        if below:
+            sup_below = max(below, key=lambda s: s)  # nearest from below
+    if res_levels:
+        above = [r for r in res_levels if r >= last_close]
+        if above:
+            res_above = min(above, key=lambda r: r)  # nearest from above
+    # If neither side satisfies strictly below/above, fall back to nearest overall
+    if sup_below is None and sup_levels:
+        sup_below = min(sup_levels, key=lambda s: abs(s - last_close))
+    if res_above is None and res_levels:
+        res_above = min(res_levels, key=lambda r: abs(r - last_close))
+    return sup_below, res_above
 
 # -------- Data (DAILY) --------
 def to_stooq_symbol(t): return f"{t.lower()}.us"
@@ -193,12 +212,9 @@ def clean_and_summarize(df):
     dfs = df.iloc[-SUMMARY_LOOKBACK:].copy()
     last = float(dfc["Close"].iloc[-1])
     chg30 = (last/float(dfs["Close"].iloc[0]) - 1.0) * 100.0 if len(dfs)>1 else 0.0
-    sup_levels, res_levels, last_close = get_support_resistance(dfc, look=CHART_LOOKBACK, window=3, max_levels=3)
-    # pick NEAREST 2 levels TOTAL (support or resistance)
-    combined = [(lvl, 'res') for lvl in res_levels] + [(lvl, 'sup') for lvl in sup_levels]
-    combined.sort(key=lambda x: abs(x[0] - last_close))
-    nearest2 = combined[:2]
-    return (dfc, last, chg30, nearest2)
+    sup_levels, res_levels, last_close = get_support_resistance(dfc, look=CHART_LOOKBACK, window=3, max_levels=5)
+    sup, res = nearest_support_resistance(sup_levels, res_levels, last_close)
+    return (dfc, last, chg30, sup, res)
 
 def fetch_all_daily(tickers):
     out = {t: None for t in tickers}
@@ -210,7 +226,7 @@ def fetch_all_daily(tickers):
     return out
 
 # -------- Draw card --------
-def draw_card(d, box, ticker, df, last, chg30, nearest_levels):
+def draw_card(d, img, box, ticker, df, last, chg30, sup_level, res_level):
     x0,y0,x1,y1 = box
     # container
     d.rounded_rectangle((x0+6,y0+6,x1+6,y1+6), radius=14, fill=(230,230,230))
@@ -250,27 +266,48 @@ def draw_card(d, box, ticker, df, last, chg30, nearest_levels):
         if bot-top<2: bot=top+2
         d.rectangle((cx-body//2, top, cx+body//2, bot), fill=col)
 
-    # --- Nearest 2 S/R lines (fainter, no labels) ---
-    def draw_level(y_val, kind):
-        y = clamp(y_map(y_val, vmin, vmax, cy0, cy1), cy0, cy1)
-        col = SR_RES_COL if kind == 'res' else SR_SUP_COL
-        d.line([(cx0, y), (cx1, y)], fill=col, width=SR_WIDTH)
+    # --- Shaded S/R zone ---
+    overlay = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0,0,0,0))
+    odraw = ImageDraw.Draw(overlay)
 
-    for lvl, kind in nearest_levels:
-        draw_level(lvl, kind)
+    if sup_level is not None and res_level is not None:
+        y_sup = clamp(y_map(sup_level, vmin, vmax, cy0, cy1), cy0, cy1)
+        y_res = clamp(y_map(res_level, vmin, vmax, cy0, cy1), cy0, cy1)
+        y_top = min(y_sup, y_res)
+        y_bot = max(y_sup, y_res)
+        # ensure at least thin band if too close
+        if abs(y_bot - y_top) < 6:
+            pad_h = 3
+            y_top = max(cy0, y_top - pad_h)
+            y_bot = min(cy1, y_bot + pad_h)
+        odraw.rectangle((cx0, y_top, cx1, y_bot), fill=ZONE_FILL, outline=ZONE_EDGE, width=1)
+    else:
+        # only one side found: draw a thin zone around that level (~0.3% of range)
+        level = sup_level if sup_level is not None else res_level
+        if level is not None:
+            y_mid = clamp(y_map(level, vmin, vmax, cy0, cy1), cy0, cy1)
+            band = max(4, int((cy1 - cy0) * 0.01))  # ~1% of chart height
+            y_top = max(cy0, y_mid - band//2)
+            y_bot = min(cy1, y_mid + band//2)
+            odraw.rectangle((cx0, y_top, cx1, y_bot), fill=ZONE_FILL, outline=ZONE_EDGE, width=1)
 
-    d.text((cx0, cy1+4), f"{CHART_LOOKBACK} daily bars • nearest 2 S/R levels", fill=TEXT_MUT, font=F_META)
+    # composite overlay
+    img.alpha_composite(overlay)
+
+    d.text((cx0, cy1+4), f"{CHART_LOOKBACK} daily bars • shaded S/R zone", fill=TEXT_MUT, font=F_META)
 
 # -------- Page render --------
 def render_image(path, data_map):
-    img = Image.new("RGB", (CANVAS_W, CANVAS_H), BG); d = ImageDraw.Draw(img)
+    # use RGBA so we can alpha composite the shaded zone
+    img = Image.new("RGBA", (CANVAS_W, CANVAS_H), BG + (255,))
+    d = ImageDraw.Draw(img)
     d.text((64,50), "ONES TO WATCH", fill=TEXT_MAIN, font=F_TITLE)
-    d.text((64,120), "Daily charts • key support & resistance", fill=TEXT_MUT, font=F_SUB)
+    d.text((64,120), "Daily charts • shaded support/resistance zone", fill=TEXT_MUT, font=F_SUB)
 
     if os.path.exists(LOGO_PATH):
         try:
             logo = Image.open(LOGO_PATH).convert("RGBA"); logo.thumbnail((200,200))
-            img.paste(logo, (CANVAS_W - logo.width - 56, 44), logo)
+            img.alpha_composite(logo, (CANVAS_W - logo.width - 56, 44))
         except: pass
 
     cont=(48,220,CANVAS_W-48,CANVAS_H-60); margin=28
@@ -280,18 +317,23 @@ def render_image(path, data_map):
     for t in TICKERS:
         payload = data_map.get(t)
         if not payload:
+            # card shell
             d.rounded_rectangle((x+6,y+6,x+w+6,y+card_h+6),14,fill=(230,230,230))
             d.rounded_rectangle((x,y,x+w,y+card_h),14,fill=CARD_BG)
             d.rectangle((x,y,x+12,y+card_h), fill=ACCENT)
             d.text((x+40,y+40), f"{t} – data unavailable", fill=DOWN_COL, font=F_TICK)
         else:
-            df,last,chg30,nearest = payload
-            draw_card(d,(x,y,x+w,y+card_h), t, df, last, chg30, nearest)
+            df,last,chg30,sup,res = payload
+            draw_card(d, img, (x,y,x+w,y+card_h), t, df, last, chg30, sup, res)
         y += card_h + margin
 
     d.text((64, CANVAS_H-30), "Ideas only – Not financial advice", fill=TEXT_MUT, font=F_META)
+
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    img.save(path, "PNG", optimize=True)
+    # convert to RGB for PNG save while preserving alpha over white
+    out = Image.new("RGB", img.size, (255,255,255))
+    out.paste(img, mask=img.split()[-1])
+    out.save(path, "PNG", optimize=True)
 
 # -------- Docs/RSS --------
 def write_docs(latest_filename, ts_str):
