@@ -16,15 +16,17 @@ CANVAS_W, CANVAS_H = 1080, 1350
 BG        = (255,255,255)
 CARD_BG   = (250,250,250)
 TEXT_MAIN = (20,20,22)
-TEXT_MUT  = (160,165,175)   # lighter grey
+TEXT_MUT  = (160,165,175)   # lighter grey for secondary
 GRID      = (225,228,232)
-UP_COL    = (20,170,90)     # positive
-DOWN_COL  = (230,70,70)     # negative
+UP_COL    = (20,170,90)     # positive / bullish
+DOWN_COL  = (230,70,70)     # negative / bearish
 ACCENT    = (40,120,255)    # left strip
 
-# Shaded S/R zone
-ZONE_FILL = (60, 120, 255, 42)
-ZONE_EDGE = (60, 120, 255, 96)
+# Breaker block shaded zones (semi-transparent)
+BULL_ZONE_FILL = (20, 170, 90, 45)    # green soft fill
+BULL_ZONE_EDGE = (20, 170, 90, 120)
+BEAR_ZONE_FILL = (230, 70, 70, 45)    # red soft fill
+BEAR_ZONE_EDGE = (230, 70, 70, 120)
 
 # Data windows (DAILY)
 CHART_LOOKBACK   = 90
@@ -32,7 +34,7 @@ SUMMARY_LOOKBACK = 30
 YAHOO_PERIOD     = "1y"
 STOOQ_MAX_DAYS   = 250
 
-# Weighted ticker pool
+# Weighted random ticker pool
 POOL = {
     "NVDA": 5, "MSFT": 4, "TSLA": 3, "AMZN": 5, "META": 4, "GOOG": 4, "AMD": 3,
     "UNH": 2, "AAPL": 5, "NFLX": 2, "BABA": 2, "JPM": 2, "DIS": 2, "BA": 1,
@@ -57,15 +59,17 @@ TICKERS = weighted_sample(POOL, N_TICKERS, seed=today_seed)
 OUTPUT_DIR= "output"
 DOCS_DIR  = "docs"
 LOGO_PATH = "assets/logo.png"
-PAGES_URL = "https://yoitskraft.github.io/trendwatchdesk-bot/"
+PAGES_URL = "https://<your-username>.github.io/trendwatchdesk-bot/"
 
 # -------- HTTP session --------
 def make_session():
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0"})
-    retry = Retry(total=5, connect=5, read=5, backoff_factor=0.6,
-                  status_forcelist=[429,500,502,503,504],
-                  allowed_methods=["GET","POST"])
+    retry = Retry(
+        total=5, connect=5, read=5, backoff_factor=0.6,
+        status_forcelist=[429,500,502,503,504],
+        allowed_methods=["GET","POST"]
+    )
     adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
     s.mount("http://", adapter); s.mount("https://", adapter)
     return s
@@ -84,9 +88,9 @@ F_TITLE      = load_font(65,  bold=True)
 F_SUB        = load_font(30,  bold=False)
 F_TICK       = load_font(54,  bold=True)
 F_NUM        = load_font(46,  bold=True)
-F_CHG        = load_font(28,  bold=True)   # % change text
-F_META       = load_font(18,  bold=False)  # smaller footer on cards
-F_META_PAGE  = load_font(24,  bold=False)  # page disclaimer
+F_CHG        = load_font(28,  bold=True)   # smaller % text
+F_META       = load_font(18,  bold=False)  # card footer (smaller + subtler)
+F_META_PAGE  = load_font(24,  bold=False)  # bottom page disclaimer
 
 # -------- Utilities --------
 def y_map(v, vmin, vmax, y0, y1):
@@ -95,62 +99,58 @@ def y_map(v, vmin, vmax, y0, y1):
 
 def clamp(v, a, b): return max(a, min(b, v))
 
-# -------- Pivots & Support/Resistance --------
-def _pivot_points(arr, window=3, mode="high"):
-    arr = np.asarray(arr, dtype=float); n = len(arr)
-    idxs, vals = [], []
-    for i in range(window, n-window):
-        seg = arr[i-window:i+window+1]; v = arr[i]
-        if mode == "high":
-            if v == seg.max() and np.count_nonzero(seg==v)==1:
-                idxs.append(i); vals.append(v)
-        else:
-            if v == seg.min() and np.count_nonzero(seg==v)==1:
-                idxs.append(i); vals.append(v)
-    if not idxs: return np.array([],dtype=int), np.array([],dtype=float)
-    return np.array(idxs,dtype=int), np.array(vals,dtype=float)
+# -------- Breaker blocks --------
+def find_breaker_blocks(df, look=CHART_LOOKBACK, confirm=3):
+    """
+    Identify breaker blocks in last `look` daily candles.
+    - Bullish breaker = red candle (close<open) followed by `confirm` higher closes.
+      Zone = [close, open] of the breaker candle (body).
+    - Bearish breaker = green candle (close>open) followed by `confirm` lower closes.
+      Zone = [open, close] of the breaker candle (body).
+    Returns list of dicts: {'type': 'bull'|'bear', 'low': float, 'high': float, 'idx': int}
+    """
+    blocks = []
+    data = df.iloc[-look:]
+    opens  = data["Open"].values
+    closes = data["Close"].values
+    n = len(data)
+    for i in range(n - confirm - 1):
+        o, c = float(opens[i]), float(closes[i])
+        # bearish breaker (last up candle before down move)
+        if c > o:
+            future = closes[i+1:i+1+confirm]
+            if len(future) == confirm and all(float(f) < c for f in future):
+                blocks.append({"type": "bear", "low": min(o,c), "high": max(o,c), "idx": i})
+        # bullish breaker (last down candle before up move)
+        if c < o:
+            future = closes[i+1:i+1+confirm]
+            if len(future) == confirm and all(float(f) > c for f in future):
+                blocks.append({"type": "bull", "low": min(o,c), "high": max(o,c), "idx": i})
+    return blocks
 
-def pick_key_levels(values, last_close, max_levels=5, min_sep_ratio=0.007):
-    if len(values) == 0: return []
-    chosen = []
-    for v in values[::-1]:
-        if all(abs(v - c)/((v+c)/2.0) >= min_sep_ratio for c in chosen):
-            chosen.append(float(v))
-        if len(chosen) >= max_levels:
-            break
-    chosen.sort(key=lambda x: abs(x - last_close))
-    return chosen[:max_levels]
+def nearest_breaker_zones(df, look=CHART_LOOKBACK, confirm=3):
+    """
+    Pick the nearest bullish breaker BELOW price and nearest bearish breaker ABOVE price.
+    If strict below/above not found, fall back to absolute nearest of that type.
+    """
+    data = df.iloc[-look:].copy()
+    last_price = float(data["Close"].iloc[-1])
+    blocks = find_breaker_blocks(df, look=look, confirm=confirm)
+    if not blocks:
+        return None, None
 
-def get_support_resistance(df, look=CHART_LOOKBACK, window=3, max_levels=5):
-    use = df.iloc[-look:].copy()
-    highs = use["High"].values
-    lows  = use["Low"].values
-    closes = use["Close"].values
-    last_close = float(closes[-1])
-    h_idx, h_val = _pivot_points(highs, window=window, mode="high")
-    l_idx, l_val = _pivot_points(lows,  window=window, mode="low")
-    h_order = np.argsort(h_idx) if len(h_idx)>0 else []
-    l_order = np.argsort(l_idx) if len(l_idx)>0 else []
-    h_vals_ordered = h_val[h_order] if len(h_idx)>0 else np.array([])
-    l_vals_ordered = l_val[l_order] if len(l_idx)>0 else np.array([])
-    res_levels = pick_key_levels(h_vals_ordered, last_close, max_levels=max_levels)
-    sup_levels = pick_key_levels(l_vals_ordered, last_close, max_levels=max_levels)
-    return sup_levels, res_levels, last_close
+    bulls = [b for b in blocks if b["type"] == "bull"]
+    bears = [b for b in blocks if b["type"] == "bear"]
 
-def nearest_support_resistance(sup_levels, res_levels, last_close):
-    sup_below = None
-    res_above = None
-    if sup_levels:
-        below = [s for s in sup_levels if s <= last_close]
-        if below: sup_below = max(below, key=lambda s: s)
-    if res_levels:
-        above = [r for r in res_levels if r >= last_close]
-        if above: res_above = min(above, key=lambda r: r)
-    if sup_below is None and sup_levels:
-        sup_below = min(sup_levels, key=lambda s: abs(s - last_close))
-    if res_above is None and res_levels:
-        res_above = min(res_levels, key=lambda r: abs(r - last_close))
-    return sup_below, res_above
+    sup = None
+    res = None
+    if bulls:
+        below = [b for b in bulls if b["high"] <= last_price]
+        sup = max(below, key=lambda b: b["high"]) if below else min(bulls, key=lambda b: abs((b["low"]+b["high"])/2 - last_price))
+    if bears:
+        above = [b for b in bears if b["low"] >= last_price]
+        res = min(above, key=lambda b: b["low"]) if above else min(bears, key=lambda b: abs((b["low"]+b["high"])/2 - last_price))
+    return sup, res
 
 # -------- Data (DAILY) --------
 def to_stooq_symbol(t): return f"{t.lower()}.us"
@@ -196,9 +196,10 @@ def clean_and_summarize(df):
     dfs = df.iloc[-SUMMARY_LOOKBACK:].copy()
     last = float(dfc["Close"].iloc[-1])
     chg30 = (last/float(dfs["Close"].iloc[0]) - 1.0) * 100.0 if len(dfs)>1 else 0.0
-    sup_levels, res_levels, last_close = get_support_resistance(dfc, look=CHART_LOOKBACK, window=3, max_levels=5)
-    sup, res = nearest_support_resistance(sup_levels, res_levels, last_close)
-    return (dfc, last, chg30, sup, res)
+
+    # breaker zones (nearest bull below, nearest bear above)
+    bull_zone, bear_zone = nearest_breaker_zones(dfc, look=CHART_LOOKBACK, confirm=3)
+    return (dfc, last, chg30, bull_zone, bear_zone)
 
 def fetch_all_daily(tickers):
     out = {t: None for t in tickers}
@@ -210,19 +211,21 @@ def fetch_all_daily(tickers):
     return out
 
 # -------- Draw card --------
-def draw_card(d, img, box, ticker, df, last, chg30, sup_level, res_level):
+def draw_card(d, img, box, ticker, df, last, chg30, bull_zone, bear_zone):
     x0,y0,x1,y1 = box
-    d.rounded_rectangle((x0+6,y0+6,x1+6,y1+6),14,fill=(230,230,230))
-    d.rounded_rectangle((x0,y0,x1,y1),14,fill=CARD_BG)
+    # container
+    d.rounded_rectangle((x0+6,y0+6,x1+6,y1+6), radius=14, fill=(230,230,230))
+    d.rounded_rectangle((x0,y0,x1,y1), radius=14, fill=CARD_BG)
     d.rectangle((x0,y0,x0+12,y1), fill=ACCENT)
 
+    # header info
     pad=24; info_x=x0+pad; info_y=y0+pad
     d.text((info_x,info_y), ticker, fill=TEXT_MAIN, font=F_TICK)
     d.text((info_x,info_y+60), f"{last:,.2f} USD", fill=TEXT_MAIN, font=F_NUM)
-
     chg_col = UP_COL if chg30 >= 0 else DOWN_COL
     d.text((info_x,info_y+105), f"{chg30:+.2f}% past {SUMMARY_LOOKBACK}d", fill=chg_col, font=F_CHG)
 
+    # chart area
     cx0=x0+380; cx1=x1-pad; cy0=y0+pad; cy1=y1-pad-18
     d.rectangle((cx0,cy0,cx1,cy1), fill=(255,255,255))
 
@@ -230,10 +233,12 @@ def draw_card(d, img, box, ticker, df, last, chg30, sup_level, res_level):
     n=len(df)
     step_candle=(cx1-cx0)/max(1,n); wick=max(1,int(step_candle*0.12)); body=max(3,int(step_candle*0.4))
 
+    # grid
     for gy in (0.25,0.5,0.75):
         y=int(cy0 + gy*(cy1-cy0))
         d.line([(cx0+4,y),(cx1-4,y)], fill=GRID, width=1)
 
+    # candles
     for i,row in enumerate(df.itertuples(index=False)):
         o,h,l,c = float(row.Open), float(row.High), float(row.Low), float(row.Close)
         cx=int(cx0+i*step_candle+step_candle*0.5)
@@ -247,39 +252,37 @@ def draw_card(d, img, box, ticker, df, last, chg30, sup_level, res_level):
         if bot-top<2: bot=top+2
         d.rectangle((cx-body//2, top, cx+body//2, bot), fill=col)
 
+    # --- Shaded breaker block zones ---
     overlay = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0,0,0,0))
     odraw = ImageDraw.Draw(overlay)
 
-    if sup_level is not None and res_level is not None:
-        y_sup = clamp(y_map(sup_level, vmin, vmax, cy0, cy1), cy0, cy1)
-        y_res = clamp(y_map(res_level, vmin, vmax, cy0, cy1), cy0, cy1)
-        y_top, y_bot = min(y_sup, y_res), max(y_sup, y_res)
-        if abs(y_bot - y_top) < 6:
-            pad_h = 3
-            y_top = max(cy0, y_top - pad_h)
-            y_bot = min(cy1, y_bot + pad_h)
-        odraw.rectangle((cx0, y_top, cx1, y_bot), fill=ZONE_FILL, outline=ZONE_EDGE, width=1)
-    else:
-        level = sup_level if sup_level is not None else res_level
-        if level is not None:
-            y_mid = clamp(y_map(level, vmin, vmax, cy0, cy1), cy0, cy1)
-            band = max(4, int((cy1 - cy0) * 0.01))
-            y_top = max(cy0, y_mid - band//2)
-            y_bot = min(cy1, y_mid + band//2)
-            odraw.rectangle((cx0, y_top, cx1, y_bot), fill=ZONE_FILL, outline=ZONE_EDGE, width=1)
+    # Bullish breaker (support zone) below price
+    if bull_zone is not None:
+        y1 = clamp(y_map(bull_zone["low"],  vmin, vmax, cy0, cy1), cy0, cy1)
+        y2 = clamp(y_map(bull_zone["high"], vmin, vmax, cy0, cy1), cy0, cy1)
+        odraw.rectangle((cx0, min(y1,y2), cx1, max(y1,y2)),
+                        fill=BULL_ZONE_FILL, outline=BULL_ZONE_EDGE, width=1)
+
+    # Bearish breaker (resistance zone) above price
+    if bear_zone is not None:
+        y1 = clamp(y_map(bear_zone["low"],  vmin, vmax, cy0, cy1), cy0, cy1)
+        y2 = clamp(y_map(bear_zone["high"], vmin, vmax, cy0, cy1), cy0, cy1)
+        odraw.rectangle((cx0, min(y1,y2), cx1, max(y1,y2)),
+                        fill=BEAR_ZONE_FILL, outline=BEAR_ZONE_EDGE, width=1)
 
     img.alpha_composite(overlay)
 
-    # footer caption smaller, lighter, closer
-    d.text((cx0, cy1+2), f"{CHART_LOOKBACK} daily bars • shaded S/R zone",
+    # subtle card footer
+    d.text((cx0, cy1+2), f"{CHART_LOOKBACK} daily bars • breaker block zones",
            fill=TEXT_MUT, font=F_META)
 
 # -------- Page render --------
 def render_image(path, data_map):
+    # RGBA to allow alpha compositing
     img = Image.new("RGBA", (CANVAS_W, CANVAS_H), BG + (255,))
     d = ImageDraw.Draw(img)
     d.text((64,50), "ONES TO WATCH", fill=TEXT_MAIN, font=F_TITLE)
-    d.text((64,120), "Daily charts • shaded support/resistance zone", fill=TEXT_MUT, font=F_SUB)
+    d.text((64,120), "Daily charts • breaker block zones", fill=TEXT_MUT, font=F_SUB)
 
     if os.path.exists(LOGO_PATH):
         try:
@@ -299,8 +302,8 @@ def render_image(path, data_map):
             d.rectangle((x,y,x+12,y+card_h), fill=ACCENT)
             d.text((x+40,y+40), f"{t} – data unavailable", fill=DOWN_COL, font=F_TICK)
         else:
-            df,last,chg30,sup,res = payload
-            draw_card(d, img, (x,y,x+w,y+card_h), t, df, last, chg30, sup, res)
+            df,last,chg30,bull,bear = payload
+            draw_card(d, img, (x,y,x+w,y+card_h), t, df, last, chg30, bull, bear)
         y += card_h + margin
 
     d.text((64, CANVAS_H-30), "Ideas only – Not financial advice", fill=TEXT_MUT, font=F_META_PAGE)
@@ -352,7 +355,6 @@ img{{max-width:100%;height:auto;border-radius:12px;
 </rss>"""
     with open(os.path.join(DOCS_DIR, "feed.xml"), "w", encoding="utf-8") as f:
         f.write(feed)
-
 
 # -------- Main --------
 if __name__ == "__main__":
