@@ -25,27 +25,66 @@ F_H1=load_font(72); F_H2=load_font(54); F_B=load_font(38); F_S=load_font(30)
 def universe():
     return ["AAPL","MSFT","GOOGL","AMZN","META","NVDA","AMD","TSLA","JPM","UNH","XOM","COST","WMT","ADBE","ORCL","INTC","MRK","BA","PFE"]
 
-def fetch_change(t):
-    try:
-        df = yf.Ticker(t).history(period="5d", interval="1d")
-        if len(df)<2: return None
-        last, prev = df["Close"].iloc[-1], df["Close"].iloc[-2]
-        return float((last-prev)/prev*100.0)
-    except Exception:
-        return None
+import time
+import yfinance as yf
+import pandas as pd
 
-def score():
-    rows=[]
-    for t in universe():
-        ch=fetch_change(t)
-        if ch is not None: rows.append({"ticker":t,"change":ch})
-    df=pd.DataFrame(rows).sort_values("change", ascending=False)
-    return df
+TICKERS = ["AAPL","MSFT","GOOGL","AMZN","META","NVDA","AMD","TSLA",
+           "JPM","UNH","XOM","COST","WMT","ADBE","ORCL","INTC","MRK","BA","PFE"]
 
-def select_lists(df,n=3):
-    if df.empty or len(df)<6:
-        u=universe(); import random as _r; _r.shuffle(u)
-        return u[:n], u[n:n*2]
+def score(max_retries=3, sleep_s=3):
+    # Try batch download first (2 days of data for % change)
+    for attempt in range(max_retries):
+        try:
+            df = yf.download(
+                tickers=" ".join(TICKERS),
+                period="5d", interval="1d",
+                group_by="ticker", auto_adjust=False, threads=True, progress=False
+            )
+            break
+        except Exception as e:
+            print(f"[score] batch download attempt {attempt+1} failed: {e}")
+            time.sleep(sleep_s)
+            df = None
+    if df is None or len(df) == 0:
+        print("[score] batch download empty; falling back to per-ticker fetch…")
+        rows=[]
+        for t in TICKERS:
+            try:
+                h = yf.Ticker(t).history(period="5d", interval="1d")
+                if len(h) >= 2:
+                    last, prev = float(h["Close"].iloc[-1]), float(h["Close"].iloc[-2])
+                    rows.append({"ticker": t, "change": (last-prev)/prev*100.0})
+            except Exception as e:
+                print(f"[score] fallback fetch failed for {t}: {e}")
+        return pd.DataFrame(rows).sort_values("change", ascending=False)
+
+    # Parse batch frame
+    rows = []
+    for t in TICKERS:
+        try:
+            sub = df[t]
+            if len(sub) >= 2:
+                last, prev = float(sub["Close"].iloc[-1]), float(sub["Close"].iloc[-2])
+                rows.append({"ticker": t, "change": (last - prev) / prev * 100.0})
+        except Exception as e:
+            print(f"[score] parse skipped {t}: {e}")
+    out = pd.DataFrame(rows).sort_values("change", ascending=False)
+    if out.empty:
+        print("[score] no valid rows parsed; using random fallback")
+    return out
+
+import random
+
+print("[debug] scored rows:", 0 if df is None else len(df))
+if df is not None and not df.empty:
+    print(df.head(5))
+
+def select_lists(df, n=3):
+    pool = TICKERS.copy()
+    if df is None or df.empty or len(df) < 2*n:
+        random.shuffle(pool)
+        return pool[:n], pool[n:2*n]
     return df.head(n).ticker.tolist(), df.tail(n).ticker.tolist()[::-1]
 
 def draw_image(longs, shorts, out_path):
