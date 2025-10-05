@@ -24,7 +24,7 @@ HOLD_COL  = (130,130,130)
 
 # Data & chart windows (DAILY)
 CHART_LOOKBACK = 90     # days shown in mini-chart & used for trendlines
-SUMMARY_LOOKBACK = 30   # for % change line
+SUMMARY_LOOKBACK = 30   # for % change line + signal
 PROJECTION_DAYS = 7     # projected trendlines forward days
 YAHOO_PERIOD    = "1y"  # ensure enough data for daily candles
 STOOQ_MAX_DAYS  = 250   # fetch and slice
@@ -81,7 +81,7 @@ def load_font(size=42, bold=False):
     except: return ImageFont.load_default()
 
 F_TITLE = load_font(65,  bold=True)
-F_SUB   = load_font(38,  bold=False)
+F_SUB   = load_font(30,  bold=False)   # smaller subtitle
 F_TICK  = load_font(54,  bold=True)
 F_NUM   = load_font(46,  bold=True)
 F_CHG   = load_font(34,  bold=True)
@@ -199,10 +199,8 @@ def clean_and_summarize(df):
     if len(cols) < 4: return None
     df = df[["Open","High","Low","Close"]].dropna()
     if df.empty: return None
-    # chart window = last CHART_LOOKBACK days
     dfc = df.iloc[-CHART_LOOKBACK:].copy()
     if dfc.empty or len(dfc) < 10: return None
-    # summary window = last 30 days
     dfs = df.iloc[-SUMMARY_LOOKBACK:].copy()
     last = float(dfc["Close"].iloc[-1])
     chg30 = (last/float(dfs["Close"].iloc[0]) - 1.0) * 100.0 if len(dfs)>1 else 0.0
@@ -243,20 +241,34 @@ def draw_dashed_line(d, pts, color, width=3, dash_len=8, gap_len=6, clip=None):
             xe,ye=x0+ux*end,   y0+uy*end
             d.line([(xs,ys),(xe,ye)], fill=color, width=width)
 
+def draw_pill_badge(d, x, y, text, fill, font):
+    # Rounded pill with white text
+    tw, th = d.textbbox((0,0), text, font=font)[2:]
+    padx, pady = 10, 6
+    d.rounded_rectangle((x, y, x + tw + 2*padx, y + th + 2*pady), radius=10, fill=fill)
+    d.text((x + padx, y + pady), text, fill=(255,255,255), font=font)
+
 # -------- Draw card --------
 def draw_card(d, box, ticker, df, last, chg30, sig):
     x0,y0,x1,y1 = box
     # container
     d.rounded_rectangle((x0+6,y0+6,x1+6,y1+6), radius=14, fill=(230,230,230))
     d.rounded_rectangle((x0,y0,x1,y1), radius=14, fill=CARD_BG)
-    d.rectangle((x0,y0,x0+12,y1), fill={"BUY":UP_COL,"SELL":DOWN_COL,"HOLD":HOLD_COL}[sig])
+
+    # signal color + left strip
+    strip_col = {"BUY":UP_COL,"SELL":DOWN_COL,"HOLD":HOLD_COL}[sig]
+    d.rectangle((x0,y0,x0+12,y1), fill=strip_col)
 
     pad=24; info_x=x0+pad; info_y=y0+pad
+    # Ticker
     d.text((info_x,info_y), ticker, fill=TEXT_MAIN, font=F_TICK)
+    # Sig badge (keeps color consistent with strip)
+    tick_w = d.textbbox((0,0), ticker, font=F_TICK)[2]
+    draw_pill_badge(d, info_x + tick_w + 14, info_y + 6, sig, strip_col, F_BADGE)
+
+    # Price + % (percent in signal color so visuals match the recommendation)
     d.text((info_x,info_y+60), f"{last:,.2f} USD", fill=TEXT_MAIN, font=F_NUM)
-    sign = "+" if chg30>=0 else ""
-    d.text((info_x,info_y+105), f"{sign}{chg30:.2f}% past {SUMMARY_LOOKBACK}d",
-           fill=(UP_COL if chg30>=0 else DOWN_COL), font=F_CHG)
+    d.text((info_x,info_y+105), f"{chg30:+.2f}% past {SUMMARY_LOOKBACK}d", fill=strip_col, font=F_CHG)
 
     # chart area (daily candles)
     cx0=x0+380; cx1=x1-pad; cy0=y0+pad; cy1=y1-pad-18
@@ -307,18 +319,13 @@ def draw_card(d, box, ticker, df, last, chg30, sig):
             d.line(high_pts[:max(2,n_hist)], fill=DOWN_COL, width=3)
             draw_dashed_line(d, high_pts[max(1,n_hist-1):], DOWN_COL, width=3, clip=clip_box)
 
-        # badge
+        # badge (small, fixed in top padding so it never overlaps candles)
         last_y_high = high_fit[n_hist-1]; last_y_low = low_fit[n_hist-1]
         bullish = last_close > last_y_high; bearish = last_close < last_y_low
-
-        def badge(x,y,text,fill):
-            tw,th = d.textbbox((0,0), text, font=F_BADGE)[2:]
-            padx,pady=10,6
-            d.rounded_rectangle((x,y,x+tw+2*padx,y+th+2*pady), radius=10, fill=fill)
-            d.text((x+padx,y+pady), text, fill=(255,255,255), font=F_BADGE)
-
-        if bullish: badge(cx0+10, cy0+8, "Bullish breakout ↑", UP_COL)
-        elif bearish: badge(cx0+10, cy0+8, "Bearish breakdown ↓", DOWN_COL)
+        if bullish:
+            draw_pill_badge(d, cx0+10, cy0+8, "Bullish breakout ↑", UP_COL, F_BADGE)
+        elif bearish:
+            draw_pill_badge(d, cx0+10, cy0+8, "Bearish breakdown ↓", DOWN_COL, F_BADGE)
 
     d.text((cx0, cy1+4), f"{CHART_LOOKBACK} daily bars + projected trendlines", fill=TEXT_MUT, font=F_META)
 
@@ -326,7 +333,7 @@ def draw_card(d, box, ticker, df, last, chg30, sig):
 def render_image(path, data_map):
     img = Image.new("RGB", (CANVAS_W, CANVAS_H), BG); d = ImageDraw.Draw(img)
     d.text((64,50), "ONES TO WATCH", fill=TEXT_MAIN, font=F_TITLE)
-    d.text((64,120), "DAILY CHARTS • TRENDLINES & BREAKOUTS", fill=TEXT_MUT, font=F_SUB)
+    d.text((64,120), "Daily charts • trendlines & breakouts", fill=TEXT_MUT, font=F_SUB)
     d.text((64,165), "BUY",  fill=UP_COL,   font=F_TAG)
     d.text((160,165), "SELL", fill=DOWN_COL, font=F_TAG)
     d.text((290,165), "HOLD", fill=HOLD_COL, font=F_TAG)
