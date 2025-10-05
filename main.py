@@ -84,6 +84,7 @@ F_NUM   = load_font(46,  bold=True)
 F_CHG   = load_font(34,  bold=True)
 F_META  = load_font(24,  bold=False)
 F_TAG   = load_font(30,  bold=True)
+F_BADGE = load_font(26,  bold=True)   # smaller label font
 
 # -------- TECH --------
 def rsi(series, period=14):
@@ -113,10 +114,6 @@ def recommend_signal(close_series):
 
 # -------- Trendline helpers --------
 def _pivot_points(arr, window=3, mode="high"):
-    """
-    Return indices and values of pivot highs/lows using a local window.
-    For highs: unique max in [i-window, i+window]; for lows: unique min.
-    """
     arr = np.asarray(arr, dtype=float)
     n = len(arr)
     idxs, vals = [], []
@@ -135,8 +132,7 @@ def _pivot_points(arr, window=3, mode="high"):
 
 def calc_trendlines(df, look=60, window=3, max_points=5, extend=5):
     """
-    Fit upper line to recent pivot highs and lower line to recent pivot lows.
-    Project both lines forward by `extend` points.
+    Pivot-based trendlines + projection, with ordering enforcement.
     Returns: {x_idx, low_fit, high_fit, last_close, n_hist}
     """
     if df is None or len(df) < 10: return None
@@ -189,8 +185,7 @@ def to_stooq_symbol(t): return f"{t.lower()}.us"
 def fetch_stooq(t):
     try:
         url = f"https://stooq.com/q/d/l/?s={to_stooq_symbol(t)}&i=d"
-        r = SESS.get(url, timeout=10)
-        r.raise_for_status()
+        r = SESS.get(url, timeout=10); r.raise_for_status()
         df = pd.read_csv(io.StringIO(r.text))
         if df is None or df.empty: return None
         df = df.rename(columns=str.title)
@@ -230,6 +225,7 @@ def clean_and_summarize(df):
     if df30.empty: return None
     last = float(df30["Close"].iloc[-1])
     chg30 = (last/float(df30["Close"].iloc[0]) - 1.0) * 100.0
+    # We keep using 30-day slice for the summary; trendlines use 60-day pivots.
     sig = recommend_signal(df30["Close"].values)
     return (df30, last, chg30, sig)
 
@@ -248,15 +244,24 @@ def y_map(v, vmin, vmax, y0, y1):
     if vmax - vmin < 1e-6: return (y0 + y1) // 2
     return int(y1 - (v - vmin) * (y1 - y0) / (vmax - vmin))
 
-def draw_dashed_line(d, pts, color, width=3, dash_len=8, gap_len=6):
-    """Draw a dashed polyline compatible with PIL (no dash kwarg available)."""
+def clamp(v, a, b):
+    return max(a, min(b, v))
+
+def draw_dashed_line(d, pts, color, width=3, dash_len=8, gap_len=6, clip=None):
+    """Draw a dashed polyline compatible with PIL, clipped to (x0,y0,x1,y1) if given."""
     if len(pts) < 2: return
+    if clip is not None:
+        x0c, y0c, x1c, y1c = clip
     for i in range(len(pts) - 1):
         x0, y0 = pts[i]
         x1, y1 = pts[i + 1]
+        # clip segment endpoints to vertical clip (simple clamp)
+        if clip is not None:
+            y0 = clamp(y0, y0c, y1c); y1 = clamp(y1, y0c, y1c)
+            x0 = clamp(x0, x0c, x1c); x1 = clamp(x1, x0c, x1c)
         dx, dy = x1 - x0, y1 - y0
         dist = (dx * dx + dy * dy) ** 0.5
-        if dist == 0:
+        if dist <= 0.5:
             continue
         ux, uy = dx / dist, dy / dist
         step = dash_len + gap_len
@@ -296,23 +301,25 @@ def draw_card(d, box, ticker, df, last, chg30, sig):
     vmin = float(df["Low"].min())
     vmax = float(df["High"].max())
     n = len(df)
-    step = (cx1 - cx0) / max(1, n)
-    wick = max(1, int(step * 0.12))
-    body = max(3, int(step * 0.4))
+
+    # Candle step: fit only historical 30 bars
+    step_candle = (cx1 - cx0) / max(1, n)
+    wick = max(1, int(step_candle * 0.12))
+    body = max(3, int(step_candle * 0.4))
 
     # grid
     for gy in (0.25, 0.5, 0.75):
         y = int(cy0 + gy * (cy1 - cy0))
         d.line([(cx0 + 4, y), (cx1 - 4, y)], fill=GRID, width=1)
 
-    # candles
+    # candles (clamped to chart area)
     for i, row in enumerate(df.itertuples(index=False)):
         o, h, l, c = float(row.Open), float(row.High), float(row.Low), float(row.Close)
-        cx = int(cx0 + i * step + step * 0.5)
-        yH = y_map(h, vmin, vmax, cy0, cy1)
-        yL = y_map(l, vmin, vmax, cy0, cy1)
-        yO = y_map(o, vmin, vmax, cy0, cy1)
-        yC = y_map(c, vmin, vmax, cy0, cy1)
+        cx = int(cx0 + i * step_candle + step_candle * 0.5)
+        yH = clamp(y_map(h, vmin, vmax, cy0, cy1), cy0, cy1)
+        yL = clamp(y_map(l, vmin, vmax, cy0, cy1), cy0, cy1)
+        yO = clamp(y_map(o, vmin, vmax, cy0, cy1), cy0, cy1)
+        yC = clamp(y_map(c, vmin, vmax, cy0, cy1), cy0, cy1)
         col = UP_COL if c >= o else DOWN_COL
         d.line([(cx, yH), (cx, yL)], fill=col, width=wick)
         top, bot = min(yO, yC), max(yO, yC)
@@ -322,29 +329,48 @@ def draw_card(d, box, ticker, df, last, chg30, sig):
     # trendlines with 5-day projection
     tl = calc_trendlines(df, look=60, window=3, max_points=5, extend=5)
     if tl:
-        x_idx, low_fit, high_fit, last_close, n_hist = (
-            tl["x_idx"], tl["low_fit"], tl["high_fit"], tl["last_close"], tl["n_hist"]
-        )
+        x_idx, low_fit, high_fit = tl["x_idx"], tl["low_fit"], tl["high_fit"]
+        n_hist, last_close = tl["n_hist"], tl["last_close"]
+
+        # Trendline step: include projection so the dashed segment ends at cx1
+        step_tr = (cx1 - cx0) / max(1, len(x_idx))
         low_pts, high_pts = [], []
+
         for i in range(len(x_idx)):
-            cx = int(cx0 + i * step + step * 0.5)
-            ly = y_map(low_fit[i],  vmin, vmax, cy0, cy1)
-            hy = y_map(high_fit[i], vmin, vmax, cy0, cy1)
+            cx = int(cx0 + i * step_tr + step_tr * 0.5)
+            if cx < cx0 or cx > cx1:  # clip horizontally
+                continue
+            ly = clamp(y_map(low_fit[i],  vmin, vmax, cy0, cy1), cy0, cy1)
+            hy = clamp(y_map(high_fit[i], vmin, vmax, cy0, cy1), cy0, cy1)
             low_pts.append((cx, ly))
             high_pts.append((cx, hy))
 
-        if len(low_pts) >= 2:
-            d.line(low_pts[:n_hist], fill=UP_COL, width=3)  # historical solid
-            draw_dashed_line(d, low_pts[n_hist-1:], UP_COL, width=3)  # projection dashed
-        if len(high_pts) >= 2:
-            d.line(high_pts[:n_hist], fill=DOWN_COL, width=3)
-            draw_dashed_line(d, high_pts[n_hist-1:], DOWN_COL, width=3)
+        clip_box = (cx0, cy0, cx1, cy1)
 
-        # breakout labels vs last historical fit values
-        if last_close > high_fit[n_hist - 1]:
-            d.text((cx0 + 10, cy0 + 10), "Bullish breakout ↑", fill=UP_COL, font=F_CHG)
-        elif last_close < low_fit[n_hist - 1]:
-            d.text((cx0 + 10, cy0 + 10), "Bearish breakdown ↓", fill=DOWN_COL, font=F_CHG)
+        # draw solid historical part (within chart)
+        if len(low_pts) >= 2:
+            d.line(low_pts[:max(2, n_hist)], fill=UP_COL, width=3)
+            draw_dashed_line(d, low_pts[max(1, n_hist-1):], UP_COL, width=3, clip=clip_box)
+        if len(high_pts) >= 2:
+            d.line(high_pts[:max(2, n_hist)], fill=DOWN_COL, width=3)
+            draw_dashed_line(d, high_pts[max(1, n_hist-1):], DOWN_COL, width=3, clip=clip_box)
+
+        # breakout labels vs last historical fit values — draw as small pill in top padding
+        last_y_high = high_fit[n_hist - 1]
+        last_y_low  = low_fit[n_hist - 1]
+        bullish = last_close > last_y_high
+        bearish = last_close < last_y_low
+
+        def badge(x, y, text, fill):
+            tw, th = d.textbbox((0, 0), text, font=F_BADGE)[2:]
+            padx, pady = 10, 6
+            d.rounded_rectangle((x, y, x + tw + 2*padx, y + th + 2*pady), radius=10, fill=fill)
+            d.text((x + padx, y + pady), text, fill=(255,255,255), font=F_BADGE)
+
+        if bullish:
+            badge(cx0 + 10, cy0 + 8, "Bullish breakout ↑", UP_COL)
+        elif bearish:
+            badge(cx0 + 10, cy0 + 8, "Bearish breakdown ↓", DOWN_COL)
 
     d.text((cx0, cy1 + 4), "30 days + projected trendlines", fill=TEXT_MUT, font=F_META)
 
