@@ -28,6 +28,7 @@ def load_font(size=42):
 F_H1=load_font(72); F_H2=load_font(54); F_B=load_font(38); F_S=load_font(30)
 
 def score(max_retries=3, sleep_s=3):
+    """Fetch 1-day % change for all tickers, robust to both yfinance shapes."""
     df = None
     for attempt in range(max_retries):
         try:
@@ -42,33 +43,43 @@ def score(max_retries=3, sleep_s=3):
             print(f"[score] batch download attempt {attempt+1} failed: {e}")
             time.sleep(sleep_s)
 
-    if df is None or len(df) == 0:
-        print("[score] batch download empty; falling back to per-ticker fetch…")
-        rows=[]
+    rows = []
+
+    if df is not None and len(df) > 0:
+        # Two possible shapes:
+        # 1) MultiIndex columns: (ticker, field)
+        # 2) Column-per-field with top-level tickers (older behavior)
+        for t in TICKERS:
+            try:
+                if isinstance(df.columns, pd.MultiIndex):
+                    close = df.loc[:, (t, "Close")].dropna()
+                else:
+                    # older shape: df[t] is a subframe
+                    sub = df[t] if t in df.columns.get_level_values(0) else df
+                    close = (sub["Close"] if "Close" in sub else pd.Series(dtype=float)).dropna()
+
+                if len(close) >= 2:
+                    last, prev = float(close.iloc[-1]), float(close.iloc[-2])
+                    rows.append({"ticker": t, "change": (last - prev) / prev * 100.0})
+            except Exception as e:
+                print(f"[score] parse skipped {t}: {e}")
+
+    if not rows:
+        print("[score] no rows from batch; falling back per-ticker…")
         for t in TICKERS:
             try:
                 h = yf.Ticker(t).history(period="5d", interval="1d")
-                if len(h) >= 2:
-                    last, prev = float(h["Close"].iloc[-1]), float(h["Close"].iloc[-2])
-                    rows.append({"ticker": t, "change": (last-prev)/prev*100.0})
+                close = h["Close"].dropna()
+                if len(close) >= 2:
+                    last, prev = float(close.iloc[-1]), float(close.iloc[-2])
+                    rows.append({"ticker": t, "change": (last - prev) / prev * 100.0})
             except Exception as e:
                 print(f"[score] fallback fetch failed for {t}: {e}")
-        return pd.DataFrame(rows).sort_values("change", ascending=False)
 
-    rows = []
-    for t in TICKERS:
-        try:
-            sub = df[t]
-            if len(sub) >= 2:
-                last, prev = float(sub["Close"].iloc[-1]), float(sub["Close"].iloc[-2])
-                rows.append({"ticker": t, "change": (last - prev) / prev * 100.0})
-        except Exception as e:
-            print(f"[score] parse skipped {t}: {e}")
     out = pd.DataFrame(rows).sort_values("change", ascending=False)
     if out.empty:
-        print("[score] no valid rows parsed; using random fallback")
+        print("[score] still empty; using random fallback")
     return out
-
 def select_lists(df, n=3):
     pool = TICKERS.copy()
     if df is None or df.empty or len(df) < 2*n:
