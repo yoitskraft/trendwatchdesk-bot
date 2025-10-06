@@ -9,7 +9,7 @@ import yfinance as yf
 # -------- CONFIG --------
 BRAND_NAME = "TrendWatchDesk"
 TIMEZONE   = "Europe/London"
-CANVAS_W, CANVAS_H = 1000, 1000   # square 1:1
+CANVAS_W, CANVAS_H = 1080, 1080   # square 1:1
 MARGIN = 36
 
 # Visuals
