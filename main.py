@@ -39,10 +39,9 @@ POOLS = {
     "FINTECH": ["V","MA","PYPL","SQ","SOFI"],
     "SEMIS": ["TSM","ASML","QCOM","INTC","AMD","MU","TXN"]
 }
-# Quotas + 2 wildcards -> total 8 per run
+# Quotas + 2 wildcards = 8 per run
 QUOTAS = [("AI", 2), ("MAG7", 1), ("HEALTHCARE", 1), ("FINTECH", 1), ("SEMIS", 1)]
 WILDCARDS = 2
-N_TICKERS = sum(q for _, q in QUOTAS) + WILDCARDS
 
 OUTPUT_DIR = "output"
 LOGO_DIR   = "assets/logos"
@@ -112,7 +111,6 @@ def sample_with_quotas_and_wildcards(quotas, wildcards, pools, seed):
         src = list(pools.get(category, []))
         rnd.shuffle(src)
         for t in src:
-            if len(chosen) >= sum(q for _, q in quotas) and k <= 0: break
             if t not in chosen:
                 chosen.append(t); k -= 1
                 if k == 0: break
@@ -135,8 +133,7 @@ def atr(df, n=14):
     tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
     return tr.rolling(n).mean()
 
-def sma(series, n):
-    return series.rolling(n).mean()
+def sma(series, n): return series.rolling(n).mean()
 
 def swing_points(df, w=2):
     highs, lows = [], []
@@ -151,9 +148,7 @@ def swing_points(df, w=2):
 def recent_major_swings(df, lookback=120):
     lows, highs = swing_points(df.tail(lookback), w=2)
     if not lows or not highs: return None, None
-    low_level  = min([p[2] for p in lows])
-    high_level = max([p[2] for p in highs])
-    return low_level, high_level
+    return min(p[2] for p in lows), max(p[2] for p in highs)
 
 def fibonacci_levels(low, high):
     if low is None or high is None or high <= low: return []
@@ -168,8 +163,7 @@ def floor_pivots(df):
     R2 = P + (H - L); S2 = P - (H - L)
     return [P, S1, R1, S2, R2]
 
-def volume_percentile(series, p=0.6):
-    return series.quantile(p)
+def volume_percentile(series, p=0.6): return series.quantile(p)
 
 def cluster_levels(levels, tol):
     if not levels: return []
@@ -177,8 +171,7 @@ def cluster_levels(levels, tol):
     clusters = []
     cluster = [levels[0]]
     for x in levels[1:]:
-        if abs(x - cluster[-1]) <= tol:
-            cluster.append(x)
+        if abs(x - cluster[-1]) <= tol: cluster.append(x)
         else:
             clusters.append((sum(cluster)/len(cluster), len(cluster)))
             cluster = [x]
@@ -202,12 +195,10 @@ def confluence_support_resistance(df):
 
     cand = swing_low_lvls + swing_high_lvls
     for col in ["SMA50","SMA200"]:
-        if not df[col].dropna().empty:
-            cand.append(float(df[col].iloc[-1]))
+        if not df[col].dropna().empty: cand.append(float(df[col].iloc[-1]))
     cand += fibs + pivs
-    cand = [float(x) for x in cand if x and not math.isnan(x) and math.isfinite(x)]
-    if not cand:
-        return None, None, None, None, None, None, (lows, highs)
+    cand = [float(x) for x in cand if x and math.isfinite(x)]
+    if not cand: return None, None, None, None, None, None, (lows, highs)
 
     last = float(df["Close"].iloc[-1])
     atr_series = atr(df)
@@ -250,14 +241,11 @@ def confluence_support_resistance(df):
 
 def detect_bos(df, swings, buffer_pct=0.0005, vol_threshold_pct=0.4):
     """
-    BoS with relaxed thresholds:
-      - close > last swing high*(1+buffer) AND vol ≥ percentile -> BoS↑
-      - close < last swing low*(1-buffer)  AND vol ≥ percentile -> BoS↓
-    Returns: ("up"/"down"/None, swing_price, swing_index)
+    True BoS: close breaks last swing high/low by buffer and volume >= percentile.
+    Returns ("up"/"down"/None, swing_price, swing_index)
     """
     lows, highs = swings
-    if df is None or len(df) < 5:
-        return (None, None, None)
+    if df is None or len(df) < 5: return (None, None, None)
 
     close_last = float(df["Close"].iloc[-1])
     vol_last   = float(df["Volume"].iloc[-1])
@@ -312,19 +300,8 @@ def clean_and_summarize(df):
     sup_low, sup_high, res_low, res_high, sup_label, res_label, swings = confluence_support_resistance(dfc)
     bos_dir, bos_level, bos_idx = detect_bos(dfc, swings, buffer_pct=0.0005, vol_threshold_pct=0.4)
 
-    # Fallback: show latest swing level if no BoS
-    bos_fallback = False
-    if bos_dir is None:
-        lows, highs = swings
-        if highs:
-            bos_dir, bos_level, bos_idx = "up", highs[-1][2], highs[-1][0]
-            bos_fallback = True
-        elif lows:
-            bos_dir, bos_level, bos_idx = "down", lows[-1][2], lows[-1][0]
-            bos_fallback = True
-
     return (dfc,last,chg30,sup_low,sup_high,res_low,res_high,
-            sup_label,res_label,bos_dir,bos_level,bos_idx,bos_fallback)
+            sup_label,res_label,bos_dir,bos_level,bos_idx)
 
 def fetch_one(t):
     df = fetch_stooq_daily(t)
@@ -334,7 +311,7 @@ def fetch_one(t):
 # -------- Drawing --------
 def render_single_post(path, ticker, payload, brand_logo_path):
     (df,last,chg30,sup_low,sup_high,res_low,res_high,
-     sup_label,res_label,bos_dir,bos_level,bos_idx,bos_fallback) = payload
+     sup_label,res_label,bos_dir,bos_level,bos_idx) = payload
 
     img = Image.new("RGBA", (CANVAS_W, CANVAS_H), BG + (255,))
     d = ImageDraw.Draw(img)
@@ -392,53 +369,32 @@ def render_single_post(path, ticker, payload, brand_logo_path):
                      fill=RESIST_FILL, outline=RESIST_EDGE, width=1)
     img.alpha_composite(overlay)
 
-    # --- BoS / Swing marker: strong highlight + dotted line + arrow + label ---
+    # --- TradingView-style BoS: dotted line + BOS label (no shading) ---
     bos_caption = None
-    if bos_level is not None and bos_idx is not None:
+    if bos_dir in ("up","down") and bos_level is not None and bos_idx is not None:
         try:
-            cx_center = int(left + bos_idx*step + step*0.5)
-            x0 = int(left + bos_idx*step)
-            x1 = int(x0 + step)
             yL = y_map(bos_level, vmin, vmax, top, bot)
-
-            is_bos = (not bos_fallback)
             bos_col = UP_COL if bos_dir == "up" else DOWN_COL
-            bos_fill = (bos_col[0], bos_col[1], bos_col[2], 100 if is_bos else 70)
-            bos_line = (bos_col[0], bos_col[1], bos_col[2], 255 if is_bos else 200)
 
-            bos_overlay = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0,0,0,0))
-            bod = ImageDraw.Draw(bos_overlay)
-
-            # 1) highlight column (always, but slightly softer if fallback)
-            bod.rectangle((max(left, x0-1), top, min(right, x1+1), bot), fill=bos_fill)
-
-            # 2) dotted horizontal line
-            dot_len, gap = 12, 4
+            # Dotted horizontal line
+            dot_len, gap = 12, 6
             xx = left
             while xx < right:
                 x_end = min(xx + dot_len, right)
-                bod.line([(xx, yL), (x_end, yL)], fill=bos_line, width=3)
+                d.line([(xx, yL), (x_end, yL)], fill=bos_col, width=2)
                 xx += dot_len + gap
 
-            # 3) arrow marker
-            tri = 12
-            if bos_dir == "up":
-                bod.polygon([(cx_center, yL-16-tri), (cx_center-tri, yL-16), (cx_center+tri, yL-16)], fill=bos_line)
-            else:
-                bod.polygon([(cx_center, yL+16+tri), (cx_center-tri, yL+16), (cx_center+tri, yL+16)], fill=bos_line)
+            # Centered "BOS" label above the line
+            lbl = "BOS"
+            tw, th = d.textbbox((0,0), lbl, font=F_CHG)[2:]
+            lx = (left + right)//2 - tw//2
+            ly = yL - 26
+            d.text((lx, ly), lbl, fill=bos_col, font=F_CHG)
 
-            # 4) label at right edge
-            lbl = "BoS↑" if (is_bos and bos_dir == "up") else ("BoS↓" if (is_bos and bos_dir == "down") else "Swing ref")
-            ly = yL - 22 if bos_dir == "up" else yL + 6
-            lx = right - 110
-            pad = 6
-            tw, th = d.textbbox((0,0), lbl, font=F_META)[2:]
-            bod.rectangle((lx - pad, ly - pad, lx + tw + pad, ly + th + pad),
-                          fill=(245,245,245,220))
-            img.alpha_composite(bos_overlay)
-            d.text((lx, ly), lbl, fill=bos_col, font=F_META)
+            # Tiny timeframe tag under the label
+            d.text((lx, ly+20), "1D", fill=bos_col, font=F_META)
 
-            bos_caption = ("BoS↑ (close+vol)" if bos_dir == "up" else "BoS↓ (close+vol)") if is_bos else "Swing reference (no break)"
+            bos_caption = "BOS 1D (close+vol)"
         except Exception:
             bos_caption = None
 
