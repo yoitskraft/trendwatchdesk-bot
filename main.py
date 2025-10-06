@@ -14,6 +14,9 @@ TIMEZONE   = "Europe/London"
 CANVAS_W, CANVAS_H = 1080, 1080
 MARGIN = 40
 
+# Debug: set True for one run to diagnose BoS visibility
+DEBUG_BOS = True  # <<< set to False after testing
+
 # Colors
 BG        = (255,255,255)
 TEXT_MAIN = (20,20,22)
@@ -257,31 +260,46 @@ def confluence_support_resistance(df):
 
     return (sup_low, sup_high, res_low, res_high, sup_label, res_label, (lows, highs))
 
+# =========================
+# BoS detection (VERBOSE)
+# =========================
 def detect_bos(df, swings, buffer_pct=0.0005, vol_threshold_pct=0.4):
     """
     True BoS: close breaks last swing high/low by buffer and volume >= percentile.
     Returns ("up"/"down"/None, swing_price, swing_index)
     """
     lows, highs = swings
-    if df is None or len(df) < 5: return (None, None, None)
+    if df is None or len(df) < 5:
+        if DEBUG_BOS: print("[bos] df too short")
+        return (None, None, None)
+
     close_last = float(df["Close"].iloc[-1])
     vol_last   = float(df["Volume"].iloc[-1])
     vol_bar = volume_percentile(df["Volume"].tail(120), vol_threshold_pct)
 
+    if DEBUG_BOS:
+        hi_txt = f"{highs[-1][2]:.4f}@{highs[-1][0]}" if highs else "None"
+        lo_txt = f"{lows[-1][2]:.4f}@{lows[-1][0]}"   if lows  else "None"
+        print(f"[bos] close={close_last:.4f} vol={vol_last:.0f} vol_bar(p{int(vol_threshold_pct*100)})={vol_bar:.0f} "
+              f"last_high={hi_txt} last_low={lo_txt} buffer={buffer_pct*100:.2f}%")
+
     if highs:
         i_hi, _, hi_price = highs[-1]
         if (close_last > hi_price * (1 + buffer_pct)) and (vol_last >= vol_bar):
+            if DEBUG_BOS: print(f"[bos] UP break: close {close_last:.4f} > {hi_price*(1+buffer_pct):.4f} and vol ok")
             return ("up", hi_price, i_hi)
 
     if lows:
         i_lo, _, lo_price = lows[-1]
         if (close_last < lo_price * (1 - buffer_pct)) and (vol_last >= vol_bar):
+            if DEBUG_BOS: print(f"[bos] DOWN break: close {close_last:.4f} < {lo_price*(1-buffer_pct):.4f} and vol ok")
             return ("down", lo_price, i_lo)
 
+    if DEBUG_BOS: print("[bos] no break")
     return (None, None, None)
 
 # =========================
-# Data
+# Data fetch/clean
 # =========================
 def to_stooq_symbol(t): return f"{t.lower()}.us"
 
@@ -354,9 +372,7 @@ def draw_bos_line_with_chip(d, left, right, top, bot, y, color, font_big, font_s
     box_h = th + th2 + 3 + 2*pady
     bx = right - box_w - 12
     by = max(top + 8, min(bot - box_h - 8, y - box_h//2))
-    # chip bg + border
     d.rectangle((bx, by, bx + box_w, by + box_h), fill=(255,255,255), outline=(220,220,220), width=1)
-    # texts
     tx = bx + (box_w - tw)//2
     d.text((tx, by + pady), lbl, fill=color, font=font_big)
     tx2 = bx + (box_w - tw2)//2
@@ -424,6 +440,15 @@ def render_single_post(path, ticker, payload, brand_logo_path):
         od.rectangle((left, min(y1,y2), right, max(y1,y2)),
                      fill=RESIST_FILL, outline=RESIST_EDGE, width=1)
     img.alpha_composite(overlay)
+
+    # --- DEBUG: force a visible line if no BoS to verify drawing path ---
+    if DEBUG_BOS and not (bos_dir in ("up","down") and bos_level is not None):
+        try:
+            y_test = (top + bot) // 2
+            draw_bos_line_with_chip(d, left, right, top, bot, y_test, (0,0,0), F_CHG, F_META)
+            d.text((left+8, top+8), "DEBUG: no BoS detected — drawing test line", fill=(0,0,0), font=F_META)
+        except Exception as e:
+            print("[debug] test line draw failed:", e)
 
     # ---- BoS (draw LAST so it's on top) ----
     bos_caption = None
