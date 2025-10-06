@@ -16,7 +16,7 @@ CANVAS_W, CANVAS_H = 1080, 1350
 BG        = (255,255,255)
 CARD_BG   = (250,250,250)
 TEXT_MAIN = (20,20,22)
-TEXT_MUT  = (160,165,175)   # lighter grey for secondary
+TEXT_MUT  = (160,165,175)   # lighter grey
 GRID      = (225,228,232)
 UP_COL    = (20,170,90)     # positive / bullish
 DOWN_COL  = (230,70,70)     # negative / bearish
@@ -41,6 +41,8 @@ POOL = {
     "ORCL": 2, "NKE": 1, "PYPL": 1, "INTC": 2, "CRM": 2, "KO": 2
 }
 N_TICKERS = 3
+CONFIRM_BARS = 7   # stricter confirmation (7 bars)
+
 today_seed = datetime.date.today().strftime("%Y%m%d")
 
 def weighted_sample(pool: dict, n: int, seed: str):
@@ -88,9 +90,10 @@ F_TITLE      = load_font(65,  bold=True)
 F_SUB        = load_font(30,  bold=False)
 F_TICK       = load_font(54,  bold=True)
 F_NUM        = load_font(46,  bold=True)
-F_CHG        = load_font(28,  bold=True)   # smaller % text
+F_CHG        = load_font(28,  bold=True)   # % change text
 F_META       = load_font(18,  bold=False)  # card footer (smaller + subtler)
-F_META_PAGE  = load_font(24,  bold=False)  # bottom page disclaimer
+F_META_PAGE  = load_font(24,  bold=False)  # page disclaimer
+F_TAG        = load_font(20,  bold=True)   # tiny tag inside zones
 
 # -------- Utilities --------
 def y_map(v, vmin, vmax, y0, y1):
@@ -100,14 +103,11 @@ def y_map(v, vmin, vmax, y0, y1):
 def clamp(v, a, b): return max(a, min(b, v))
 
 # -------- Breaker blocks --------
-def find_breaker_blocks(df, look=CHART_LOOKBACK, confirm=3):
+def find_breaker_blocks(df, look=CHART_LOOKBACK, confirm=CONFIRM_BARS):
     """
-    Identify breaker blocks in last `look` daily candles.
-    - Bullish breaker = red candle (close<open) followed by `confirm` higher closes.
-      Zone = [close, open] of the breaker candle (body).
-    - Bearish breaker = green candle (close>open) followed by `confirm` lower closes.
-      Zone = [open, close] of the breaker candle (body).
-    Returns list of dicts: {'type': 'bull'|'bear', 'low': float, 'high': float, 'idx': int}
+    Identify breaker blocks in last `look` daily candles with stricter confirmation.
+    - Low Breaker (bullish): red candle (close<open) followed by `confirm` higher closes.
+    - High Breaker (bearish): green candle (close>open) followed by `confirm` lower closes.
     """
     blocks = []
     data = df.iloc[-look:]
@@ -116,41 +116,38 @@ def find_breaker_blocks(df, look=CHART_LOOKBACK, confirm=3):
     n = len(data)
     for i in range(n - confirm - 1):
         o, c = float(opens[i]), float(closes[i])
-        # bearish breaker (last up candle before down move)
+        # High Breaker (bearish)
         if c > o:
             future = closes[i+1:i+1+confirm]
-            if len(future) == confirm and all(float(f) < c for f in future):
-                blocks.append({"type": "bear", "low": min(o,c), "high": max(o,c), "idx": i})
-        # bullish breaker (last down candle before up move)
+            if len(future) == confirm and all(float(f) < closes[i] for f in future):
+                lo, hi = min(o, c), max(o, c)
+                blocks.append({"type": "high", "low": lo, "high": hi, "idx": i})
+        # Low Breaker (bullish)
         if c < o:
             future = closes[i+1:i+1+confirm]
-            if len(future) == confirm and all(float(f) > c for f in future):
-                blocks.append({"type": "bull", "low": min(o,c), "high": max(o,c), "idx": i})
+            if len(future) == confirm and all(float(f) > closes[i] for f in future):
+                lo, hi = min(o, c), max(o, c)
+                blocks.append({"type": "low", "low": lo, "high": hi, "idx": i})
     return blocks
 
-def nearest_breaker_zones(df, look=CHART_LOOKBACK, confirm=3):
-    """
-    Pick the nearest bullish breaker BELOW price and nearest bearish breaker ABOVE price.
-    If strict below/above not found, fall back to absolute nearest of that type.
-    """
+def nearest_breaker_zones(df, look=CHART_LOOKBACK, confirm=CONFIRM_BARS):
     data = df.iloc[-look:].copy()
     last_price = float(data["Close"].iloc[-1])
     blocks = find_breaker_blocks(df, look=look, confirm=confirm)
-    if not blocks:
-        return None, None
+    if not blocks: return None, None
 
-    bulls = [b for b in blocks if b["type"] == "bull"]
-    bears = [b for b in blocks if b["type"] == "bear"]
+    lows  = [b for b in blocks if b["type"] == "low"]
+    highs = [b for b in blocks if b["type"] == "high"]
 
-    sup = None
-    res = None
-    if bulls:
-        below = [b for b in bulls if b["high"] <= last_price]
-        sup = max(below, key=lambda b: b["high"]) if below else min(bulls, key=lambda b: abs((b["low"]+b["high"])/2 - last_price))
-    if bears:
-        above = [b for b in bears if b["low"] >= last_price]
-        res = min(above, key=lambda b: b["low"]) if above else min(bears, key=lambda b: abs((b["low"]+b["high"])/2 - last_price))
-    return sup, res
+    low_blk = None
+    high_blk = None
+    if lows:
+        below = [b for b in lows if b["high"] <= last_price]
+        low_blk = max(below, key=lambda b: b["high"]) if below else min(lows, key=lambda b: abs((b["low"]+b["high"])/2 - last_price))
+    if highs:
+        above = [b for b in highs if b["low"] >= last_price]
+        high_blk = min(above, key=lambda b: b["low"]) if above else min(highs, key=lambda b: abs((b["low"]+b["high"])/2 - last_price))
+    return low_blk, high_blk
 
 # -------- Data (DAILY) --------
 def to_stooq_symbol(t): return f"{t.lower()}.us"
@@ -197,9 +194,8 @@ def clean_and_summarize(df):
     last = float(dfc["Close"].iloc[-1])
     chg30 = (last/float(dfs["Close"].iloc[0]) - 1.0) * 100.0 if len(dfs)>1 else 0.0
 
-    # breaker zones (nearest bull below, nearest bear above)
-    bull_zone, bear_zone = nearest_breaker_zones(dfc, look=CHART_LOOKBACK, confirm=3)
-    return (dfc, last, chg30, bull_zone, bear_zone)
+    low_blk, high_blk = nearest_breaker_zones(dfc, look=CHART_LOOKBACK, confirm=CONFIRM_BARS)
+    return (dfc, last, chg30, low_blk, high_blk)
 
 def fetch_all_daily(tickers):
     out = {t: None for t in tickers}
@@ -211,21 +207,18 @@ def fetch_all_daily(tickers):
     return out
 
 # -------- Draw card --------
-def draw_card(d, img, box, ticker, df, last, chg30, bull_zone, bear_zone):
+def draw_card(d, img, box, ticker, df, last, chg30, low_blk, high_blk):
     x0,y0,x1,y1 = box
-    # container
-    d.rounded_rectangle((x0+6,y0+6,x1+6,y1+6), radius=14, fill=(230,230,230))
-    d.rounded_rectangle((x0,y0,x1,y1), radius=14, fill=CARD_BG)
+    d.rounded_rectangle((x0+6,y0+6,x1+6,y1+6),14,fill=(230,230,230))
+    d.rounded_rectangle((x0,y0,x1,y1),14,fill=CARD_BG)
     d.rectangle((x0,y0,x0+12,y1), fill=ACCENT)
 
-    # header info
     pad=24; info_x=x0+pad; info_y=y0+pad
     d.text((info_x,info_y), ticker, fill=TEXT_MAIN, font=F_TICK)
     d.text((info_x,info_y+60), f"{last:,.2f} USD", fill=TEXT_MAIN, font=F_NUM)
     chg_col = UP_COL if chg30 >= 0 else DOWN_COL
     d.text((info_x,info_y+105), f"{chg30:+.2f}% past {SUMMARY_LOOKBACK}d", fill=chg_col, font=F_CHG)
 
-    # chart area
     cx0=x0+380; cx1=x1-pad; cy0=y0+pad; cy1=y1-pad-18
     d.rectangle((cx0,cy0,cx1,cy1), fill=(255,255,255))
 
@@ -233,12 +226,10 @@ def draw_card(d, img, box, ticker, df, last, chg30, bull_zone, bear_zone):
     n=len(df)
     step_candle=(cx1-cx0)/max(1,n); wick=max(1,int(step_candle*0.12)); body=max(3,int(step_candle*0.4))
 
-    # grid
     for gy in (0.25,0.5,0.75):
         y=int(cy0 + gy*(cy1-cy0))
         d.line([(cx0+4,y),(cx1-4,y)], fill=GRID, width=1)
 
-    # candles
     for i,row in enumerate(df.itertuples(index=False)):
         o,h,l,c = float(row.Open), float(row.High), float(row.Low), float(row.Close)
         cx=int(cx0+i*step_candle+step_candle*0.5)
@@ -252,33 +243,30 @@ def draw_card(d, img, box, ticker, df, last, chg30, bull_zone, bear_zone):
         if bot-top<2: bot=top+2
         d.rectangle((cx-body//2, top, cx+body//2, bot), fill=col)
 
-    # --- Shaded breaker block zones ---
     overlay = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0,0,0,0))
     odraw = ImageDraw.Draw(overlay)
 
-    # Bullish breaker (support zone) below price
-    if bull_zone is not None:
-        y1 = clamp(y_map(bull_zone["low"],  vmin, vmax, cy0, cy1), cy0, cy1)
-        y2 = clamp(y_map(bull_zone["high"], vmin, vmax, cy0, cy1), cy0, cy1)
-        odraw.rectangle((cx0, min(y1,y2), cx1, max(y1,y2)),
-                        fill=BULL_ZONE_FILL, outline=BULL_ZONE_EDGE, width=1)
+    if low_blk is not None:
+        y1 = clamp(y_map(low_blk["low"],  vmin, vmax, cy0, cy1), cy0, cy1)
+        y2 = clamp(y_map(low_blk["high"], vmin, vmax, cy0, cy1), cy0, cy1)
+        y_top, y_bot = min(y1,y2), max(y1,y2)
+        odraw.rectangle((cx0,y_top,cx1,y_bot), fill=BULL_ZONE_FILL, outline=BULL_ZONE_EDGE, width=1)
+        odraw.text((cx0+8,y_top+6),"Low Breaker",fill=(10,120,70,255),font=F_TAG)
 
-    # Bearish breaker (resistance zone) above price
-    if bear_zone is not None:
-        y1 = clamp(y_map(bear_zone["low"],  vmin, vmax, cy0, cy1), cy0, cy1)
-        y2 = clamp(y_map(bear_zone["high"], vmin, vmax, cy0, cy1), cy0, cy1)
-        odraw.rectangle((cx0, min(y1,y2), cx1, max(y1,y2)),
-                        fill=BEAR_ZONE_FILL, outline=BEAR_ZONE_EDGE, width=1)
+    if high_blk is not None:
+        y1 = clamp(y_map(high_blk["low"],  vmin, vmax, cy0, cy1), cy0, cy1)
+        y2 = clamp(y_map(high_blk["high"], vmin, vmax, cy0, cy1), cy0, cy1)
+        y_top, y_bot = min(y1,y2), max(y1,y2)
+        odraw.rectangle((cx0,y_top,cx1,y_bot), fill=BEAR_ZONE_FILL, outline=BEAR_ZONE_EDGE, width=1)
+        odraw.text((cx0+8,y_top+6),"High Breaker",fill=(170,40,40,255),font=F_TAG)
 
     img.alpha_composite(overlay)
 
-    # subtle card footer
-    d.text((cx0, cy1+2), f"{CHART_LOOKBACK} daily bars • breaker block zones",
+    d.text((cx0, cy1+2), f"{CHART_LOOKBACK} daily bars • breaker block zones ({CONFIRM_BARS}-bar confirm)",
            fill=TEXT_MUT, font=F_META)
 
 # -------- Page render --------
 def render_image(path, data_map):
-    # RGBA to allow alpha compositing
     img = Image.new("RGBA", (CANVAS_W, CANVAS_H), BG + (255,))
     d = ImageDraw.Draw(img)
     d.text((64,50), "ONES TO WATCH", fill=TEXT_MAIN, font=F_TITLE)
@@ -302,8 +290,8 @@ def render_image(path, data_map):
             d.rectangle((x,y,x+12,y+card_h), fill=ACCENT)
             d.text((x+40,y+40), f"{t} – data unavailable", fill=DOWN_COL, font=F_TICK)
         else:
-            df,last,chg30,bull,bear = payload
-            draw_card(d, img, (x,y,x+w,y+card_h), t, df, last, chg30, bull, bear)
+            df,last,chg30,low_blk,high_blk = payload
+            draw_card(d, img, (x,y,x+w,y+card_h), t, df, last, chg30, low_blk, high_blk)
         y += card_h + margin
 
     d.text((64, CANVAS_H-30), "Ideas only – Not financial advice", fill=TEXT_MUT, font=F_META_PAGE)
@@ -319,53 +307,4 @@ def write_docs(latest_filename, ts_str):
     html = f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{BRAND_NAME} – Ones to Watch</title>
-<style>
-body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;
-      margin:0;padding:24px;background:#fff;color:#111}}
-.wrapper{{max-width:1080px;margin:0 auto;text-align:center}}
-img{{max-width:100%;height:auto;border-radius:12px;
-     box-shadow:0 10px 30px rgba(0,0,0,.08)}}
-</style></head>
-<body>
-<div class="wrapper">
-<h1>{BRAND_NAME} – Ones to Watch</h1>
-<p>Latest post image below. Subscribe via <a href="feed.xml">RSS</a>.</p>
-<img src="../output/{latest_filename}" alt="daily image"/>
-<p style="color:#666;font-size:14px">Ideas only – Not financial advice</p>
-</div>
-</body></html>"""
-    with open(os.path.join(DOCS_DIR, "index.html"), "w", encoding="utf-8") as f:
-        f.write(html)
-
-    feed = f"""<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0">
-  <channel>
-    <title>{BRAND_NAME} – Daily</title>
-    <link>{PAGES_URL}</link>
-    <description>Daily image for Instagram automation.</description>
-    <item>
-      <title>Ones to Watch {ts_str}</title>
-      <link>{PAGES_URL}output/{latest_filename}</link>
-      <guid isPermaLink="false">{ts_str}</guid>
-      <pubDate>{ts_str}</pubDate>
-      <enclosure url="{PAGES_URL}output/{latest_filename}" type="image/png" />
-      <description>Daily watchlist image.</description>
-    </item>
-  </channel>
-</rss>"""
-    with open(os.path.join(DOCS_DIR, "feed.xml"), "w", encoding="utf-8") as f:
-        f.write(feed)
-
-# -------- Main --------
-if __name__ == "__main__":
-    now = datetime.datetime.now(pytz.timezone(TIMEZONE))
-    datestr = now.strftime("%Y%m%d")
-    out_name = f"twd_{datestr}.png"
-    out_path = os.path.join(OUTPUT_DIR, out_name)
-
-    data_map = fetch_all_daily(TICKERS)
-    render_image(out_path, data_map)
-
-    ts_str = now.strftime("%a, %d %b %Y %H:%M:%S %z")
-    write_docs(out_name, ts_str)
-    print("done:", out_path)
+<style
