@@ -39,7 +39,7 @@ POOLS = {
     "FINTECH": ["V","MA","PYPL","SQ","SOFI"],
     "SEMIS": ["TSM","ASML","QCOM","INTC","AMD","MU","TXN"]
 }
-# Quotas + wildcards -> total 8 per run
+# Quotas + 2 wildcards -> total 8 per run
 QUOTAS = [("AI", 2), ("MAG7", 1), ("HEALTHCARE", 1), ("FINTECH", 1), ("SEMIS", 1)]
 WILDCARDS = 2
 N_TICKERS = sum(q for _, q in QUOTAS) + WILDCARDS  # 8
@@ -74,7 +74,7 @@ F_TITLE = load_font(70,  bold=True)
 F_PRICE = load_font(46,  bold=True)
 F_CHG   = load_font(34,  bold=True)
 F_SUB   = load_font(28,  bold=False)
-F_META  = load_font(22,  bold=False)
+F_META  = load_font(20,  bold=False)  # tiny caption font
 
 # -------- Helpers --------
 def y_map(v, vmin, vmax, y0, y1):
@@ -134,11 +134,7 @@ def sample_with_quotas_and_wildcards(quotas, wildcards, pools, seed):
 def atr(df, n=14):
     high = df["High"]; low = df["Low"]; close = df["Close"]
     prev_close = close.shift(1)
-    tr = pd.concat([
-        (high - low),
-        (high - prev_close).abs(),
-        (low - prev_close).abs()
-    ], axis=1).max(axis=1)
+    tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
     return tr.rolling(n).mean()
 
 def sma(series, n):
@@ -150,32 +146,24 @@ def swing_points(df, w=2):
     H, L = df["High"], df["Low"]
     for i in range(w, len(df)-w):
         if H.iloc[i] == H.iloc[i-w:i+w+1].max():
-            highs.append((df.index[i], float(H.iloc[i])))
+            highs.append((i, df.index[i], float(H.iloc[i])))
         if L.iloc[i] == L.iloc[i-w:i+w+1].min():
-            lows.append((df.index[i], float(L.iloc[i])))
+            lows.append((i, df.index[i], float(L.iloc[i])))
     return lows, highs
 
-def recent_major_swings(df, lookback=90):
-    """Pick most recent prominent swing high/low over lookback using extremes of swing points."""
+def recent_major_swings(df, lookback=120):
     lows, highs = swing_points(df.tail(lookback), w=2)
     if not lows or not highs: return None, None
-    # Use most recent lowest low and highest high
-    low_level  = min([p[1] for p in lows])
-    high_level = max([p[1] for p in highs])
+    low_level  = min([p[2] for p in lows])
+    high_level = max([p[2] for p in highs])
     return low_level, high_level
 
 def fibonacci_levels(low, high):
     if low is None or high is None or high <= low: return []
     span = high - low
-    levels = [
-        low + 0.382*span,
-        low + 0.500*span,
-        low + 0.618*span,
-    ]
-    return levels
+    return [low + 0.382*span, low + 0.500*span, low + 0.618*span]
 
 def floor_pivots(df):
-    """Classic floor pivots from last completed session."""
     last = df.iloc[-2] if len(df) >= 2 else df.iloc[-1]
     H, L, C = float(last["High"]), float(last["Low"]), float(last["Close"])
     P = (H + L + C) / 3.0
@@ -187,7 +175,6 @@ def volume_percentile(series, p=0.6):
     return series.quantile(p)
 
 def cluster_levels(levels, tol):
-    """Group nearby levels within tolerance tol; return cluster centers and hit counts."""
     if not levels: return []
     levels = sorted(levels)
     clusters = []
@@ -203,89 +190,100 @@ def cluster_levels(levels, tol):
 
 def confluence_support_resistance(df):
     """
-    Build candidate levels from:
-      - swing point prices (last ~CHART_LOOKBACK)
-      - SMA50, SMA200
-      - Fibonacci (from recent major swing low/high)
-      - Floor pivots (P, S1, R1, S2, R2)
-    Confirm with volume: bars touching level with volume > 60th percentile.
-    Convert top support/resistance into zones using ATR.
+    Candidate levels: swings, SMA50/200, Fibs (recent swings), floor pivots.
+    Confirm with volume (≥60th pct). Make zones from ATR.
+    Returns: sup_low, sup_high, res_low, res_high, sup_label, res_label, (lows, highs)
     """
     df = df.copy()
     vol = df["Volume"].fillna(0)
     vol_bar = volume_percentile(vol.tail(120), 0.6)
 
-    # indicators
     df["SMA50"]  = sma(df["Close"], 50)
     df["SMA200"] = sma(df["Close"], 200)
     low_major, high_major = recent_major_swings(df, lookback=120)
     fibs = fibonacci_levels(low_major, high_major)
     pivs = floor_pivots(df)
 
-    # swing points
     lows, highs = swing_points(df.tail(180), w=2)
-    swing_low_lvls  = [p[1] for p in lows]
-    swing_high_lvls = [p[1] for p in highs]
+    swing_low_lvls  = [p[2] for p in lows]
+    swing_high_lvls = [p[2] for p in highs]
 
-    # candidate levels pool
-    cand = []
-    cand += swing_low_lvls + swing_high_lvls
+    cand = swing_low_lvls + swing_high_lvls
     for col in ["SMA50","SMA200"]:
         if not df[col].dropna().empty:
             cand.append(float(df[col].iloc[-1]))
-    cand += fibs
-    cand += pivs
-
-    # Clean
+    cand += fibs + pivs
     cand = [float(x) for x in cand if x and not math.isnan(x) and math.isfinite(x)]
     if not cand:
-        return None, None
+        return None, None, None, None, None, None, (lows, highs)
 
     last = float(df["Close"].iloc[-1])
-    # Tolerance for clustering: 0.3% of price (or wider for low-priced stocks)
+    atr_series = atr(df)
+    atr_val = float(atr_series.iloc[-1]) if not atr_series.dropna().empty else max(last*0.005, 0.5)
     tol_abs = max(last * 0.003, 0.2)
 
-    # cluster nearby levels, count confluence
     clusters = cluster_levels(cand, tol_abs)
 
-    # score clusters with touches and volume confirmation
     scores = []
-    H, L, C = df["High"], df["Low"], df["Close"]
-    atr_val = float(atr(df).iloc[-1]) if not atr(df).dropna().empty else max(last*0.005, 0.5)
-
+    H, L = df["High"], df["Low"]
     for level, hits in clusters:
-        # touches: bars where level lies within wick
         touch_mask = (L <= level) & (H >= level)
         touches = int(touch_mask.tail(180).sum())
-        # volume confirmation: any of those touches with volume > 60th pct
         vol_conf = int(((touch_mask) & (vol >= vol_bar)).tail(180).sum() > 0)
-        # proximity component (closer to current price = slightly higher score)
         prox = max(0.0, 1.0 - abs(level - last) / max(atr_val*5, tol_abs*3))
         score = hits*1.0 + touches*0.5 + vol_conf*0.5 + prox*0.5
         scores.append((level, score))
 
-    # Split into support (<= last) and resistance (>= last)
-    supports   = [(lv, sc) for lv, sc in scores if lv <= last]
-    resistances= [(lv, sc) for lv, sc in scores if lv >= last]
+    supports    = [(lv, sc) for lv, sc in scores if lv <= last]
+    resistances = [(lv, sc) for lv, sc in scores if lv >= last]
+
+    sup_low = sup_high = res_low = res_high = None
+    sup_label = res_label = None
 
     if supports:
-        supports.sort(key=lambda x: (-x[1], last - x[0]))  # higher score, then closest below
+        supports.sort(key=lambda x: (-x[1], last - x[0]))
         s_level = supports[0][0]
-        # zone thickness from ATR (quarter ATR) with bounds
         half = max(atr_val*0.25, last*0.002, 0.2)
         sup_low, sup_high = s_level - half, s_level + half
-    else:
-        sup_low = sup_high = None
+        sup_label = f"Support ~{s_level:.2f}"
 
     if resistances:
-        resistances.sort(key=lambda x: (-x[1], x[0] - last))  # higher score, then closest above
+        resistances.sort(key=lambda x: (-x[1], x[0] - last))
         r_level = resistances[0][0]
         half = max(atr_val*0.25, last*0.002, 0.2)
         res_low, res_high = r_level - half, r_level + half
-    else:
-        res_low = res_high = None
+        res_label = f"Resistance ~{r_level:.2f}"
 
-    return (sup_low, sup_high, res_low, res_high)
+    return (sup_low, sup_high, res_low, res_high, sup_label, res_label, (lows, highs))
+
+def detect_bos(df, swings, buffer_pct=0.0015, vol_threshold_pct=0.6):
+    """
+    Break of Structure with volume confirmation:
+      - close > last swing high*(1+buffer) AND volume ≥ vol_threshold percentile -> BoS↑
+      - close < last swing low*(1-buffer)  AND volume ≥ vol_threshold percentile -> BoS↓
+    Returns: ("up"/"down"/None, swing_price, swing_index)
+    """
+    lows, highs = swings
+    if df is None or len(df) < 5:
+        return (None, None, None)
+
+    close_last = float(df["Close"].iloc[-1])
+    vol_last   = float(df["Volume"].iloc[-1])
+    vol_bar = volume_percentile(df["Volume"].tail(120), vol_threshold_pct)
+
+    # last swing high
+    if highs:
+        i_hi, _, hi_price = highs[-1]
+        if (close_last > hi_price * (1 + buffer_pct)) and (vol_last >= vol_bar):
+            return ("up", hi_price, i_hi)
+
+    # last swing low
+    if lows:
+        i_lo, _, lo_price = lows[-1]
+        if (close_last < lo_price * (1 - buffer_pct)) and (vol_last >= vol_bar):
+            return ("down", lo_price, i_lo)
+
+    return (None, None, None)
 
 # -------- Data --------
 def to_stooq_symbol(t): return f"{t.lower()}.us"
@@ -321,10 +319,10 @@ def clean_and_summarize(df):
     last = float(dfc["Close"].iloc[-1])
     chg30 = (last/float(dfs["Close"].iloc[0]) - 1.0)*100 if len(dfs)>1 else 0.0
 
-    # ---- NEW: confluence-based zones
-    sup_low, sup_high, res_low, res_high = confluence_support_resistance(dfc)
+    sup_low, sup_high, res_low, res_high, sup_label, res_label, swings = confluence_support_resistance(dfc)
+    bos_dir, bos_level, bos_idx = detect_bos(dfc, swings, buffer_pct=0.0015, vol_threshold_pct=0.6)
 
-    return (dfc,last,chg30,sup_low,sup_high,res_low,res_high)
+    return (dfc,last,chg30,sup_low,sup_high,res_low,res_high,sup_label,res_label,bos_dir,bos_level,bos_idx)
 
 def fetch_one(t):
     df = fetch_stooq_daily(t)
@@ -333,7 +331,9 @@ def fetch_one(t):
 
 # -------- Drawing --------
 def render_single_post(path, ticker, payload, brand_logo_path):
-    df,last,chg30,sup_low,sup_high,res_low,res_high = payload
+    (df,last,chg30,sup_low,sup_high,res_low,res_high,
+     sup_label,res_label,bos_dir,bos_level,bos_idx) = payload
+
     img = Image.new("RGBA", (CANVAS_W, CANVAS_H), BG + (255,))
     d = ImageDraw.Draw(img)
 
@@ -390,6 +390,31 @@ def render_single_post(path, ticker, payload, brand_logo_path):
                      fill=RESIST_FILL, outline=RESIST_EDGE, width=1)
     img.alpha_composite(overlay)
 
+    # BoS marker (tiny triangle) + caption
+    bos_caption = None
+    if bos_dir in ("up","down") and bos_level is not None and bos_idx is not None:
+        try:
+            cx = int(left + bos_idx*step + step*0.5)
+            yL = y_map(bos_level, vmin, vmax, top, bot)
+            tri = 10
+            if bos_dir == "up":
+                ImageDraw.Draw(img).polygon([(cx, yL-12-tri), (cx-tri, yL-12), (cx+tri, yL-12)], fill=UP_COL)
+                bos_caption = "BoS↑ (close+vol) above swing high"
+            else:
+                ImageDraw.Draw(img).polygon([(cx, yL+12+tri), (cx-tri, yL+12), (cx+tri, yL+12)], fill=DOWN_COL)
+                bos_caption = "BoS↓ (close+vol) below swing low"
+        except Exception:
+            pass
+
+    # Tiny captions just above footer
+    caption_y = CANVAS_H - 68
+    if sup_label:
+        d.text((MARGIN, caption_y), sup_label, fill=TEXT_MUT, font=F_META); caption_y -= 18
+    if res_label:
+        d.text((MARGIN, caption_y), res_label, fill=TEXT_MUT, font=F_META); caption_y -= 18
+    if bos_caption:
+        d.text((MARGIN, caption_y), bos_caption, fill=TEXT_MUT, font=F_META)
+
     # Footer
     d.text((MARGIN, CANVAS_H-40), "Not financial advice", fill=TEXT_MUT, font=F_META)
 
@@ -431,7 +456,7 @@ if __name__ == "__main__":
             payload = fetch_one(t)
             out_path = os.path.join(OUTPUT_DIR, f"twd_{t}_{datestr}.png")
             if not payload:
-                print(f"[warn] no data for {t}, skipping")
+                print(f("[warn] no data for {t}, skipping"))
                 continue
             render_single_post(out_path, t, payload, BRAND_LOGO_PATH)
             print("done:", out_path)
