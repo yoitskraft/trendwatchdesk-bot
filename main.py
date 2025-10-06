@@ -13,7 +13,7 @@ CANVAS_W, CANVAS_H = 1080, 1350
 
 # Visuals
 BG        = (255,255,255)
-CARD_BG   = (250,250,250)
+CARD_BG   = (255,255,255)        # White cards
 TEXT_MAIN = (20,20,22)
 TEXT_MUT  = (160,165,175)
 GRID      = (225,228,232)
@@ -21,9 +21,9 @@ UP_COL    = (20,170,90)
 DOWN_COL  = (230,70,70)
 ACCENT    = (40,120,255)
 
-SUPPORT_FILL = (40,120,255,40)   # Blue shaded
+SUPPORT_FILL = (40,120,255,40)   # Blue shaded support
 SUPPORT_EDGE = (40,120,255,120)
-SHADOW_BLUE  = (40,120,255,50)   # Translucent blue drop shadow
+SHADOW_GREY  = (0,0,0,30)        # Soft grey drop shadow
 
 CHART_LOOKBACK   = 90
 SUMMARY_LOOKBACK = 30
@@ -54,7 +54,7 @@ TICKERS = weighted_sample(POOL, N_TICKERS, seed=today_seed)
 OUTPUT_DIR= "output"
 DOCS_DIR  = "docs"
 LOGO_PATH = "assets/logo.png"
-PAGES_URL = "https://yoitskraft.github.io/trendwatchdesk-bot/"
+PAGES_URL = "https://<your-username>.github.io/trendwatchdesk-bot/"
 
 # -------- HTTP session --------
 def make_session():
@@ -144,13 +144,13 @@ def fetch_all_daily(tickers):
 def draw_card(d,img,box,ticker,df,last,chg30,sup_low,sup_high):
     x0,y0,x1,y1 = box
 
-    # Blue drop shadow (on overlay so it can be translucent)
+    # Soft grey drop shadow
     overlay_shadow = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0,0,0,0))
     od = ImageDraw.Draw(overlay_shadow)
-    od.rounded_rectangle((x0+6,y0+6,x1+6,y1+6),14,fill=SHADOW_BLUE)
+    od.rounded_rectangle((x0+6,y0+6,x1+6,y1+6),14,fill=SHADOW_GREY)
     img.alpha_composite(overlay_shadow)
 
-    # Main card body
+    # Main white card body
     d.rounded_rectangle((x0,y0,x1,y1),14,fill=CARD_BG)
 
     pad=24; info_x=x0+pad; info_y=y0+pad
