@@ -93,7 +93,7 @@ F_NUM        = load_font(46,  bold=True)
 F_CHG        = load_font(28,  bold=True)   # % change text
 F_META       = load_font(18,  bold=False)  # card footer (smaller + subtler)
 F_META_PAGE  = load_font(24,  bold=False)  # page disclaimer
-F_TAG        = load_font(20,  bold=True)   # tiny tag inside zones
+F_TAG        = load_font(20,  bold=True)   # tiny tag inside zone
 
 # -------- Utilities --------
 def y_map(v, vmin, vmax, y0, y1):
@@ -106,8 +106,9 @@ def clamp(v, a, b): return max(a, min(b, v))
 def find_breaker_blocks(df, look=CHART_LOOKBACK, confirm=CONFIRM_BARS):
     """
     Identify breaker blocks in last `look` daily candles with stricter confirmation.
-    - Low Breaker (bullish): red candle (close<open) followed by `confirm` higher closes.
-    - High Breaker (bearish): green candle (close>open) followed by `confirm` lower closes.
+    - Low (bullish): red candle (close<open) followed by `confirm` higher closes.
+    - High (bearish): green candle (close>open) followed by `confirm` lower closes.
+    Returns dicts with {'type': 'low'|'high', 'low': price, 'high': price, 'idx': i}
     """
     blocks = []
     data = df.iloc[-look:]
@@ -130,24 +131,19 @@ def find_breaker_blocks(df, look=CHART_LOOKBACK, confirm=CONFIRM_BARS):
                 blocks.append({"type": "low", "low": lo, "high": hi, "idx": i})
     return blocks
 
-def nearest_breaker_zones(df, look=CHART_LOOKBACK, confirm=CONFIRM_BARS):
+def nearest_single_breaker(df, look=CHART_LOOKBACK, confirm=CONFIRM_BARS):
+    """
+    Return the ONE breaker (low/bull or high/bear) whose midpoint is nearest to last price.
+    """
     data = df.iloc[-look:].copy()
     last_price = float(data["Close"].iloc[-1])
     blocks = find_breaker_blocks(df, look=look, confirm=confirm)
-    if not blocks: return None, None
-
-    lows  = [b for b in blocks if b["type"] == "low"]
-    highs = [b for b in blocks if b["type"] == "high"]
-
-    low_blk = None
-    high_blk = None
-    if lows:
-        below = [b for b in lows if b["high"] <= last_price]
-        low_blk = max(below, key=lambda b: b["high"]) if below else min(lows, key=lambda b: abs((b["low"]+b["high"])/2 - last_price))
-    if highs:
-        above = [b for b in highs if b["low"] >= last_price]
-        high_blk = min(above, key=lambda b: b["low"]) if above else min(highs, key=lambda b: abs((b["low"]+b["high"])/2 - last_price))
-    return low_blk, high_blk
+    if not blocks:
+        return None
+    # distance by midpoint of the breaker body
+    def mid(b): return (b["low"] + b["high"]) / 2.0
+    nearest = min(blocks, key=lambda b: abs(mid(b) - last_price))
+    return nearest
 
 # -------- Data (DAILY) --------
 def to_stooq_symbol(t): return f"{t.lower()}.us"
@@ -194,8 +190,8 @@ def clean_and_summarize(df):
     last = float(dfc["Close"].iloc[-1])
     chg30 = (last/float(dfs["Close"].iloc[0]) - 1.0) * 100.0 if len(dfs)>1 else 0.0
 
-    low_blk, high_blk = nearest_breaker_zones(dfc, look=CHART_LOOKBACK, confirm=CONFIRM_BARS)
-    return (dfc, last, chg30, low_blk, high_blk)
+    nearest = nearest_single_breaker(dfc, look=CHART_LOOKBACK, confirm=CONFIRM_BARS)
+    return (dfc, last, chg30, nearest)
 
 def fetch_all_daily(tickers):
     out = {t: None for t in tickers}
@@ -207,18 +203,21 @@ def fetch_all_daily(tickers):
     return out
 
 # -------- Draw card --------
-def draw_card(d, img, box, ticker, df, last, chg30, low_blk, high_blk):
+def draw_card(d, img, box, ticker, df, last, chg30, breaker):
     x0,y0,x1,y1 = box
-    d.rounded_rectangle((x0+6,y0+6,x1+6,y1+6),14,fill=(230,230,230))
-    d.rounded_rectangle((x0,y0,x1,y1),14,fill=CARD_BG)
+    # container
+    d.rounded_rectangle((x0+6,y0+6,x1+6,y1+6), radius=14, fill=(230,230,230))
+    d.rounded_rectangle((x0,y0,x1,y1), radius=14, fill=CARD_BG)
     d.rectangle((x0,y0,x0+12,y1), fill=ACCENT)
 
+    # header info
     pad=24; info_x=x0+pad; info_y=y0+pad
     d.text((info_x,info_y), ticker, fill=TEXT_MAIN, font=F_TICK)
     d.text((info_x,info_y+60), f"{last:,.2f} USD", fill=TEXT_MAIN, font=F_NUM)
     chg_col = UP_COL if chg30 >= 0 else DOWN_COL
     d.text((info_x,info_y+105), f"{chg30:+.2f}% past {SUMMARY_LOOKBACK}d", fill=chg_col, font=F_CHG)
 
+    # chart area
     cx0=x0+380; cx1=x1-pad; cy0=y0+pad; cy1=y1-pad-18
     d.rectangle((cx0,cy0,cx1,cy1), fill=(255,255,255))
 
@@ -226,10 +225,12 @@ def draw_card(d, img, box, ticker, df, last, chg30, low_blk, high_blk):
     n=len(df)
     step_candle=(cx1-cx0)/max(1,n); wick=max(1,int(step_candle*0.12)); body=max(3,int(step_candle*0.4))
 
+    # grid
     for gy in (0.25,0.5,0.75):
         y=int(cy0 + gy*(cy1-cy0))
         d.line([(cx0+4,y),(cx1-4,y)], fill=GRID, width=1)
 
+    # candles
     for i,row in enumerate(df.itertuples(index=False)):
         o,h,l,c = float(row.Open), float(row.High), float(row.Low), float(row.Close)
         cx=int(cx0+i*step_candle+step_candle*0.5)
@@ -243,34 +244,40 @@ def draw_card(d, img, box, ticker, df, last, chg30, low_blk, high_blk):
         if bot-top<2: bot=top+2
         d.rectangle((cx-body//2, top, cx+body//2, bot), fill=col)
 
-    overlay = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0,0,0,0))
-    odraw = ImageDraw.Draw(overlay)
+    # --- Single shaded breaker zone + label ---
+    if breaker is not None:
+        overlay = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0,0,0,0))
+        odraw = ImageDraw.Draw(overlay)
 
-    if low_blk is not None:
-        y1 = clamp(y_map(low_blk["low"],  vmin, vmax, cy0, cy1), cy0, cy1)
-        y2 = clamp(y_map(low_blk["high"], vmin, vmax, cy0, cy1), cy0, cy1)
+        y1 = clamp(y_map(breaker["low"],  vmin, vmax, cy0, cy1), cy0, cy1)
+        y2 = clamp(y_map(breaker["high"], vmin, vmax, cy0, cy1), cy0, cy1)
         y_top, y_bot = min(y1,y2), max(y1,y2)
-        odraw.rectangle((cx0,y_top,cx1,y_bot), fill=BULL_ZONE_FILL, outline=BULL_ZONE_EDGE, width=1)
-        odraw.text((cx0+8,y_top+6),"Low Breaker",fill=(10,120,70,255),font=F_TAG)
 
-    if high_blk is not None:
-        y1 = clamp(y_map(high_blk["low"],  vmin, vmax, cy0, cy1), cy0, cy1)
-        y2 = clamp(y_map(high_blk["high"], vmin, vmax, cy0, cy1), cy0, cy1)
-        y_top, y_bot = min(y1,y2), max(y1,y2)
-        odraw.rectangle((cx0,y_top,cx1,y_bot), fill=BEAR_ZONE_FILL, outline=BEAR_ZONE_EDGE, width=1)
-        odraw.text((cx0+8,y_top+6),"High Breaker",fill=(170,40,40,255),font=F_TAG)
+        if breaker["type"] == "low":   # bullish
+            fill, edge, tag_col = BULL_ZONE_FILL, BULL_ZONE_EDGE, (10,120,70,255)
+        else:                           # 'high' bearish
+            fill, edge, tag_col = BEAR_ZONE_FILL, BEAR_ZONE_EDGE, (170,40,40,255)
 
-    img.alpha_composite(overlay)
+        odraw.rectangle((cx0, y_top, cx1, y_bot), fill=fill, outline=edge, width=1)
+        tag = "Breaker"
+        tw, th = odraw.textbbox((0,0), tag, font=F_TAG)[2:]
+        tx, ty = cx0+8, y_top+6
+        odraw.rectangle((tx-6, ty-4, tx+tw+6, ty+th+4), fill=(255,255,255,180))
+        odraw.text((tx, ty), tag, fill=tag_col, font=F_TAG)
 
-    d.text((cx0, cy1+2), f"{CHART_LOOKBACK} daily bars • breaker block zones ({CONFIRM_BARS}-bar confirm)",
+        img.alpha_composite(overlay)
+
+    # subtle card footer
+    d.text((cx0, cy1+2), f"{CHART_LOOKBACK} daily bars • nearest breaker ({CONFIRM_BARS}-bar confirm)",
            fill=TEXT_MUT, font=F_META)
 
 # -------- Page render --------
 def render_image(path, data_map):
+    # RGBA to allow alpha compositing
     img = Image.new("RGBA", (CANVAS_W, CANVAS_H), BG + (255,))
     d = ImageDraw.Draw(img)
     d.text((64,50), "ONES TO WATCH", fill=TEXT_MAIN, font=F_TITLE)
-    d.text((64,120), "Daily charts • breaker block zones", fill=TEXT_MUT, font=F_SUB)
+    d.text((64,120), "Daily charts • nearest breaker zone", fill=TEXT_MUT, font=F_SUB)
 
     if os.path.exists(LOGO_PATH):
         try:
@@ -290,8 +297,8 @@ def render_image(path, data_map):
             d.rectangle((x,y,x+12,y+card_h), fill=ACCENT)
             d.text((x+40,y+40), f"{t} – data unavailable", fill=DOWN_COL, font=F_TICK)
         else:
-            df,last,chg30,low_blk,high_blk = payload
-            draw_card(d, img, (x,y,x+w,y+card_h), t, df, last, chg30, low_blk, high_blk)
+            df,last,chg30,breaker = payload
+            draw_card(d, img, (x,y,x+w,y+card_h), t, df, last, chg30, breaker)
         y += card_h + margin
 
     d.text((64, CANVAS_H-30), "Ideas only – Not financial advice", fill=TEXT_MUT, font=F_META_PAGE)
@@ -343,7 +350,6 @@ img{{max-width:100%;height:auto;border-radius:12px;
 </rss>"""
     with open(os.path.join(DOCS_DIR, "feed.xml"), "w", encoding="utf-8") as f:
         f.write(feed)
-
 
 # -------- Main --------
 if __name__ == "__main__":
