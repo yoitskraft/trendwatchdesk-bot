@@ -9,47 +9,32 @@ import yfinance as yf
 # -------- CONFIG --------
 BRAND_NAME = "TrendWatchDesk"
 TIMEZONE   = "Europe/London"
-CANVAS_W, CANVAS_H = 1080, 1350
+CANVAS_W, CANVAS_H = 1000, 1000   # square 1:1
+MARGIN = 36
 
 # Visuals
 BG        = (255,255,255)
-CARD_BG   = (255,255,255)        # White cards
 TEXT_MAIN = (20,20,22)
-TEXT_MUT  = (160,165,175)
-GRID      = (225,228,232)
+TEXT_MUT  = (145,150,160)
+GRID      = (230,233,237)
 UP_COL    = (20,170,90)
 DOWN_COL  = (230,70,70)
-ACCENT    = (40,120,255)
 
-SUPPORT_FILL = (40,120,255,40)   # Blue shaded support
+SUPPORT_FILL = (40,120,255,44)   # Blue shaded support zone
 SUPPORT_EDGE = (40,120,255,120)
-SHADOW_GREY  = (0,0,0,30)        # Soft grey drop shadow
 
-CHART_LOOKBACK   = 90
+CHART_LOOKBACK   = 120   # more bars for a fuller square chart
 SUMMARY_LOOKBACK = 30
-YAHOO_PERIOD     = "1y"
-STOOQ_MAX_DAYS   = 250
+YAHOO_PERIOD     = "2y"
+STOOQ_MAX_DAYS   = 400
 
+# Weighted pool
 POOL = {
     "NVDA": 5, "MSFT": 4, "TSLA": 3, "AMZN": 5, "META": 4, "GOOG": 4, "AMD": 3,
     "UNH": 2, "AAPL": 5, "NFLX": 2, "BABA": 2, "JPM": 2, "DIS": 2, "BA": 1,
     "ORCL": 2, "NKE": 1, "PYPL": 1, "INTC": 2, "CRM": 2, "KO": 2
 }
-N_TICKERS = 3
-today_seed = datetime.date.today().strftime("%Y%m%d")
-
-def weighted_sample(pool: dict, n: int, seed: str):
-    tickers = list(pool.keys()); weights = list(pool.values())
-    expanded = [t for t,w in zip(tickers,weights) for _ in range(max(1,int(w)))]
-    rnd = random.Random(seed)
-    n = min(n, len(set(expanded)))
-    picked = []
-    while len(picked) < n and expanded:
-        t = rnd.choice(expanded)
-        if t not in picked: picked.append(t)
-    return picked
-
-TICKERS = weighted_sample(POOL, N_TICKERS, seed=today_seed)
+N_TICKERS = 3   # how many separate 1000x1000 posts to generate per run
 
 OUTPUT_DIR= "output"
 DOCS_DIR  = "docs"
@@ -72,26 +57,41 @@ SESS = make_session()
 # -------- Fonts --------
 def load_font(size=42, bold=False):
     pref = "fonts/Roboto-Bold.ttf" if bold else "fonts/Roboto-Regular.ttf"
-    if os.path.exists(pref): return ImageFont.truetype(pref, size)
+    if os.path.exists(pref): 
+        try: return ImageFont.truetype(pref, size)
+        except: pass
     fam = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
     try: return ImageFont.truetype(fam, size)
     except: return ImageFont.load_default()
 
-F_TITLE      = load_font(65,  bold=True)
-F_SUB        = load_font(30,  bold=False)
-F_TICK       = load_font(54,  bold=True)
-F_NUM        = load_font(46,  bold=True)
-F_CHG        = load_font(28,  bold=True)
-F_META       = load_font(18,  bold=False)
-F_META_PAGE  = load_font(24,  bold=False)
+F_TITLE     = load_font(60,  bold=True)   # ticker
+F_PRICE     = load_font(44,  bold=True)
+F_CHG       = load_font(30,  bold=True)
+F_SUB       = load_font(26,  bold=False)  # subtitle
+F_META      = load_font(20,  bold=False)  # footer
 
 # -------- Helpers --------
+def weighted_sample(pool: dict, n: int, seed: str):
+    tickers = list(pool.keys()); weights = list(pool.values())
+    expanded = [t for t,w in zip(tickers,weights) for _ in range(max(1,int(w)))]
+    rnd = random.Random(seed)
+    n = min(n, len(set(expanded)))
+    picked = []
+    while len(picked) < n and expanded:
+        t = rnd.choice(expanded)
+        if t not in picked: picked.append(t)
+    return picked
+
 def y_map(v, vmin, vmax, y0, y1):
     if vmax - vmin < 1e-6: return (y0 + y1)//2
     return int(y1 - (v - vmin) * (y1 - y0) / (vmax - vmin))
 
 # -------- Support Zone --------
 def support_zone(df):
+    """
+    Support zone = min-to-mean of last 15 swing lows.
+    Swing lows = rolling 5-bar minimums.
+    """
     lows = df["Low"].rolling(5).min().dropna()
     if len(lows) < 15: return None, None
     recent = lows.tail(15)
@@ -110,18 +110,22 @@ def fetch_stooq_daily(t):
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         df = df.dropna().set_index("Date").sort_index()
         return df.iloc[-STOOQ_MAX_DAYS:]
-    except: return None
+    except: 
+        return None
 
 def fetch_yahoo_daily(t):
     try:
         df = yf.download(tickers=t, period=YAHOO_PERIOD, interval="1d",
                          auto_adjust=False, progress=False, session=SESS)
         if df is not None and not df.empty: return df
-    except: return None
+    except: 
+        return None
     return None
 
 def clean_and_summarize(df):
     if df is None or df.empty: return None
+    cols_needed = [c for c in ["Open","High","Low","Close"] if c in df.columns]
+    if len(cols_needed) < 4: return None
     df = df[["Open","High","Low","Close"]].dropna()
     dfc = df.iloc[-CHART_LOOKBACK:].copy()
     if dfc.empty: return None
@@ -131,128 +135,102 @@ def clean_and_summarize(df):
     sup_low, sup_high = support_zone(dfc)
     return (dfc,last,chg30,sup_low,sup_high)
 
-def fetch_all_daily(tickers):
-    out = {}
-    for t in tickers:
-        df = fetch_stooq_daily(t)
-        if df is None: df = fetch_yahoo_daily(t)
-        out[t] = clean_and_summarize(df)
-        time.sleep(1)
-    return out
+def fetch_one(t):
+    df = fetch_stooq_daily(t)
+    if df is None:
+        df = fetch_yahoo_daily(t)
+    return clean_and_summarize(df)
 
-# -------- Draw --------
-def draw_card(d,img,box,ticker,df,last,chg30,sup_low,sup_high):
-    x0,y0,x1,y1 = box
+# -------- Render single post --------
+def render_single_post(path, ticker, payload):
+    df,last,chg30,sup_low,sup_high = payload
 
-    # Soft grey drop shadow
-    overlay_shadow = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0,0,0,0))
-    od = ImageDraw.Draw(overlay_shadow)
-    od.rounded_rectangle((x0+6,y0+6,x1+6,y1+6),14,fill=SHADOW_GREY)
-    img.alpha_composite(overlay_shadow)
+    img = Image.new("RGBA", (CANVAS_W, CANVAS_H), BG + (255,))
+    d = ImageDraw.Draw(img)
 
-    # Main white card body
-    d.rounded_rectangle((x0,y0,x1,y1),14,fill=CARD_BG)
+    # Header
+    y_head = MARGIN
+    d.text((MARGIN, y_head), ticker, fill=TEXT_MAIN, font=F_TITLE)
+    d.text((MARGIN, y_head+62), f"{last:,.2f} USD", fill=TEXT_MAIN, font=F_PRICE)
+    chg_col = UP_COL if chg30>=0 else DOWN_COL
+    d.text((MARGIN, y_head+62+46), f"{chg30:+.2f}% past {SUMMARY_LOOKBACK}d",
+           fill=chg_col, font=F_CHG)
+    d.text((MARGIN, y_head+62+46+36), "Daily chart • support zone", fill=TEXT_MUT, font=F_SUB)
 
-    pad=24; info_x=x0+pad; info_y=y0+pad
-    d.text((info_x,info_y),ticker,fill=TEXT_MAIN,font=F_TICK)
-    d.text((info_x,info_y+60),f"{last:,.2f} USD",fill=TEXT_MAIN,font=F_NUM)
-    chg_col=UP_COL if chg30>=0 else DOWN_COL
-    d.text((info_x,info_y+105),f"{chg30:+.2f}% past {SUMMARY_LOOKBACK}d",fill=chg_col,font=F_CHG)
-
-    cx0=x0+380; cx1=x1-pad; cy0=y0+pad; cy1=y1-pad-18
-    d.rectangle((cx0,cy0,cx1,cy1),fill=(255,255,255))
-
-    vmin=float(df["Low"].min()); vmax=float(df["High"].max())
-    n=len(df); step=(cx1-cx0)/max(1,n)
-    wick=max(1,int(step*0.12)); body=max(3,int(step*0.4))
-
-    for gy in (0.25,0.5,0.75):
-        y=int(cy0+gy*(cy1-cy0))
-        d.line([(cx0+4,y),(cx1-4,y)],fill=GRID,width=1)
-
-    for i,row in enumerate(df.itertuples(index=False)):
-        o,h,l,c=float(row.Open),float(row.High),float(row.Low),float(row.Close)
-        cx=int(cx0+i*step+step*0.5)
-        yH=y_map(h,vmin,vmax,cy0,cy1); yL=y_map(l,vmin,vmax,cy0,cy1)
-        yO=y_map(o,vmin,vmax,cy0,cy1); yC=y_map(c,vmin,vmax,cy0,cy1)
-        col=UP_COL if c>=o else DOWN_COL
-        d.line([(cx,yH),(cx,yL)],fill=col,width=wick)
-        top,bot=min(yO,yC),max(yO,yC)
-        if bot-top<2: bot=top+2
-        d.rectangle((cx-body//2,top,cx+body//2,bot),fill=col)
-
-    overlay=Image.new("RGBA",(CANVAS_W,CANVAS_H),(0,0,0,0))
-    od=ImageDraw.Draw(overlay)
-    if sup_low and sup_high:
-        y1=y_map(sup_low,vmin,vmax,cy0,cy1)
-        y2=y_map(sup_high,vmin,vmax,cy0,cy1)
-        od.rectangle((cx0,min(y1,y2),cx1,max(y1,y2)),
-                     fill=SUPPORT_FILL,outline=SUPPORT_EDGE)
-    img.alpha_composite(overlay)
-
-    d.text((cx0,cy1+2),f"{CHART_LOOKBACK} daily bars • support zone",
-           fill=TEXT_MUT,font=F_META)
-
-# -------- Page --------
-def render_image(path,data_map):
-    img=Image.new("RGBA",(CANVAS_W,CANVAS_H),BG+(255,))
-    d=ImageDraw.Draw(img)
-    d.text((64,50),"ONES TO WATCH",fill=TEXT_MAIN,font=F_TITLE)
-    d.text((64,120),"Daily charts • support zones",fill=TEXT_MUT,font=F_SUB)
-
+    # Optional logo (top-right)
     if os.path.exists(LOGO_PATH):
         try:
-            logo=Image.open(LOGO_PATH).convert("RGBA"); logo.thumbnail((200,200))
-            img.alpha_composite(logo,(CANVAS_W-logo.width-56,44))
-        except: pass
+            logo = Image.open(LOGO_PATH).convert("RGBA"); logo.thumbnail((180,180))
+            img.alpha_composite(logo, (CANVAS_W - logo.width - MARGIN, MARGIN))
+        except:
+            pass
 
-    cont=(48,220,CANVAS_W-48,CANVAS_H-60); margin=28
-    card_h=int((cont[3]-cont[1]-margin*4)/3)
-    x=cont[0]+margin; w=(cont[2]-cont[0])-margin*2; y=cont[1]+margin
+    # Chart area
+    top = 220
+    bot = CANVAS_H - 100
+    left = MARGIN
+    right = CANVAS_W - MARGIN
+    # Chart background
+    d.rectangle((left, top, right, bot), fill=(255,255,255))
 
-    for t in TICKERS:
-        payload=data_map.get(t)
-        if not payload:
-            d.rounded_rectangle((x,y,x+w,y+card_h),14,fill=CARD_BG)
-            d.text((x+40,y+40),f"{t} – data unavailable",fill=DOWN_COL,font=F_TICK)
-        else:
-            df,last,chg30,sup_low,sup_high=payload
-            draw_card(d,img,(x,y,x+w,y+card_h),t,df,last,chg30,sup_low,sup_high)
-        y+=card_h+margin
+    # Grid
+    for gy in (0.25, 0.5, 0.75):
+        y = int(top + gy*(bot-top))
+        d.line([(left+4,y),(right-4,y)], fill=GRID, width=1)
 
-    d.text((64,CANVAS_H-30),"Ideas only – Not financial advice",fill=TEXT_MUT,font=F_META_PAGE)
-    os.makedirs(OUTPUT_DIR,exist_ok=True)
-    out=Image.new("RGB",img.size,(255,255,255))
-    out.paste(img,mask=img.split()[-1]); out.save(path,"PNG",optimize=True)
+    vmin = float(df["Low"].min()); vmax = float(df["High"].max())
+    n = len(df)
+    step = (right-left)/max(1,n)
+    wick = max(1, int(step*0.12)); body = max(3, int(step*0.4))
 
-# -------- Docs --------
-def write_docs(latest_filename,ts_str):
-    os.makedirs(DOCS_DIR,exist_ok=True)
-    html=f"""<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{BRAND_NAME} – Ones to Watch</title>
-<style>
-body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;margin:0;padding:24px;background:#fff;color:#111}}
-.wrapper{{max-width:1080px;margin:0 auto;text-align:center}}
-img{{max-width:100%;height:auto;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.08)}}
-</style></head><body>
-<div class="wrapper">
-<h1>{BRAND_NAME} – Ones to Watch</h1>
-<img src="../output/{latest_filename}" alt="daily image"/>
-<p style="color:#666;font-size:14px">Ideas only – Not financial advice</p>
-</div></body></html>"""
-    with open(os.path.join(DOCS_DIR,"index.html"),"w",encoding="utf-8") as f: f.write(html)
+    # Candles
+    for i,row in enumerate(df.itertuples(index=False)):
+        o,h,l,c = float(row.Open), float(row.High), float(row.Low), float(row.Close)
+        cx = int(left + i*step + step*0.5)
+        yH = y_map(h, vmin, vmax, top, bot)
+        yL = y_map(l, vmin, vmax, top, bot)
+        yO = y_map(o, vmin, vmax, top, bot)
+        yC = y_map(c, vmin, vmax, top, bot)
+        col = UP_COL if c>=o else DOWN_COL
+        d.line([(cx,yH),(cx,yL)], fill=col, width=wick)
+        t, b = min(yO,yC), max(yO,yC)
+        if b-t < 2: b = t+2
+        d.rectangle((cx-body//2, t, cx+body//2, b), fill=col)
+
+    # Support zone band
+    if sup_low and sup_high:
+        overlay = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0,0,0,0))
+        od = ImageDraw.Draw(overlay)
+        y1 = y_map(sup_low, vmin, vmax, top, bot)
+        y2 = y_map(sup_high, vmin, vmax, top, bot)
+        od.rectangle((left, min(y1,y2), right, max(y1,y2)),
+                     fill=SUPPORT_FILL, outline=SUPPORT_EDGE, width=1)
+        img.alpha_composite(overlay)
+
+    # Footer
+    d.text((MARGIN, CANVAS_H-40), "Ideas only – Not financial advice", fill=TEXT_MUT, font=F_META)
+
+    # Save as RGB PNG
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    out = Image.new("RGB", img.size, (255,255,255))
+    out.paste(img, mask=img.split()[-1])
+    out.save(path, "PNG", optimize=True)
 
 # -------- Main --------
-if __name__=="__main__":
-    now=datetime.datetime.now(pytz.timezone(TIMEZONE))
-    datestr=now.strftime("%Y%m%d")
-    out_name=f"twd_{datestr}.png"
-    out_path=os.path.join(OUTPUT_DIR,out_name)
+if __name__ == "__main__":
+    now = datetime.datetime.now(pytz.timezone(TIMEZONE))
+    datestr = now.strftime("%Y%m%d")
 
-    data_map=fetch_all_daily(TICKERS)
-    render_image(out_path,data_map)
+    # pick tickers daily (weighted)
+    seed = datestr
+    tickers = weighted_sample(POOL, N_TICKERS, seed)
 
-    ts_str=now.strftime("%a, %d %b %Y %H:%M:%S %z")
-    write_docs(out_name,ts_str)
-    print("done:",out_path)
+    for t in tickers:
+        payload = fetch_one(t)
+        if not payload:
+            print(f"[warn] no data for {t}, skipping.")
+            continue
+        out_name = f"twd_{t}_{datestr}.png"
+        out_path = os.path.join(OUTPUT_DIR, out_name)
+        render_single_post(out_path, t, payload)
+        print("done:", out_path)
