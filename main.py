@@ -15,7 +15,7 @@ CANVAS_W, CANVAS_H = 1080, 1080
 MARGIN = 40
 
 # Debug: set True for one run to diagnose BoS visibility
-DEBUG_BOS = True  # <<< set to False after testing
+DEBUG_BOS = False  # set True to force a test line + logs
 
 # Colors
 BG        = (255,255,255)
@@ -261,45 +261,68 @@ def confluence_support_resistance(df):
     return (sup_low, sup_high, res_low, res_high, sup_label, res_label, (lows, highs))
 
 # =========================
-# BoS detection (VERBOSE)
+# Weekly BoS detection
 # =========================
-def detect_bos(df, swings, buffer_pct=0.0005, vol_threshold_pct=0.4):
+def resample_weekly(df):
     """
-    True BoS: close breaks last swing high/low by buffer and volume >= percentile.
-    Returns ("up"/"down"/None, swing_price, swing_index)
+    Resample to weekly (Fri close). Returns OHLCV with same columns.
     """
-    lows, highs = swings
-    if df is None or len(df) < 5:
-        if DEBUG_BOS: print("[bos] df too short")
+    w = pd.DataFrame({
+        "Open":  df["Open"].resample("W-FRI").first(),
+        "High":  df["High"].resample("W-FRI").max(),
+        "Low":   df["Low"].resample("W-FRI").min(),
+        "Close": df["Close"].resample("W-FRI").last(),
+        "Volume":df["Volume"].resample("W-FRI").sum()
+    }).dropna()
+    return w
+
+def detect_bos_weekly(dfd, buffer_pct=0.0005, vol_threshold_pct=0.4, w_fractal=2):
+    """
+    True weekly BoS: last weekly close breaks last weekly swing high/low by buffer
+    and weekly volume ≥ percentile.
+    Returns ("up"/"down"/None, swing_price, weekly_index)
+    """
+    if dfd is None or len(dfd) < 10:
+        if DEBUG_BOS: print("[bosW] weekly df too short")
         return (None, None, None)
 
-    close_last = float(df["Close"].iloc[-1])
-    vol_last   = float(df["Volume"].iloc[-1])
-    vol_bar = volume_percentile(df["Volume"].tail(120), vol_threshold_pct)
+    dfw = resample_weekly(dfd)
+    if dfw is None or dfw.empty or len(dfw) < 6:
+        if DEBUG_BOS: print("[bosW] weekly resample empty/short")
+        return (None, None, None)
+
+    # Find weekly swings
+    lows_w, highs_w = swing_points(dfw, w=w_fractal)
+
+    close_w_last = float(dfw["Close"].iloc[-1])
+    vol_w_last   = float(dfw["Volume"].iloc[-1])
+    vol_w_bar    = volume_percentile(dfw["Volume"].tail(60), vol_threshold_pct)
 
     if DEBUG_BOS:
-        hi_txt = f"{highs[-1][2]:.4f}@{highs[-1][0]}" if highs else "None"
-        lo_txt = f"{lows[-1][2]:.4f}@{lows[-1][0]}"   if lows  else "None"
-        print(f"[bos] close={close_last:.4f} vol={vol_last:.0f} vol_bar(p{int(vol_threshold_pct*100)})={vol_bar:.0f} "
-              f"last_high={hi_txt} last_low={lo_txt} buffer={buffer_pct*100:.2f}%")
+        hi_txt = f"{highs_w[-1][2]:.4f}@{highs_w[-1][0]}" if highs_w else "None"
+        lo_txt = f"{lows_w[-1][2]:.4f}@{lows_w[-1][0]}"   if lows_w  else "None"
+        print(f"[bosW] wclose={close_w_last:.4f} wvol={vol_w_last:.0f} wvol_bar(p{int(vol_threshold_pct*100)})={vol_w_bar:.0f} "
+              f"w_last_high={hi_txt} w_last_low={lo_txt} buffer={buffer_pct*100:.2f}%")
 
-    if highs:
-        i_hi, _, hi_price = highs[-1]
-        if (close_last > hi_price * (1 + buffer_pct)) and (vol_last >= vol_bar):
-            if DEBUG_BOS: print(f"[bos] UP break: close {close_last:.4f} > {hi_price*(1+buffer_pct):.4f} and vol ok")
+    # Up break
+    if highs_w:
+        i_hi, _, hi_price = highs_w[-1]
+        if (close_w_last > hi_price * (1 + buffer_pct)) and (vol_w_last >= vol_w_bar):
+            if DEBUG_BOS: print(f"[bosW] UP break weekly at {hi_price:.4f}")
             return ("up", hi_price, i_hi)
 
-    if lows:
-        i_lo, _, lo_price = lows[-1]
-        if (close_last < lo_price * (1 - buffer_pct)) and (vol_last >= vol_bar):
-            if DEBUG_BOS: print(f"[bos] DOWN break: close {close_last:.4f} < {lo_price*(1-buffer_pct):.4f} and vol ok")
+    # Down break
+    if lows_w:
+        i_lo, _, lo_price = lows_w[-1]
+        if (close_w_last < lo_price * (1 - buffer_pct)) and (vol_w_last >= vol_w_bar):
+            if DEBUG_BOS: print(f"[bosW] DOWN break weekly at {lo_price:.4f}")
             return ("down", lo_price, i_lo)
 
-    if DEBUG_BOS: print("[bos] no break")
+    if DEBUG_BOS: print("[bosW] no weekly break")
     return (None, None, None)
 
 # =========================
-# Data fetch/clean
+# Data
 # =========================
 def to_stooq_symbol(t): return f"{t.lower()}.us"
 
@@ -334,8 +357,10 @@ def clean_and_summarize(df):
     last = float(dfc["Close"].iloc[-1])
     chg30 = (last/float(dfs["Close"].iloc[0]) - 1.0)*100 if len(dfs)>1 else 0.0
 
-    sup_low, sup_high, res_low, res_high, sup_label, res_label, swings = confluence_support_resistance(dfc)
-    bos_dir, bos_level, bos_idx = detect_bos(dfc, swings, buffer_pct=0.0005, vol_threshold_pct=0.4)
+    sup_low, sup_high, res_low, res_high, sup_label, res_label, swings_d = confluence_support_resistance(dfc)
+
+    # Weekly BoS (primary). If weekly not found, no BoS drawn.
+    bos_dir, bos_level, bos_idx = detect_bos_weekly(dfc, buffer_pct=0.0005, vol_threshold_pct=0.4, w_fractal=2)
 
     return (dfc,last,chg30,sup_low,sup_high,res_low,res_high,
             sup_label,res_label,bos_dir,bos_level,bos_idx)
@@ -348,7 +373,7 @@ def fetch_one(t):
 # =========================
 # Drawing helpers
 # =========================
-def draw_bos_line_with_chip(d, left, right, top, bot, y, color, font_big, font_small):
+def draw_bos_line_with_chip(d, left, right, top, bot, y, color, font_big, font_small, tf_text="1W"):
     """High-contrast BoS: white underlay + colored dotted overlay + BOS chip."""
     y = int(max(top + 4, min(bot - 4, y)))  # clamp inside chart
 
@@ -363,8 +388,8 @@ def draw_bos_line_with_chip(d, left, right, top, bot, y, color, font_big, font_s
         d.line([(xx, y), (x_end, y)], fill=color, width=3)
         xx += dot_len + gap
 
-    # 3) right-side chip "BOS 1D"
-    lbl, tf = "BOS", "1D"
+    # 3) right-side chip "BOS <tf_text>"
+    lbl, tf = "BOS", tf_text
     tw, th = d.textbbox((0,0), lbl, font=font_big)[2:]
     tw2, th2 = d.textbbox((0,0), tf,  font=font_small)[2:]
     padx, pady = 8, 6
@@ -445,19 +470,19 @@ def render_single_post(path, ticker, payload, brand_logo_path):
     if DEBUG_BOS and not (bos_dir in ("up","down") and bos_level is not None):
         try:
             y_test = (top + bot) // 2
-            draw_bos_line_with_chip(d, left, right, top, bot, y_test, (0,0,0), F_CHG, F_META)
+            draw_bos_line_with_chip(d, left, right, top, bot, y_test, (0,0,0), F_CHG, F_META, tf_text="1W")
             d.text((left+8, top+8), "DEBUG: no BoS detected — drawing test line", fill=(0,0,0), font=F_META)
         except Exception as e:
             print("[debug] test line draw failed:", e)
 
-    # ---- BoS (draw LAST so it's on top) ----
+    # ---- Weekly BoS (draw LAST so it's on top) ----
     bos_caption = None
     if bos_dir in ("up","down") and (bos_level is not None) and (bos_idx is not None):
         try:
             yL = y_map(bos_level, vmin, vmax, top, bot)
             bos_col = UP_COL if bos_dir == "up" else DOWN_COL
-            draw_bos_line_with_chip(d, left, right, top, bot, yL, bos_col, F_CHG, F_META)
-            bos_caption = "BOS 1D (close+vol)"
+            draw_bos_line_with_chip(d, left, right, top, bot, yL, bos_col, F_CHG, F_META, tf_text="1W")
+            bos_caption = "BOS 1W (weekly close+vol)"
         except Exception as e:
             print("[warn] BoS draw failed:", e)
 
