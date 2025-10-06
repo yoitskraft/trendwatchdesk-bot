@@ -1,4 +1,4 @@
-import os, random, datetime, pytz, io, traceback
+import os, io, glob, random, datetime, pytz, traceback
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 import requests
@@ -30,12 +30,13 @@ SUMMARY_LOOKBACK = 30
 YAHOO_PERIOD     = "2y"
 STOOQ_MAX_DAYS   = 400
 
+# Keep pool reliable for CI
 POOL = {"AAPL":5, "MSFT":5, "NVDA":5, "AMZN":4, "GOOG":4, "META":3}
 N_TICKERS = 3
 
 OUTPUT_DIR = "output"
 LOGO_DIR   = "assets/logos"
-BRAND_LOGO = "assets/brand_logo.png"
+BRAND_DIR  = "assets"  # we will search inside here for your brand logo
 
 # -------- HTTP session (with retry) --------
 def make_session():
@@ -83,6 +84,42 @@ def y_map(v, vmin, vmax, y0, y1):
     if vmax - vmin < 1e-6: return (y0 + y1)//2
     return int(y1 - (v - vmin) * (y1 - y0) / (vmax - vmin))
 
+def case_insensitive_find(directory, base_no_ext):
+    """Return a file path in directory whose stem matches base_no_ext (case-insensitive)."""
+    if not os.path.isdir(directory): return None
+    for fn in os.listdir(directory):
+        stem, ext = os.path.splitext(fn)
+        if stem.upper() == base_no_ext.upper() and ext.lower() in (".png",".jpg",".jpeg",".webp"):
+            return os.path.join(directory, fn)
+    return None
+
+def find_ticker_logo_path(ticker):
+    # exact path first
+    exact = os.path.join(LOGO_DIR, f"{ticker}.png")
+    if os.path.exists(exact): return exact
+    # case-insensitive / different extension
+    alt = case_insensitive_find(LOGO_DIR, ticker)
+    return alt
+
+def find_brand_logo_path():
+    # Try canonical name first
+    candidates = [
+        os.path.join(BRAND_DIR, "brand_logo.png"),
+        os.path.join(BRAND_DIR, "brand_logo.PNG"),
+        os.path.join(BRAND_DIR, "brand-logo.png"),
+        os.path.join(BRAND_DIR, "logo.png"),
+        os.path.join(BRAND_DIR, "Logo.png"),
+    ]
+    for p in candidates:
+        if os.path.exists(p): return p
+    # scan assets/ for any png/jpg with 'logo' in name
+    if os.path.isdir(BRAND_DIR):
+        for fn in os.listdir(BRAND_DIR):
+            low = fn.lower()
+            if ("logo" in low) and os.path.splitext(low)[1] in (".png",".jpg",".jpeg"):
+                return os.path.join(BRAND_DIR, fn)
+    return None
+
 # -------- Zones --------
 def support_zone(df):
     lows = df["Low"].rolling(5).min().dropna()
@@ -109,14 +146,16 @@ def fetch_stooq_daily(t):
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         df = df.dropna().set_index("Date").sort_index()
         return df.iloc[-STOOQ_MAX_DAYS:]
-    except: return None
+    except Exception:
+        return None
 
 def fetch_yahoo_daily(t):
     try:
         df = yf.download(tickers=t, period=YAHOO_PERIOD, interval="1d",
                          auto_adjust=False, progress=False, session=SESS)
         if df is not None and not df.empty: return df
-    except: return None
+    except Exception:
+        return None
     return None
 
 def clean_and_summarize(df):
@@ -136,8 +175,18 @@ def fetch_one(t):
     if df is None: df = fetch_yahoo_daily(t)
     return clean_and_summarize(df)
 
+# -------- Image Helpers --------
+def write_placeholder(path, ticker, reason):
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    img = Image.new("RGB", (CANVAS_W, CANVAS_H), (255,255,255))
+    d = ImageDraw.Draw(img)
+    d.text((MARGIN, MARGIN), ticker, fill=(0,0,0), font=F_TITLE)
+    d.text((MARGIN, MARGIN+90), "Data unavailable", fill=(200,0,0), font=F_PRICE)
+    d.text((MARGIN, MARGIN+150), reason[:60], fill=(80,80,80), font=F_SUB)
+    img.save(path, "PNG", optimize=True)
+
 # -------- Drawing --------
-def render_single_post(path, ticker, payload):
+def render_single_post(path, ticker, payload, brand_logo_path):
     df,last,chg30,sup_low,sup_high,res_low,res_high = payload
     img = Image.new("RGBA", (CANVAS_W, CANVAS_H), BG + (255,))
     d = ImageDraw.Draw(img)
@@ -149,14 +198,18 @@ def render_single_post(path, ticker, payload):
     d.text((MARGIN, MARGIN+72+50), f"{chg30:+.2f}% past {SUMMARY_LOOKBACK}d", fill=chg_col, font=F_CHG)
     d.text((MARGIN, MARGIN+72+50+38), "Daily chart • support & resistance zones", fill=TEXT_MUT, font=F_SUB)
 
-    # Ticker logo top-right
-    logo_path = os.path.join(LOGO_DIR, f"{ticker}.png")
-    if os.path.exists(logo_path):
+    # Ticker logo top-right (optional)
+    t_logo = find_ticker_logo_path(ticker)
+    if t_logo:
         try:
-            logo = Image.open(logo_path).convert("RGBA")
+            logo = Image.open(t_logo).convert("RGBA")
             logo.thumbnail((140,140))
             img.alpha_composite(logo, (CANVAS_W - logo.width - MARGIN, MARGIN))
-        except: pass
+            print(f"[info] ticker logo used: {t_logo}")
+        except Exception as e:
+            print(f"[warn] ticker logo failed: {t_logo} ({e})")
+    else:
+        print(f"[warn] ticker logo not found for {ticker} in {LOGO_DIR}")
 
     # Chart area
     top = 260
@@ -207,29 +260,28 @@ def render_single_post(path, ticker, payload):
     # Footer
     d.text((MARGIN, CANVAS_H-40), "Ideas only – Not financial advice", fill=TEXT_MUT, font=F_META)
 
-    # --- Brand logo with chip (Option B)
-    if os.path.exists(BRAND_LOGO):
+    # Brand logo with chip
+    if brand_logo_path and os.path.exists(brand_logo_path):
         try:
-            brand = Image.open(BRAND_LOGO).convert("RGBA")
+            brand = Image.open(brand_logo_path).convert("RGBA")
             brand.thumbnail((180,180))
             bx = CANVAS_W - brand.width - MARGIN
             by = CANVAS_H - brand.height - MARGIN
 
-            # chip backdrop (light grey with rounded corners)
-            overlay = Image.new("RGBA", img.size, (0,0,0,0))
-            od = ImageDraw.Draw(overlay)
+            chip = Image.new("RGBA", img.size, (0,0,0,0))
+            cd = ImageDraw.Draw(chip)
             pad = 16
-            od.rounded_rectangle(
+            cd.rounded_rectangle(
                 (bx - pad, by - pad, bx + brand.width + pad, by + brand.height + pad),
-                radius=20,
-                fill=(240,240,240,255)
+                radius=20, fill=(240,240,240,255)
             )
-            img.alpha_composite(overlay)
-
-            # then logo on top
+            img.alpha_composite(chip)
             img.alpha_composite(brand, (bx, by))
+            print(f"[info] brand logo used: {brand_logo_path} ({brand.width}x{brand.height} after thumb)")
         except Exception as e:
-            print("[warn] brand logo draw failed:", e)
+            print(f"[warn] brand logo draw failed: {brand_logo_path} ({e})")
+    else:
+        print(f"[warn] brand logo not found under {BRAND_DIR} (looked for brand_logo.png, brand-logo.png, logo.png, etc.)")
 
     # Save
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -243,18 +295,42 @@ if __name__ == "__main__":
     now = datetime.datetime.now(pytz.timezone(TIMEZONE))
     datestr = now.strftime("%Y%m%d")
     tickers = weighted_sample(POOL, N_TICKERS, seed=datestr)
-    print("[info] selected tickers:", tickers)
+    print("[info] selected tickers:", tickers, flush=True)
 
+    # Resolve brand logo once, log result
+    BRAND_LOGO_PATH = find_brand_logo_path()
+    print("[info] resolved brand logo path:", BRAND_LOGO_PATH, flush=True)
+
+    made = 0
     for t in tickers:
         try:
-            print(f"[info] fetching {t} ...")
+            print(f"[info] fetching {t} ...", flush=True)
             payload = fetch_one(t)
             out_path = os.path.join(OUTPUT_DIR, f"twd_{t}_{datestr}.png")
             if not payload:
-                print(f"[warn] no data for {t}, skipping")
-                continue
-            render_single_post(out_path, t, payload)
-            print("done:", out_path)
+                print(f"[warn] no data for {t}, writing placeholder", flush=True)
+                write_placeholder(out_path, t, "fetch failed")
+            else:
+                try:
+                    render_single_post(out_path, t, payload, BRAND_LOGO_PATH)
+                except Exception as e:
+                    print(f"[error] render failed for {t}: {e}", flush=True)
+                    traceback.print_exc()
+                    write_placeholder(out_path, t, "render failed")
+            print("done:", out_path, flush=True)
+            made += 1
         except Exception as e:
-            print(f"[error] failed for {t}: {e}")
+            print(f"[fatal] {t} crashed: {e}", flush=True)
             traceback.print_exc()
+            try:
+                out_path = os.path.join(OUTPUT_DIR, f"twd_{t}_{datestr}.png")
+                write_placeholder(out_path, t, "fatal error")
+                print("done (placeholder):", out_path, flush=True)
+                made += 1
+            except:
+                pass
+
+    if made == 0:
+        diag = os.path.join(OUTPUT_DIR, f"twd_NO_DATA_{datestr}.png")
+        write_placeholder(diag, "NO_DATA", "all tickers failed")
+        print("done (global placeholder):", diag, flush=True)
