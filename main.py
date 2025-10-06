@@ -30,8 +30,32 @@ SUMMARY_LOOKBACK = 30
 YAHOO_PERIOD     = "2y"
 STOOQ_MAX_DAYS   = 400
 
-POOL = {"AAPL":5, "MSFT":5, "NVDA":5, "AMZN":4, "GOOG":4, "META":3}
-N_TICKERS = 6
+# -------- CATEGORY POOLS --------
+POOLS = {
+    "AI": [
+        "NVDA","MSFT","GOOG","META","AMD","AVGO","CRM","SNOW","PLTR","NOW"
+    ],
+    "QUANTUM": [
+        "IONQ","IBM","RGTI","AMZN","MSFT"   # Azure Quantum / AWS Braket
+    ],
+    "MAG7": [
+        "AAPL","MSFT","GOOG","AMZN","META","NVDA","TSLA"
+    ],
+    "HEALTHCARE": [
+        "UNH","LLY","JNJ","ABBV","MRK"
+    ],
+    "FINTECH": [
+        "V","MA","PYPL","SQ","SOFI"
+    ],
+    "SEMIS": [
+        "TSM","ASML","QCOM","INTC","AMD","MU","TXN"
+    ]
+}
+
+# Quotas + wildcards -> total posts per run (2 AI + 1 MAG7 + 1 HC + 1 Fintech + 1 Semis + 2 wildcards = 8)
+QUOTAS = [("AI", 2), ("MAG7", 1), ("HEALTHCARE", 1), ("FINTECH", 1), ("SEMIS", 1)]
+WILDCARDS = 2
+N_TICKERS = sum(q for _, q in QUOTAS) + WILDCARDS  # = 8
 
 OUTPUT_DIR = "output"
 LOGO_DIR   = "assets/logos"
@@ -68,17 +92,6 @@ F_SUB   = load_font(28,  bold=False)
 F_META  = load_font(22,  bold=False)
 
 # -------- Helpers --------
-def weighted_sample(pool: dict, n: int, seed: str):
-    tickers = list(pool.keys()); weights = list(pool.values())
-    expanded = [t for t,w in zip(tickers,weights) for _ in range(max(1,int(w)))]
-    rnd = random.Random(seed)
-    n = min(n, len(set(expanded)))
-    picked = []
-    while len(picked) < n and expanded:
-        t = rnd.choice(expanded)
-        if t not in picked: picked.append(t)
-    return picked
-
 def y_map(v, vmin, vmax, y0, y1):
     if vmax - vmin < 1e-6: return (y0 + y1)//2
     return int(y1 - (v - vmin) * (y1 - y0) / (vmax - vmin))
@@ -109,6 +122,41 @@ def find_brand_logo_path():
             if ("logo" in low) and os.path.splitext(low)[1] in (".png",".jpg",".jpeg"):
                 return os.path.join(BRAND_DIR, fn)
     return None
+
+def sample_with_quotas_and_wildcards(quotas, wildcards, pools, seed):
+    """Return unique tickers: satisfy quotas, then add `wildcards` from remaining universe."""
+    rnd = random.Random(seed)
+    chosen = []
+
+    def pick_from(category, k):
+        src = list(pools.get(category, []))
+        rnd.shuffle(src)
+        added = 0
+        for t in src:
+            if t not in chosen:
+                chosen.append(t)
+                added += 1
+                if added == k:
+                    break
+
+    # 1) Quotas
+    for cat, q in quotas:
+        pick_from(cat, q)
+
+    # 2) Wildcards
+    universe = []
+    for arr in pools.values():
+        for t in arr:
+            if t not in universe:
+                universe.append(t)
+    rnd.shuffle(universe)
+    for t in universe:
+        if len(chosen) >= (sum(q for _, q in quotas) + wildcards):
+            break
+        if t not in chosen:
+            chosen.append(t)
+
+    return chosen
 
 # -------- Zones --------
 def support_zone(df):
@@ -236,7 +284,8 @@ def render_single_post(path, ticker, payload, brand_logo_path):
     # Footer
     d.text((MARGIN, CANVAS_H-40), "Not financial advice", fill=TEXT_MUT, font=F_META)
 
-    # Brand logo (scaled max 120px width, no chip)
+    # Brand logo (max 120px width)
+    brand_logo_path = brand_logo_path or find_brand_logo_path()
     if brand_logo_path and os.path.exists(brand_logo_path):
         try:
             brand = Image.open(brand_logo_path).convert("RGBA")
@@ -261,7 +310,8 @@ if __name__ == "__main__":
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     now = datetime.datetime.now(pytz.timezone(TIMEZONE))
     datestr = now.strftime("%Y%m%d")
-    tickers = weighted_sample(POOL, N_TICKERS, seed=datestr)
+
+    tickers = sample_with_quotas_and_wildcards(QUOTAS, WILDCARDS, POOLS, seed=datestr)
     print("[info] selected tickers:", tickers)
 
     BRAND_LOGO_PATH = find_brand_logo_path()
