@@ -1,7 +1,6 @@
 import os, random, time, datetime, pytz, io
-import numpy as np
 import pandas as pd
-from PIL import Image, ImageDraw, ImageFont, Image
+from PIL import Image, ImageDraw, ImageFont
 import requests
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
@@ -54,7 +53,7 @@ TICKERS = weighted_sample(POOL, N_TICKERS, seed=today_seed)
 OUTPUT_DIR= "output"
 DOCS_DIR  = "docs"
 LOGO_PATH = "assets/logo.png"
-PAGES_URL = "https://yoitskraft.github.io/trendwatchdesk-bot/"
+PAGES_URL = "https://<your-username>.github.io/trendwatchdesk-bot/"
 
 # -------- HTTP session --------
 def make_session():
@@ -90,13 +89,16 @@ def y_map(v, vmin, vmax, y0, y1):
     if vmax - vmin < 1e-6: return (y0 + y1)//2
     return int(y1 - (v - vmin) * (y1 - y0) / (vmax - vmin))
 
-def clamp(v,a,b): return max(a, min(b,v))
-
-# -------- Support --------
-def support_level(df):
-    lows  = df["Low"].rolling(5).min().dropna()
-    if lows.empty: return None
-    return lows.tail(15).mean()
+# -------- Support Zone --------
+def support_zone(df):
+    """
+    Support zone = min-to-mean of last 15 swing lows.
+    Swing lows = rolling 5-bar minimums.
+    """
+    lows = df["Low"].rolling(5).min().dropna()
+    if len(lows) < 15: return None, None
+    recent = lows.tail(15)
+    return recent.min(), recent.mean()
 
 # -------- Data --------
 def to_stooq_symbol(t): return f"{t.lower()}.us"
@@ -129,8 +131,8 @@ def clean_and_summarize(df):
     dfs = df.iloc[-SUMMARY_LOOKBACK:].copy()
     last = float(dfc["Close"].iloc[-1])
     chg30 = (last/float(dfs["Close"].iloc[0]) - 1.0)*100 if len(dfs)>1 else 0
-    sup = support_level(dfc)
-    return (dfc,last,chg30,sup)
+    sup_low, sup_high = support_zone(dfc)
+    return (dfc,last,chg30,sup_low,sup_high)
 
 def fetch_all_daily(tickers):
     out = {}
@@ -142,7 +144,7 @@ def fetch_all_daily(tickers):
     return out
 
 # -------- Draw --------
-def draw_card(d,img,box,ticker,df,last,chg30,sup):
+def draw_card(d,img,box,ticker,df,last,chg30,sup_low,sup_high):
     x0,y0,x1,y1 = box
     d.rounded_rectangle((x0+6,y0+6,x1+6,y1+6),14,fill=(230,230,230))
     d.rounded_rectangle((x0,y0,x1,y1),14,fill=CARD_BG)
@@ -172,25 +174,28 @@ def draw_card(d,img,box,ticker,df,last,chg30,sup):
         yO=y_map(o,vmin,vmax,cy0,cy1); yC=y_map(c,vmin,vmax,cy0,cy1)
         col=UP_COL if c>=o else DOWN_COL
         d.line([(cx,yH),(cx,yL)],fill=col,width=wick)
-        top,bot=min(yO,yC),max(yO,yC); 
+        top,bot=min(yO,yC),max(yO,yC)
         if bot-top<2: bot=top+2
         d.rectangle((cx-body//2,top,cx+body//2,bot),fill=col)
 
     overlay=Image.new("RGBA",(CANVAS_W,CANVAS_H),(0,0,0,0))
     od=ImageDraw.Draw(overlay)
-    if sup:
-        yS=y_map(sup,vmin,vmax,cy0,cy1)
-        od.rectangle((cx0,yS-8,cx1,yS+8),fill=SUPPORT_FILL,outline=SUPPORT_EDGE)
+    if sup_low and sup_high:
+        y1=y_map(sup_low,vmin,vmax,cy0,cy1)
+        y2=y_map(sup_high,vmin,vmax,cy0,cy1)
+        od.rectangle((cx0,min(y1,y2),cx1,max(y1,y2)),
+                     fill=SUPPORT_FILL,outline=SUPPORT_EDGE)
     img.alpha_composite(overlay)
 
-    d.text((cx0,cy1+2),f"{CHART_LOOKBACK} daily bars • support zone",fill=TEXT_MUT,font=F_META)
+    d.text((cx0,cy1+2),f"{CHART_LOOKBACK} daily bars • support zone",
+           fill=TEXT_MUT,font=F_META)
 
 # -------- Page --------
 def render_image(path,data_map):
     img=Image.new("RGBA",(CANVAS_W,CANVAS_H),BG+(255,))
     d=ImageDraw.Draw(img)
     d.text((64,50),"ONES TO WATCH",fill=TEXT_MAIN,font=F_TITLE)
-    d.text((64,120),"Daily charts • support zone",fill=TEXT_MUT,font=F_SUB)
+    d.text((64,120),"Daily charts • support zones",fill=TEXT_MUT,font=F_SUB)
 
     if os.path.exists(LOGO_PATH):
         try:
@@ -208,8 +213,8 @@ def render_image(path,data_map):
             d.rounded_rectangle((x,y,x+w,y+card_h),14,fill=CARD_BG)
             d.text((x+40,y+40),f"{t} – data unavailable",fill=DOWN_COL,font=F_TICK)
         else:
-            df,last,chg30,sup=payload
-            draw_card(d,img,(x,y,x+w,y+card_h),t,df,last,chg30,sup)
+            df,last,chg30,sup_low,sup_high=payload
+            draw_card(d,img,(x,y,x+w,y+card_h),t,df,last,chg30,sup_low,sup_high)
         y+=card_h+margin
 
     d.text((64,CANVAS_H-30),"Ideas only – Not financial advice",fill=TEXT_MUT,font=F_META_PAGE)
