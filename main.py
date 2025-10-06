@@ -31,7 +31,7 @@ YAHOO_PERIOD     = "2y"
 STOOQ_MAX_DAYS   = 400
 
 POOL = {"AAPL":5, "MSFT":5, "NVDA":5, "AMZN":4, "GOOG":4, "META":3}
-N_TICKERS = 3
+N_TICKERS = 6
 
 OUTPUT_DIR = "output"
 LOGO_DIR   = "assets/logos"
