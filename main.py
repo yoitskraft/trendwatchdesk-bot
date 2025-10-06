@@ -14,20 +14,21 @@ TIMEZONE   = "Europe/London"
 CANVAS_W, CANVAS_H = 1080, 1080
 MARGIN = 40
 
-# Turn on only if you want to debug BoS (prints + forced test line)
+# Turn on only to debug BOS visibility (prints + forced test line)
 DEBUG_BOS = False
 
-# Colors
+# Colors (lighter grid, softer zones)
 BG        = (255,255,255)
 TEXT_MAIN = (20,20,22)
 TEXT_MUT  = (145,150,160)
-GRID      = (230,233,237)
+GRID      = (238,241,244)            # lighter
 UP_COL    = (20,170,90)
 DOWN_COL  = (230,70,70)
 
-SUPPORT_FILL = (40,120,255,44)
-SUPPORT_EDGE = (40,120,255,120)
-RESIST_FILL  = (230,70,70,40)
+# Softer S/R (≈25–28% opacity)
+SUPPORT_FILL = (40,120,255,64)       # ~25%
+SUPPORT_EDGE = (40,120,255,110)
+RESIST_FILL  = (230,70,70,72)        # ~28%
 RESIST_EDGE  = (230,70,70,120)
 
 CHART_LOOKBACK   = 120
@@ -35,7 +36,7 @@ SUMMARY_LOOKBACK = 30
 YAHOO_PERIOD     = "2y"
 STOOQ_MAX_DAYS   = 400
 
-# Pools / quotas (8 images per run: quotas + 2 wildcards)
+# Pools / quotas (8 per run: quotas + 2 wildcards)
 POOLS = {
     "AI": ["NVDA","MSFT","GOOG","META","AMD","AVGO","CRM","SNOW","PLTR","NOW"],
     "QUANTUM": ["IONQ","IBM","RGTI","AMZN","MSFT"],
@@ -48,8 +49,8 @@ QUOTAS    = [("AI",2), ("MAG7",1), ("HEALTHCARE",1), ("FINTECH",1), ("SEMIS",1)]
 WILDCARDS = 2
 
 OUTPUT_DIR = "output"
-LOGO_DIR   = "assets/logos"
-BRAND_DIR  = "assets"
+LOGO_DIR   = "assets/logos"   # company logos: AAPL.png, MSFT.png, ...
+BRAND_DIR  = "assets"         # brand_logo.png (bottom-right)
 
 # =========================
 # HTTP session with retry
@@ -81,8 +82,8 @@ def load_font(size=42, bold=False):
 F_TITLE = load_font(70,  bold=True)
 F_PRICE = load_font(46,  bold=True)
 F_CHG   = load_font(34,  bold=True)
-F_SUB   = load_font(28,  bold=False)   # also used for small BOS label
-F_META  = load_font(20,  bold=False)   # tiny captions + chip subtext
+F_SUB   = load_font(28,  bold=False)   # also BOS "BOS" label
+F_META  = load_font(20,  bold=False)   # tiny captions + BOS timeframe
 
 # =========================
 # Helpers
@@ -125,8 +126,7 @@ def sample_with_quotas_and_wildcards(quotas, wildcards, pools, seed):
             if t not in chosen:
                 chosen.append(t); k -= 1
                 if k == 0: break
-    for cat, q in quotas:
-        pick_from(cat, q)
+    for cat, q in quotas: pick_from(cat, q)
     universe = []
     for arr in pools.values():
         for t in arr:
@@ -266,40 +266,28 @@ def resample_weekly(df):
     return w
 
 def detect_bos_weekly(dfd, buffer_pct=0.0005, vol_threshold_pct=0.4, w_fractal=2):
-    if dfd is None or len(dfd) < 10:
-        if DEBUG_BOS: print("[bosW] weekly df too short")
-        return (None, None, None)
+    if dfd is None or len(dfd) < 10: return (None, None, None)
     dfw = resample_weekly(dfd)
-    if dfw is None or dfw.empty or len(dfw) < 6:
-        if DEBUG_BOS: print("[bosW] weekly resample empty/short")
-        return (None, None, None)
-
+    if dfw is None or dfw.empty or len(dfw) < 6: return (None, None, None)
     lows_w, highs_w = swing_points(dfw, w=w_fractal)
+    if not (lows_w or highs_w): return (None, None, None)
+
     close_w_last = float(dfw["Close"].iloc[-1])
     vol_w_last   = float(dfw["Volume"].iloc[-1])
     vol_w_bar    = volume_percentile(dfw["Volume"].tail(60), vol_threshold_pct)
-
-    if DEBUG_BOS:
-        hi_txt = f"{highs_w[-1][2]:.4f}@{highs_w[-1][0]}" if highs_w else "None"
-        lo_txt = f"{lows_w[-1][2]:.4f}@{lows_w[-1][0]}"   if lows_w  else "None"
-        print(f"[bosW] wclose={close_w_last:.4f} wvol={vol_w_last:.0f} wvol_bar={vol_w_bar:.0f} buffer={buffer_pct*100:.2f}% "
-              f"whigh={hi_txt} wlow={lo_txt}")
 
     if highs_w:
         i_hi, _, hi_price = highs_w[-1]
         if (close_w_last > hi_price * (1 + buffer_pct)) and (vol_w_last >= vol_w_bar):
             return ("up", hi_price, i_hi)
-
     if lows_w:
         i_lo, _, lo_price = lows_w[-1]
         if (close_w_last < lo_price * (1 - buffer_pct)) and (vol_w_last >= vol_w_bar):
             return ("down", lo_price, i_lo)
-
     return (None, None, None)
 
 def detect_bos_daily(dfd, buffer_pct=0.0003, vol_threshold_pct=0.3, d_fractal=2):
-    if dfd is None or len(dfd) < 20:
-        return (None, None, None)
+    if dfd is None or len(dfd) < 20: return (None, None, None)
     lows_d, highs_d = swing_points(dfd, w=d_fractal)
     if not (lows_d or highs_d): return (None, None, None)
 
@@ -350,18 +338,16 @@ def clean_and_summarize(df):
     dfc = df.iloc[-CHART_LOOKBACK:].copy()
     if dfc.empty: return None
     dfs = df.iloc[-SUMMARY_LOOKBACK:].copy()
-    last = float(dfc["Close"].iloc[-1])
+    last = float(dfs["Close"].iloc[-1])
     chg30 = (last/float(dfs["Close"].iloc[0]) - 1.0)*100 if len(dfs)>1 else 0.0
 
     sup_low, sup_high, res_low, res_high, sup_label, res_label, swings_d = confluence_support_resistance(dfc)
 
-    # Weekly first, then daily fallback
     bos_dir, bos_level, bos_idx = detect_bos_weekly(dfc, buffer_pct=0.0005, vol_threshold_pct=0.4, w_fractal=2)
     bos_tf = "1W"
     if bos_dir is None:
         bos_dir, bos_level, bos_idx = detect_bos_daily(dfc, buffer_pct=0.0003, vol_threshold_pct=0.3, d_fractal=2)
-        if bos_dir is not None:
-            bos_tf = "1D"
+        if bos_dir is not None: bos_tf = "1D"
 
     return (dfc,last,chg30,sup_low,sup_high,res_low,res_high,
             sup_label,res_label,bos_dir,bos_level,bos_idx,bos_tf)
@@ -375,13 +361,13 @@ def fetch_one(t):
 # Drawing helpers
 # =========================
 def draw_bos_line_with_chip(d, left, right, top, bot, y, color, font_lbl, font_tf, tf_text="1W"):
-    """High-contrast BoS: white underlay + colored dotted overlay + SMALL chip."""
-    y = int(max(top + 4, min(bot - 4, y)))  # clamp inside chart
+    """High-contrast BOS: white underlay + colored dotted overlay + compact chip."""
+    y = int(max(top + 4, min(bot - 4, y)))
 
-    # White underlay for contrast
+    # white underlay for contrast
     d.line([(left, y), (right, y)], fill=(255,255,255), width=6)
 
-    # Colored dotted overlay
+    # colored dotted overlay
     dot_len, gap = 12, 6
     xx = left
     while xx < right:
@@ -389,7 +375,7 @@ def draw_bos_line_with_chip(d, left, right, top, bot, y, color, font_lbl, font_t
         d.line([(xx, y), (x_end, y)], fill=color, width=3)
         xx += dot_len + gap
 
-    # Compact chip "BOS <tf>"
+    # compact chip
     lbl = "BOS"
     tw, th   = d.textbbox((0,0), lbl, font=font_lbl)[2:]
     tw2, th2 = d.textbbox((0,0), tf_text, font=font_tf)[2:]
@@ -399,10 +385,8 @@ def draw_bos_line_with_chip(d, left, right, top, bot, y, color, font_lbl, font_t
     bx = right - box_w - 10
     by = max(top + 8, min(bot - box_h - 8, y - box_h//2))
     d.rectangle((bx, by, bx + box_w, by + box_h), fill=(255,255,255), outline=(220,220,220), width=1)
-    tx = bx + max(0, (box_w - tw)//2)
-    d.text((tx, by + pady), lbl, fill=color, font=font_lbl)
-    tx2 = bx + max(0, (box_w - tw2)//2)
-    d.text((tx2, by + pady + th + 3), tf_text, fill=color, font=font_tf)
+    d.text((bx + max(0,(box_w - tw)//2),  by + pady),           lbl,   fill=color, font=font_lbl)
+    d.text((bx + max(0,(box_w - tw2)//2), by + pady + th + 3), tf_text, fill=color, font=font_tf)
 
 # =========================
 # Render one post
@@ -414,21 +398,25 @@ def render_single_post(path, ticker, payload, brand_logo_path):
     img = Image.new("RGBA", (CANVAS_W, CANVAS_H), BG + (255,))
     d = ImageDraw.Draw(img)
 
-    # Header
+    # Header (reserve space for ticker logo at right)
+    right_pad_for_logo = 180
     d.text((MARGIN, MARGIN), ticker, fill=TEXT_MAIN, font=F_TITLE)
     d.text((MARGIN, MARGIN+72), f"{last:,.2f} USD", fill=TEXT_MAIN, font=F_PRICE)
     chg_col = UP_COL if chg30>=0 else DOWN_COL
     d.text((MARGIN, MARGIN+122), f"{chg30:+.2f}% past {SUMMARY_LOOKBACK}d", fill=chg_col, font=F_CHG)
     d.text((MARGIN, MARGIN+122+38), "Daily chart • confluence S/R zones", fill=TEXT_MUT, font=F_SUB)
 
-    # Ticker logo
+    # Ticker/company logo (top-right)
     t_logo = find_ticker_logo_path(ticker)
     if t_logo:
         try:
             logo = Image.open(t_logo).convert("RGBA")
             logo.thumbnail((140,140))
-            img.alpha_composite(logo, (CANVAS_W - logo.width - MARGIN, MARGIN))
-        except: pass
+            lx = CANVAS_W - logo.width - MARGIN
+            ly = MARGIN
+            img.alpha_composite(logo, (lx, ly))
+        except Exception as e:
+            print("[warn] ticker logo draw failed:", e)
 
     # Chart area
     top = 260; bot = CANVAS_H - 100; left = MARGIN; right = CANVAS_W - MARGIN
@@ -452,7 +440,7 @@ def render_single_post(path, ticker, payload, brand_logo_path):
         if b-t < 2: b = t+2
         d.rectangle((cx-body//2, t, cx+body//2, b), fill=col)
 
-    # Zones overlay
+    # Zones overlay (draw before BOS)
     overlay = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0,0,0,0))
     od = ImageDraw.Draw(overlay)
     if sup_low and sup_high:
@@ -467,25 +455,16 @@ def render_single_post(path, ticker, payload, brand_logo_path):
                      fill=RESIST_FILL, outline=RESIST_EDGE, width=1)
     img.alpha_composite(overlay)
 
-    # --- DEBUG: force a visible test line if no BoS detected ---
+    # --- DEBUG: test line if no BOS ---
     if DEBUG_BOS and not (bos_dir in ("up","down") and bos_level is not None):
-        try:
-            y_test = (top + bot) // 2
-            draw_bos_line_with_chip(d, left, right, top, bot, y_test, (0,0,0), F_SUB, F_META, tf_text="TEST")
-            d.text((left+8, top+8), "DEBUG: no BoS detected — drawing test line", fill=(0,0,0), font=F_META)
-        except Exception as e:
-            print("[debug] test line draw failed:", e)
+        y_test = (top + bot) // 2
+        draw_bos_line_with_chip(d, left, right, top, bot, y_test, (0,0,0), F_SUB, F_META, tf_text="TEST")
 
-    # ---- BoS (draw LAST so it's on top) ----
-    bos_caption = None
+    # ---- BOS (draw LAST on top) ----
     if bos_dir in ("up","down") and (bos_level is not None) and (bos_idx is not None):
-        try:
-            yL = y_map(bos_level, vmin, vmax, top, bot)
-            bos_col = UP_COL if bos_dir == "up" else DOWN_COL
-            draw_bos_line_with_chip(d, left, right, top, bot, yL, bos_col, F_SUB, F_META, tf_text=bos_tf)
-            bos_caption = f"BOS {bos_tf} (close+vol)"
-        except Exception as e:
-            print("[warn] BoS draw failed:", e)
+        yL = y_map(bos_level, vmin, vmax, top, bot)
+        bos_col = UP_COL if bos_dir == "up" else DOWN_COL
+        draw_bos_line_with_chip(d, left, right, top, bot, yL, bos_col, F_SUB, F_META, tf_text=bos_tf)
 
     # Captions
     caption_y = CANVAS_H - 68
@@ -493,13 +472,10 @@ def render_single_post(path, ticker, payload, brand_logo_path):
         d.text((MARGIN, caption_y), sup_label, fill=TEXT_MUT, font=F_META); caption_y -= 18
     if res_label:
         d.text((MARGIN, caption_y), res_label, fill=TEXT_MUT, font=F_META); caption_y -= 18
-    if bos_caption:
-        d.text((MARGIN, caption_y), bos_caption, fill=TEXT_MUT, font=F_META)
 
     # Footer + brand
     d.text((MARGIN, CANVAS_H-40), "Not financial advice", fill=TEXT_MUT, font=F_META)
-
-    brand_logo_path = brand_logo_path or find_brand_logo_path()
+    brand_logo_path = find_brand_logo_path()
     if brand_logo_path and os.path.exists(brand_logo_path):
         try:
             brand = Image.open(brand_logo_path).convert("RGBA")
@@ -529,17 +505,13 @@ if __name__ == "__main__":
     tickers = sample_with_quotas_and_wildcards(QUOTAS, WILDCARDS, POOLS, seed=datestr)
     print("[info] selected tickers:", tickers)
 
-    BRAND_LOGO_PATH = find_brand_logo_path()
-    print("[info] resolved brand logo path:", BRAND_LOGO_PATH)
-
     for t in tickers:
         try:
             payload = fetch_one(t)
             out_path = os.path.join(OUTPUT_DIR, f"twd_{t}_{datestr}.png")
             if not payload:
-                print(f("[warn] no data for {t}, skipping"))
-                continue
-            render_single_post(out_path, t, payload, BRAND_LOGO_PATH)
+                print(f"[warn] no data for {t}, skipping"); continue
+            render_single_post(out_path, t, payload, None)
             print("done:", out_path)
         except Exception as e:
             print(f"[error] failed for {t}: {e}")
