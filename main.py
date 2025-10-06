@@ -1,4 +1,4 @@
-import os, random, datetime, pytz, io
+import os, random, datetime, pytz, io, traceback
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 import requests
@@ -9,7 +9,7 @@ import yfinance as yf
 # -------- CONFIG --------
 BRAND_NAME = "TrendWatchDesk"
 TIMEZONE   = "Europe/London"
-CANVAS_W, CANVAS_H = 1080, 1080   # Instagram square
+CANVAS_W, CANVAS_H = 1080, 1080
 MARGIN = 40
 
 # Visuals
@@ -20,9 +20,9 @@ GRID      = (230,233,237)
 UP_COL    = (20,170,90)
 DOWN_COL  = (230,70,70)
 
-SUPPORT_FILL = (40,120,255,44)   # Blue shaded support
+SUPPORT_FILL = (40,120,255,44)
 SUPPORT_EDGE = (40,120,255,120)
-RESIST_FILL  = (230,70,70,40)    # Red shaded resistance
+RESIST_FILL  = (230,70,70,40)
 RESIST_EDGE  = (230,70,70,120)
 
 CHART_LOOKBACK   = 120
@@ -30,17 +30,13 @@ SUMMARY_LOOKBACK = 30
 YAHOO_PERIOD     = "2y"
 STOOQ_MAX_DAYS   = 400
 
-# Weighted pool
-POOL = {
-    "NVDA": 5, "MSFT": 4, "TSLA": 3, "AMZN": 5, "META": 4, "GOOG": 4, "AMD": 3,
-    "UNH": 2, "AAPL": 5, "NFLX": 2, "BABA": 2, "JPM": 2, "DIS": 2, "BA": 1,
-    "ORCL": 2, "NKE": 1, "PYPL": 1, "INTC": 2, "CRM": 2, "KO": 2
-}
-N_TICKERS = 3   # how many separate posts per run
+# Keep pool simple/reliable while debugging
+POOL = {"AAPL":5, "MSFT":5, "NVDA":5, "AMZN":4, "GOOG":4, "META":3}
+N_TICKERS = 3
 
 OUTPUT_DIR = "output"
-LOGO_DIR   = "assets/logos"     # ticker logos as PNG named AAPL.png, MSFT.png, etc.
-BRAND_LOGO = "assets/brand_logo.png"  # your TrendWatchDesk logo PNG
+LOGO_DIR   = "assets/logos"
+BRAND_LOGO = "assets/brand_logo.png"
 
 # -------- HTTP session (with retry) --------
 def make_session():
@@ -48,7 +44,7 @@ def make_session():
     s.headers.update({"User-Agent": "Mozilla/5.0"})
     retry = Retry(
         total=5,
-        backoff_factor=0.6,
+        backoff_factor=0.7,
         status_forcelist=[429,500,502,503,504],
         allowed_methods=["GET","POST"],
     )
@@ -99,7 +95,6 @@ def y_map(v, vmin, vmax, y0, y1):
 
 # -------- Zones --------
 def support_zone(df):
-    """Support = min -> mean of last 15 swing lows (rolling 5-bar mins)."""
     lows = df["Low"].rolling(5).min().dropna()
     if len(lows) < 15:
         return None, None
@@ -107,7 +102,6 @@ def support_zone(df):
     return float(recent.min()), float(recent.mean())
 
 def resistance_zone(df):
-    """Resistance = mean -> max of last 15 swing highs (rolling 5-bar maxes)."""
     highs = df["High"].rolling(5).max().dropna()
     if len(highs) < 15:
         return None, None
@@ -128,7 +122,7 @@ def fetch_stooq_daily(t):
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         df = df.dropna().set_index("Date").sort_index()
         return df.iloc[-STOOQ_MAX_DAYS:]
-    except:
+    except Exception:
         return None
 
 def fetch_yahoo_daily(t):
@@ -137,7 +131,7 @@ def fetch_yahoo_daily(t):
                          auto_adjust=False, progress=False, session=SESS)
         if df is not None and not df.empty:
             return df
-    except:
+    except Exception:
         return None
     return None
 
@@ -161,38 +155,37 @@ def fetch_one(t):
         df = fetch_yahoo_daily(t)
     return clean_and_summarize(df)
 
-# -------- Render single post --------
+# -------- Drawing --------
 def render_single_post(path, ticker, payload):
     df,last,chg30,sup_low,sup_high,res_low,res_high = payload
-
     img = Image.new("RGBA", (CANVAS_W, CANVAS_H), BG + (255,))
     d = ImageDraw.Draw(img)
 
-    # --- Header text
+    # Header
     d.text((MARGIN, MARGIN), ticker, fill=TEXT_MAIN, font=F_TITLE)
     d.text((MARGIN, MARGIN+72), f"{last:,.2f} USD", fill=TEXT_MAIN, font=F_PRICE)
     chg_col = UP_COL if chg30>=0 else DOWN_COL
     d.text((MARGIN, MARGIN+72+50), f"{chg30:+.2f}% past {SUMMARY_LOOKBACK}d", fill=chg_col, font=F_CHG)
     d.text((MARGIN, MARGIN+72+50+38), "Daily chart • support & resistance zones", fill=TEXT_MUT, font=F_SUB)
 
-    # --- Ticker logo top-right
+    # Ticker logo top-right (optional)
     logo_path = os.path.join(LOGO_DIR, f"{ticker}.png")
     if os.path.exists(logo_path):
         try:
             logo = Image.open(logo_path).convert("RGBA")
             logo.thumbnail((140,140))
             img.alpha_composite(logo, (CANVAS_W - logo.width - MARGIN, MARGIN))
-        except:
+        except Exception:
             pass
 
-    # --- Chart area
+    # Chart area
     top = 260
     bot = CANVAS_H - 100
     left = MARGIN
     right = CANVAS_W - MARGIN
     d.rectangle((left, top, right, bot), fill=(255,255,255))
 
-    # --- Grid lines
+    # Grid
     for gy in (0.25, 0.5, 0.75):
         y = int(top + gy*(bot-top))
         d.line([(left+4,y),(right-4,y)], fill=GRID, width=1)
@@ -202,7 +195,7 @@ def render_single_post(path, ticker, payload):
     step = (right-left)/max(1,n)
     wick = max(1, int(step*0.12)); body = max(3, int(step*0.4))
 
-    # --- Candlesticks
+    # Candles
     for i,row in enumerate(df.itertuples(index=False)):
         o,h,l,c = float(row.Open), float(row.High), float(row.Low), float(row.Close)
         cx = int(left + i*step + step*0.5)
@@ -216,7 +209,7 @@ def render_single_post(path, ticker, payload):
         if b-t < 2: b = t+2
         d.rectangle((cx-body//2, t, cx+body//2, b), fill=col)
 
-    # --- Zones overlay
+    # Zones overlay
     overlay = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0,0,0,0))
     od = ImageDraw.Draw(overlay)
     if sup_low and sup_high:
@@ -231,38 +224,77 @@ def render_single_post(path, ticker, payload):
                      fill=RESIST_FILL, outline=RESIST_EDGE, width=1)
     img.alpha_composite(overlay)
 
-    # --- Footer text
+    # Footer
     d.text((MARGIN, CANVAS_H-40), "Ideas only – Not financial advice", fill=TEXT_MUT, font=F_META)
 
-    # --- Brand logo bottom-right
+    # Brand logo bottom-right (optional)
     if os.path.exists(BRAND_LOGO):
         try:
             brand = Image.open(BRAND_LOGO).convert("RGBA")
-            brand.thumbnail((180,180))  # adjust if you want larger/smaller
+            brand.thumbnail((180,180))
             bx = CANVAS_W - brand.width - MARGIN
             by = CANVAS_H - brand.height - MARGIN
             img.alpha_composite(brand, (bx, by))
-        except:
+        except Exception:
             pass
 
-    # --- Save final
+    # Save
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     out = Image.new("RGB", img.size, (255,255,255))
     out.paste(img, mask=img.split()[-1])
     out.save(path, "PNG", optimize=True)
 
+# -------- Placeholder helpers --------
+def write_placeholder(path, ticker, reason):
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    img = Image.new("RGB", (CANVAS_W, CANVAS_H), (255,255,255))
+    d = ImageDraw.Draw(img)
+    d.text((MARGIN, MARGIN), ticker, fill=(0,0,0), font=F_TITLE)
+    d.text((MARGIN, MARGIN+90), "Data unavailable", fill=(200,0,0), font=F_PRICE)
+    d.text((MARGIN, MARGIN+150), reason[:60], fill=(80,80,80), font=F_SUB)
+    img.save(path, "PNG", optimize=True)
+
 # -------- Main --------
 if __name__ == "__main__":
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
     now = datetime.datetime.now(pytz.timezone(TIMEZONE))
     datestr = now.strftime("%Y%m%d")
     tickers = weighted_sample(POOL, N_TICKERS, seed=datestr)
+    print("[info] selected tickers:", tickers, flush=True)
 
+    made = 0
     for t in tickers:
-        payload = fetch_one(t)
-        if not payload:
-            print(f"[warn] no data for {t}, skipping.")
-            continue
-        out_name = f"twd_{t}_{datestr}.png"
-        out_path = os.path.join(OUTPUT_DIR, out_name)
-        render_single_post(out_path, t, payload)
-        print("done:", out_path)
+        try:
+            print(f"[info] fetching {t} ...", flush=True)
+            payload = fetch_one(t)
+            out_path = os.path.join(OUTPUT_DIR, f"twd_{t}_{datestr}.png")
+            if not payload:
+                print(f"[warn] no data for {t}, writing placeholder", flush=True)
+                write_placeholder(out_path, t, "fetch failed")
+            else:
+                try:
+                    render_single_post(out_path, t, payload)
+                except Exception as e:
+                    print(f"[error] render failed for {t}: {e}", flush=True)
+                    traceback.print_exc()
+                    write_placeholder(out_path, t, "render failed")
+            print("done:", out_path, flush=True)
+            made += 1
+        except Exception as e:
+            print(f"[fatal] {t} crashed: {e}", flush=True)
+            traceback.print_exc()
+            # still try to write something
+            try:
+                out_path = os.path.join(OUTPUT_DIR, f"twd_{t}_{datestr}.png")
+                write_placeholder(out_path, t, "fatal error")
+                print("done (placeholder):", out_path, flush=True)
+                made += 1
+            except:
+                pass
+
+    # If somehow nothing got written, produce a global diagnostic PNG
+    if made == 0:
+        diag = os.path.join(OUTPUT_DIR, f"twd_NO_DATA_{datestr}.png")
+        write_placeholder(diag, "NO_DATA", "all tickers failed")
+        print("done (global placeholder):", diag, flush=True)
