@@ -87,8 +87,8 @@ def load_font(size=42, bold=False):
 F_TITLE = load_font(70,  bold=True)
 F_PRICE = load_font(46,  bold=True)
 F_CHG   = load_font(34,  bold=True)
-F_SUB   = load_font(28,  bold=False)
-F_META  = load_font(20,  bold=False)  # tiny captions + chip subtext
+F_SUB   = load_font(28,  bold=False)   # smaller than before
+F_META  = load_font(20,  bold=False)   # tiny captions + chip subtext
 
 # =========================
 # Helpers
@@ -255,7 +255,7 @@ def confluence_support_resistance(df):
         resistances.sort(key=lambda x: (-x[1], x[0] - last))
         r_level = resistances[0][0]
         half = max(atr_val*0.25, last*0.002, 0.2)
-        res_low, res_high = r_level - half, r_level + half
+        res_low, res_high = r_level - half, res_level + half if False else r_level + half  # keep style
         res_label = f"Resistance ~{r_level:.2f}"
 
     return (sup_low, sup_high, res_low, res_high, sup_label, res_label, (lows, highs))
@@ -264,9 +264,6 @@ def confluence_support_resistance(df):
 # Weekly BoS detection
 # =========================
 def resample_weekly(df):
-    """
-    Resample to weekly (Fri close). Returns OHLCV with same columns.
-    """
     w = pd.DataFrame({
         "Open":  df["Open"].resample("W-FRI").first(),
         "High":  df["High"].resample("W-FRI").max(),
@@ -277,23 +274,15 @@ def resample_weekly(df):
     return w
 
 def detect_bos_weekly(dfd, buffer_pct=0.0005, vol_threshold_pct=0.4, w_fractal=2):
-    """
-    True weekly BoS: last weekly close breaks last weekly swing high/low by buffer
-    and weekly volume ≥ percentile.
-    Returns ("up"/"down"/None, swing_price, weekly_index)
-    """
     if dfd is None or len(dfd) < 10:
         if DEBUG_BOS: print("[bosW] weekly df too short")
         return (None, None, None)
-
     dfw = resample_weekly(dfd)
     if dfw is None or dfw.empty or len(dfw) < 6:
         if DEBUG_BOS: print("[bosW] weekly resample empty/short")
         return (None, None, None)
 
-    # Find weekly swings
     lows_w, highs_w = swing_points(dfw, w=w_fractal)
-
     close_w_last = float(dfw["Close"].iloc[-1])
     vol_w_last   = float(dfw["Volume"].iloc[-1])
     vol_w_bar    = volume_percentile(dfw["Volume"].tail(60), vol_threshold_pct)
@@ -304,14 +293,12 @@ def detect_bos_weekly(dfd, buffer_pct=0.0005, vol_threshold_pct=0.4, w_fractal=2
         print(f"[bosW] wclose={close_w_last:.4f} wvol={vol_w_last:.0f} wvol_bar(p{int(vol_threshold_pct*100)})={vol_w_bar:.0f} "
               f"w_last_high={hi_txt} w_last_low={lo_txt} buffer={buffer_pct*100:.2f}%")
 
-    # Up break
     if highs_w:
         i_hi, _, hi_price = highs_w[-1]
         if (close_w_last > hi_price * (1 + buffer_pct)) and (vol_w_last >= vol_w_bar):
             if DEBUG_BOS: print(f"[bosW] UP break weekly at {hi_price:.4f}")
             return ("up", hi_price, i_hi)
 
-    # Down break
     if lows_w:
         i_lo, _, lo_price = lows_w[-1]
         if (close_w_last < lo_price * (1 - buffer_pct)) and (vol_w_last >= vol_w_bar):
@@ -358,8 +345,6 @@ def clean_and_summarize(df):
     chg30 = (last/float(dfs["Close"].iloc[0]) - 1.0)*100 if len(dfs)>1 else 0.0
 
     sup_low, sup_high, res_low, res_high, sup_label, res_label, swings_d = confluence_support_resistance(dfc)
-
-    # Weekly BoS (primary). If weekly not found, no BoS drawn.
     bos_dir, bos_level, bos_idx = detect_bos_weekly(dfc, buffer_pct=0.0005, vol_threshold_pct=0.4, w_fractal=2)
 
     return (dfc,last,chg30,sup_low,sup_high,res_low,res_high,
@@ -374,10 +359,10 @@ def fetch_one(t):
 # Drawing helpers
 # =========================
 def draw_bos_line_with_chip(d, left, right, top, bot, y, color, font_big, font_small, tf_text="1W"):
-    """High-contrast BoS: white underlay + colored dotted overlay + BOS chip."""
+    """High-contrast BoS: white underlay + colored dotted overlay + SMALL BOS chip."""
     y = int(max(top + 4, min(bot - 4, y)))  # clamp inside chart
 
-    # 1) solid white underlay (contrast over zones/candles)
+    # 1) solid white underlay (contrast)
     d.line([(left, y), (right, y)], fill=(255,255,255), width=6)
 
     # 2) colored dotted overlay
@@ -388,19 +373,20 @@ def draw_bos_line_with_chip(d, left, right, top, bot, y, color, font_big, font_s
         d.line([(xx, y), (x_end, y)], fill=color, width=3)
         xx += dot_len + gap
 
-    # 3) right-side chip "BOS <tf_text>"
+    # 3) compact chip "BOS <tf_text>"
     lbl, tf = "BOS", tf_text
-    tw, th = d.textbbox((0,0), lbl, font=font_big)[2:]
+    # use smaller fonts: font_big should be F_SUB, font_small F_META
+    tw, th   = d.textbbox((0,0), lbl, font=font_big)[2:]
     tw2, th2 = d.textbbox((0,0), tf,  font=font_small)[2:]
-    padx, pady = 8, 6
-    box_w = max(tw, tw2) + 2*padx
+    padx, pady = 6, 4                  # tighter padding
+    box_w = min(max(tw, tw2) + 2*padx, 86)  # cap width so it stays small
     box_h = th + th2 + 3 + 2*pady
-    bx = right - box_w - 12
+    bx = right - box_w - 10
     by = max(top + 8, min(bot - box_h - 8, y - box_h//2))
     d.rectangle((bx, by, bx + box_w, by + box_h), fill=(255,255,255), outline=(220,220,220), width=1)
-    tx = bx + (box_w - tw)//2
+    tx = bx + max(0, (box_w - tw)//2)
     d.text((tx, by + pady), lbl, fill=color, font=font_big)
-    tx2 = bx + (box_w - tw2)//2
+    tx2 = bx + max(0, (box_w - tw2)//2)
     d.text((tx2, by + pady + th + 3), tf,  fill=color, font=font_small)
 
 # =========================
@@ -451,7 +437,7 @@ def render_single_post(path, ticker, payload, brand_logo_path):
         if b-t < 2: b = t+2
         d.rectangle((cx-body//2, t, cx+body//2, b), fill=col)
 
-    # Zones (overlay first)
+    # Zones overlay
     overlay = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0,0,0,0))
     od = ImageDraw.Draw(overlay)
     if sup_low and sup_high:
@@ -466,22 +452,23 @@ def render_single_post(path, ticker, payload, brand_logo_path):
                      fill=RESIST_FILL, outline=RESIST_EDGE, width=1)
     img.alpha_composite(overlay)
 
-    # --- DEBUG: force a visible line if no BoS to verify drawing path ---
+    # --- DEBUG: test line if no BoS ---
     if DEBUG_BOS and not (bos_dir in ("up","down") and bos_level is not None):
         try:
             y_test = (top + bot) // 2
-            draw_bos_line_with_chip(d, left, right, top, bot, y_test, (0,0,0), F_CHG, F_META, tf_text="1W")
+            draw_bos_line_with_chip(d, left, right, top, bot, y_test, (0,0,0), F_SUB, F_META, tf_text="1W")
             d.text((left+8, top+8), "DEBUG: no BoS detected — drawing test line", fill=(0,0,0), font=F_META)
         except Exception as e:
             print("[debug] test line draw failed:", e)
 
-    # ---- Weekly BoS (draw LAST so it's on top) ----
+    # ---- Weekly BoS (on top) ----
     bos_caption = None
     if bos_dir in ("up","down") and (bos_level is not None) and (bos_idx is not None):
         try:
             yL = y_map(bos_level, vmin, vmax, top, bot)
             bos_col = UP_COL if bos_dir == "up" else DOWN_COL
-            draw_bos_line_with_chip(d, left, right, top, bot, yL, bos_col, F_CHG, F_META, tf_text="1W")
+            # smaller chip fonts here: F_SUB (label) + F_META (tf)
+            draw_bos_line_with_chip(d, left, right, top, bot, yL, bos_col, F_SUB, F_META, tf_text="1W")
             bos_caption = "BOS 1W (weekly close+vol)"
         except Exception as e:
             print("[warn] BoS draw failed:", e)
