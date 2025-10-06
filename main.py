@@ -14,8 +14,8 @@ TIMEZONE   = "Europe/London"
 CANVAS_W, CANVAS_H = 1080, 1080
 MARGIN = 40
 
-# Debug: set True for one run to diagnose BoS visibility
-DEBUG_BOS = False  # set True to force a test line + logs
+# Turn on only if you want to debug BoS (prints + forced test line)
+DEBUG_BOS = False
 
 # Colors
 BG        = (255,255,255)
@@ -57,11 +57,9 @@ BRAND_DIR  = "assets"
 def make_session():
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0"})
-    retry = Retry(
-        total=5, backoff_factor=0.7,
-        status_forcelist=[429,500,502,503,504],
-        allowed_methods=["GET","POST"]
-    )
+    retry = Retry(total=5, backoff_factor=0.7,
+                  status_forcelist=[429,500,502,503,504],
+                  allowed_methods=["GET","POST"])
     adapter = HTTPAdapter(max_retries=retry)
     s.mount("http://", adapter)
     s.mount("https://", adapter)
@@ -74,28 +72,23 @@ SESS = make_session()
 def load_font(size=42, bold=False):
     pref = "fonts/Roboto-Bold.ttf" if bold else "fonts/Roboto-Regular.ttf"
     if os.path.exists(pref):
-        try:
-            return ImageFont.truetype(pref, size)
-        except:
-            pass
+        try: return ImageFont.truetype(pref, size)
+        except: pass
     fam = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
-    try:
-        return ImageFont.truetype(fam, size)
-    except:
-        return ImageFont.load_default()
+    try: return ImageFont.truetype(fam, size)
+    except: return ImageFont.load_default()
 
 F_TITLE = load_font(70,  bold=True)
 F_PRICE = load_font(46,  bold=True)
 F_CHG   = load_font(34,  bold=True)
-F_SUB   = load_font(28,  bold=False)   # smaller than before
+F_SUB   = load_font(28,  bold=False)   # also used for small BOS label
 F_META  = load_font(20,  bold=False)   # tiny captions + chip subtext
 
 # =========================
 # Helpers
 # =========================
 def y_map(v, vmin, vmax, y0, y1):
-    if vmax - vmin < 1e-6:
-        return (y0 + y1)//2
+    if vmax - vmin < 1e-6: return (y0 + y1)//2
     return int(y1 - (v - vmin) * (y1 - y0) / (vmax - vmin))
 
 def case_insensitive_find(directory, base_no_ext):
@@ -130,8 +123,7 @@ def sample_with_quotas_and_wildcards(quotas, wildcards, pools, seed):
         rnd.shuffle(src)
         for t in src:
             if t not in chosen:
-                chosen.append(t)
-                k -= 1
+                chosen.append(t); k -= 1
                 if k == 0: break
     for cat, q in quotas:
         pick_from(cat, q)
@@ -255,13 +247,13 @@ def confluence_support_resistance(df):
         resistances.sort(key=lambda x: (-x[1], x[0] - last))
         r_level = resistances[0][0]
         half = max(atr_val*0.25, last*0.002, 0.2)
-        res_low, res_high = r_level - half, res_level + half if False else r_level + half  # keep style
+        res_low, res_high = r_level - half, r_level + half
         res_label = f"Resistance ~{r_level:.2f}"
 
     return (sup_low, sup_high, res_low, res_high, sup_label, res_label, (lows, highs))
 
 # =========================
-# Weekly BoS detection
+# BoS detection (Weekly + Daily fallback)
 # =========================
 def resample_weekly(df):
     w = pd.DataFrame({
@@ -290,26 +282,43 @@ def detect_bos_weekly(dfd, buffer_pct=0.0005, vol_threshold_pct=0.4, w_fractal=2
     if DEBUG_BOS:
         hi_txt = f"{highs_w[-1][2]:.4f}@{highs_w[-1][0]}" if highs_w else "None"
         lo_txt = f"{lows_w[-1][2]:.4f}@{lows_w[-1][0]}"   if lows_w  else "None"
-        print(f"[bosW] wclose={close_w_last:.4f} wvol={vol_w_last:.0f} wvol_bar(p{int(vol_threshold_pct*100)})={vol_w_bar:.0f} "
-              f"w_last_high={hi_txt} w_last_low={lo_txt} buffer={buffer_pct*100:.2f}%")
+        print(f"[bosW] wclose={close_w_last:.4f} wvol={vol_w_last:.0f} wvol_bar={vol_w_bar:.0f} buffer={buffer_pct*100:.2f}% "
+              f"whigh={hi_txt} wlow={lo_txt}")
 
     if highs_w:
         i_hi, _, hi_price = highs_w[-1]
         if (close_w_last > hi_price * (1 + buffer_pct)) and (vol_w_last >= vol_w_bar):
-            if DEBUG_BOS: print(f"[bosW] UP break weekly at {hi_price:.4f}")
             return ("up", hi_price, i_hi)
 
     if lows_w:
         i_lo, _, lo_price = lows_w[-1]
         if (close_w_last < lo_price * (1 - buffer_pct)) and (vol_w_last >= vol_w_bar):
-            if DEBUG_BOS: print(f"[bosW] DOWN break weekly at {lo_price:.4f}")
             return ("down", lo_price, i_lo)
 
-    if DEBUG_BOS: print("[bosW] no weekly break")
+    return (None, None, None)
+
+def detect_bos_daily(dfd, buffer_pct=0.0003, vol_threshold_pct=0.3, d_fractal=2):
+    if dfd is None or len(dfd) < 20:
+        return (None, None, None)
+    lows_d, highs_d = swing_points(dfd, w=d_fractal)
+    if not (lows_d or highs_d): return (None, None, None)
+
+    close_last = float(dfd["Close"].iloc[-1])
+    vol_last   = float(dfd["Volume"].iloc[-1])
+    vol_bar    = volume_percentile(dfd["Volume"].tail(120), vol_threshold_pct)
+
+    if highs_d:
+        i_hi, _, hi_price = highs_d[-1]
+        if (close_last > hi_price * (1 + buffer_pct)) and (vol_last >= vol_bar):
+            return ("up", hi_price, i_hi)
+    if lows_d:
+        i_lo, _, lo_price = lows_d[-1]
+        if (close_last < lo_price * (1 - buffer_pct)) and (vol_last >= vol_bar):
+            return ("down", lo_price, i_lo)
     return (None, None, None)
 
 # =========================
-# Data
+# Data fetch/clean
 # =========================
 def to_stooq_symbol(t): return f"{t.lower()}.us"
 
@@ -345,10 +354,17 @@ def clean_and_summarize(df):
     chg30 = (last/float(dfs["Close"].iloc[0]) - 1.0)*100 if len(dfs)>1 else 0.0
 
     sup_low, sup_high, res_low, res_high, sup_label, res_label, swings_d = confluence_support_resistance(dfc)
+
+    # Weekly first, then daily fallback
     bos_dir, bos_level, bos_idx = detect_bos_weekly(dfc, buffer_pct=0.0005, vol_threshold_pct=0.4, w_fractal=2)
+    bos_tf = "1W"
+    if bos_dir is None:
+        bos_dir, bos_level, bos_idx = detect_bos_daily(dfc, buffer_pct=0.0003, vol_threshold_pct=0.3, d_fractal=2)
+        if bos_dir is not None:
+            bos_tf = "1D"
 
     return (dfc,last,chg30,sup_low,sup_high,res_low,res_high,
-            sup_label,res_label,bos_dir,bos_level,bos_idx)
+            sup_label,res_label,bos_dir,bos_level,bos_idx,bos_tf)
 
 def fetch_one(t):
     df = fetch_stooq_daily(t)
@@ -358,14 +374,14 @@ def fetch_one(t):
 # =========================
 # Drawing helpers
 # =========================
-def draw_bos_line_with_chip(d, left, right, top, bot, y, color, font_big, font_small, tf_text="1W"):
-    """High-contrast BoS: white underlay + colored dotted overlay + SMALL BOS chip."""
+def draw_bos_line_with_chip(d, left, right, top, bot, y, color, font_lbl, font_tf, tf_text="1W"):
+    """High-contrast BoS: white underlay + colored dotted overlay + SMALL chip."""
     y = int(max(top + 4, min(bot - 4, y)))  # clamp inside chart
 
-    # 1) solid white underlay (contrast)
+    # White underlay for contrast
     d.line([(left, y), (right, y)], fill=(255,255,255), width=6)
 
-    # 2) colored dotted overlay
+    # Colored dotted overlay
     dot_len, gap = 12, 6
     xx = left
     while xx < right:
@@ -373,28 +389,27 @@ def draw_bos_line_with_chip(d, left, right, top, bot, y, color, font_big, font_s
         d.line([(xx, y), (x_end, y)], fill=color, width=3)
         xx += dot_len + gap
 
-    # 3) compact chip "BOS <tf_text>"
-    lbl, tf = "BOS", tf_text
-    # use smaller fonts: font_big should be F_SUB, font_small F_META
-    tw, th   = d.textbbox((0,0), lbl, font=font_big)[2:]
-    tw2, th2 = d.textbbox((0,0), tf,  font=font_small)[2:]
-    padx, pady = 6, 4                  # tighter padding
-    box_w = min(max(tw, tw2) + 2*padx, 86)  # cap width so it stays small
+    # Compact chip "BOS <tf>"
+    lbl = "BOS"
+    tw, th   = d.textbbox((0,0), lbl, font=font_lbl)[2:]
+    tw2, th2 = d.textbbox((0,0), tf_text, font=font_tf)[2:]
+    padx, pady = 6, 4
+    box_w = min(max(tw, tw2) + 2*padx, 86)
     box_h = th + th2 + 3 + 2*pady
     bx = right - box_w - 10
     by = max(top + 8, min(bot - box_h - 8, y - box_h//2))
     d.rectangle((bx, by, bx + box_w, by + box_h), fill=(255,255,255), outline=(220,220,220), width=1)
     tx = bx + max(0, (box_w - tw)//2)
-    d.text((tx, by + pady), lbl, fill=color, font=font_big)
+    d.text((tx, by + pady), lbl, fill=color, font=font_lbl)
     tx2 = bx + max(0, (box_w - tw2)//2)
-    d.text((tx2, by + pady + th + 3), tf,  fill=color, font=font_small)
+    d.text((tx2, by + pady + th + 3), tf_text, fill=color, font=font_tf)
 
 # =========================
 # Render one post
 # =========================
 def render_single_post(path, ticker, payload, brand_logo_path):
     (df,last,chg30,sup_low,sup_high,res_low,res_high,
-     sup_label,res_label,bos_dir,bos_level,bos_idx) = payload
+     sup_label,res_label,bos_dir,bos_level,bos_idx,bos_tf) = payload
 
     img = Image.new("RGBA", (CANVAS_W, CANVAS_H), BG + (255,))
     d = ImageDraw.Draw(img)
@@ -452,24 +467,23 @@ def render_single_post(path, ticker, payload, brand_logo_path):
                      fill=RESIST_FILL, outline=RESIST_EDGE, width=1)
     img.alpha_composite(overlay)
 
-    # --- DEBUG: test line if no BoS ---
+    # --- DEBUG: force a visible test line if no BoS detected ---
     if DEBUG_BOS and not (bos_dir in ("up","down") and bos_level is not None):
         try:
             y_test = (top + bot) // 2
-            draw_bos_line_with_chip(d, left, right, top, bot, y_test, (0,0,0), F_SUB, F_META, tf_text="1W")
+            draw_bos_line_with_chip(d, left, right, top, bot, y_test, (0,0,0), F_SUB, F_META, tf_text="TEST")
             d.text((left+8, top+8), "DEBUG: no BoS detected — drawing test line", fill=(0,0,0), font=F_META)
         except Exception as e:
             print("[debug] test line draw failed:", e)
 
-    # ---- Weekly BoS (on top) ----
+    # ---- BoS (draw LAST so it's on top) ----
     bos_caption = None
     if bos_dir in ("up","down") and (bos_level is not None) and (bos_idx is not None):
         try:
             yL = y_map(bos_level, vmin, vmax, top, bot)
             bos_col = UP_COL if bos_dir == "up" else DOWN_COL
-            # smaller chip fonts here: F_SUB (label) + F_META (tf)
-            draw_bos_line_with_chip(d, left, right, top, bot, yL, bos_col, F_SUB, F_META, tf_text="1W")
-            bos_caption = "BOS 1W (weekly close+vol)"
+            draw_bos_line_with_chip(d, left, right, top, bot, yL, bos_col, F_SUB, F_META, tf_text=bos_tf)
+            bos_caption = f"BOS {bos_tf} (close+vol)"
         except Exception as e:
             print("[warn] BoS draw failed:", e)
 
@@ -523,7 +537,7 @@ if __name__ == "__main__":
             payload = fetch_one(t)
             out_path = os.path.join(OUTPUT_DIR, f"twd_{t}_{datestr}.png")
             if not payload:
-                print(f"[warn] no data for {t}, skipping")
+                print(f("[warn] no data for {t}, skipping"))
                 continue
             render_single_post(out_path, t, payload, BRAND_LOGO_PATH)
             print("done:", out_path)
