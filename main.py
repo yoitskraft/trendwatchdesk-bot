@@ -23,6 +23,7 @@ ACCENT    = (40,120,255)
 
 SUPPORT_FILL = (40,120,255,40)   # Blue shaded
 SUPPORT_EDGE = (40,120,255,120)
+SHADOW_BLUE  = (40,120,255,50)   # Translucent blue drop shadow
 
 CHART_LOOKBACK   = 90
 SUMMARY_LOOKBACK = 30
@@ -53,7 +54,7 @@ TICKERS = weighted_sample(POOL, N_TICKERS, seed=today_seed)
 OUTPUT_DIR= "output"
 DOCS_DIR  = "docs"
 LOGO_PATH = "assets/logo.png"
-PAGES_URL = "https://<your-username>.github.io/trendwatchdesk-bot/"
+PAGES_URL = "https://yoitskraft.github.io/trendwatchdesk-bot/"
 
 # -------- HTTP session --------
 def make_session():
@@ -91,10 +92,6 @@ def y_map(v, vmin, vmax, y0, y1):
 
 # -------- Support Zone --------
 def support_zone(df):
-    """
-    Support zone = min-to-mean of last 15 swing lows.
-    Swing lows = rolling 5-bar minimums.
-    """
     lows = df["Low"].rolling(5).min().dropna()
     if len(lows) < 15: return None, None
     recent = lows.tail(15)
@@ -146,9 +143,15 @@ def fetch_all_daily(tickers):
 # -------- Draw --------
 def draw_card(d,img,box,ticker,df,last,chg30,sup_low,sup_high):
     x0,y0,x1,y1 = box
-    d.rounded_rectangle((x0+6,y0+6,x1+6,y1+6),14,fill=(230,230,230))
+
+    # Blue drop shadow (on overlay so it can be translucent)
+    overlay_shadow = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0,0,0,0))
+    od = ImageDraw.Draw(overlay_shadow)
+    od.rounded_rectangle((x0+6,y0+6,x1+6,y1+6),14,fill=SHADOW_BLUE)
+    img.alpha_composite(overlay_shadow)
+
+    # Main card body
     d.rounded_rectangle((x0,y0,x1,y1),14,fill=CARD_BG)
-    d.rectangle((x0,y0,x0+12,y1), fill=ACCENT)
 
     pad=24; info_x=x0+pad; info_y=y0+pad
     d.text((info_x,info_y),ticker,fill=TEXT_MAIN,font=F_TICK)
