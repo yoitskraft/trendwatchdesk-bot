@@ -1,4 +1,4 @@
-import os, random, time, datetime, pytz, io
+import os, random, datetime, pytz, io
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 import requests
@@ -9,8 +9,8 @@ import yfinance as yf
 # -------- CONFIG --------
 BRAND_NAME = "TrendWatchDesk"
 TIMEZONE   = "Europe/London"
-CANVAS_W, CANVAS_H = 1080, 1080   # square 1:1
-MARGIN = 36
+CANVAS_W, CANVAS_H = 1080, 1080   # Instagram square
+MARGIN = 40
 
 # Visuals
 BG        = (255,255,255)
@@ -25,21 +25,20 @@ SUPPORT_EDGE = (40,120,255,120)
 RESIST_FILL  = (230,70,70,40)    # Red shaded resistance
 RESIST_EDGE  = (230,70,70,120)
 
-CHART_LOOKBACK   = 120   # more bars for a fuller square chart
+CHART_LOOKBACK   = 120
 SUMMARY_LOOKBACK = 30
 YAHOO_PERIOD     = "2y"
 STOOQ_MAX_DAYS   = 400
 
-# Weighted pool (edit as you like)
 POOL = {
     "NVDA": 5, "MSFT": 4, "TSLA": 3, "AMZN": 5, "META": 4, "GOOG": 4, "AMD": 3,
     "UNH": 2, "AAPL": 5, "NFLX": 2, "BABA": 2, "JPM": 2, "DIS": 2, "BA": 1,
     "ORCL": 2, "NKE": 1, "PYPL": 1, "INTC": 2, "CRM": 2, "KO": 2
 }
-N_TICKERS = 3   # how many separate 1000x1000 posts per run
+N_TICKERS = 3
 
 OUTPUT_DIR= "output"
-LOGO_PATH = "assets/logo.png"
+LOGO_DIR  = "assets/logos"   # <-- put ticker logos here
 
 # -------- HTTP session --------
 def make_session():
@@ -64,11 +63,11 @@ def load_font(size=42, bold=False):
     try: return ImageFont.truetype(fam, size)
     except: return ImageFont.load_default()
 
-F_TITLE     = load_font(60,  bold=True)   # ticker
-F_PRICE     = load_font(44,  bold=True)
-F_CHG       = load_font(30,  bold=True)
-F_SUB       = load_font(26,  bold=False)  # subtitle
-F_META      = load_font(20,  bold=False)  # footer
+F_TITLE     = load_font(70,  bold=True)
+F_PRICE     = load_font(46,  bold=True)
+F_CHG       = load_font(34,  bold=True)
+F_SUB       = load_font(28,  bold=False)
+F_META      = load_font(22,  bold=False)
 
 # -------- Helpers --------
 def weighted_sample(pool: dict, n: int, seed: str):
@@ -88,20 +87,12 @@ def y_map(v, vmin, vmax, y0, y1):
 
 # -------- Zones --------
 def support_zone(df):
-    """
-    Support zone = min -> mean of last 15 swing lows.
-    Swing lows = rolling 5-bar minimums.
-    """
     lows = df["Low"].rolling(5).min().dropna()
     if len(lows) < 15: return None, None
     recent = lows.tail(15)
     return float(recent.min()), float(recent.mean())
 
 def resistance_zone(df):
-    """
-    Resistance zone = mean -> max of last 15 swing highs.
-    Swing highs = rolling 5-bar maximums.
-    """
     highs = df["High"].rolling(5).max().dropna()
     if len(highs) < 15: return None, None
     recent = highs.tail(15)
@@ -134,8 +125,6 @@ def fetch_yahoo_daily(t):
 
 def clean_and_summarize(df):
     if df is None or df.empty: return None
-    cols_needed = [c for c in ["Open","High","Low","Close"] if c in df.columns]
-    if len(cols_needed) < 4: return None
     df = df[["Open","High","Low","Close"]].dropna()
     dfc = df.iloc[-CHART_LOOKBACK:].copy()
     if dfc.empty: return None
@@ -148,8 +137,7 @@ def clean_and_summarize(df):
 
 def fetch_one(t):
     df = fetch_stooq_daily(t)
-    if df is None:
-        df = fetch_yahoo_daily(t)
+    if df is None: df = fetch_yahoo_daily(t)
     return clean_and_summarize(df)
 
 # -------- Render single post --------
@@ -159,32 +147,31 @@ def render_single_post(path, ticker, payload):
     img = Image.new("RGBA", (CANVAS_W, CANVAS_H), BG + (255,))
     d = ImageDraw.Draw(img)
 
-    # Header
-    y_head = MARGIN
-    d.text((MARGIN, y_head), ticker, fill=TEXT_MAIN, font=F_TITLE)
-    d.text((MARGIN, y_head+62), f"{last:,.2f} USD", fill=TEXT_MAIN, font=F_PRICE)
+    # --- Header text
+    d.text((MARGIN, MARGIN), ticker, fill=TEXT_MAIN, font=F_TITLE)
+    d.text((MARGIN, MARGIN+72), f"{last:,.2f} USD", fill=TEXT_MAIN, font=F_PRICE)
     chg_col = UP_COL if chg30>=0 else DOWN_COL
-    d.text((MARGIN, y_head+62+46), f"{chg30:+.2f}% past {SUMMARY_LOOKBACK}d",
-           fill=chg_col, font=F_CHG)
-    d.text((MARGIN, y_head+62+46+36), "Daily chart • support & resistance zones",
-           fill=TEXT_MUT, font=F_SUB)
+    d.text((MARGIN, MARGIN+72+50), f"{chg30:+.2f}% past {SUMMARY_LOOKBACK}d", fill=chg_col, font=F_CHG)
+    d.text((MARGIN, MARGIN+72+50+38), "Daily chart • support & resistance zones", fill=TEXT_MUT, font=F_SUB)
 
-    # Optional logo (top-right)
-    if os.path.exists(LOGO_PATH):
+    # --- Ticker logo top-right
+    logo_path = os.path.join(LOGO_DIR, f"{ticker}.png")
+    if os.path.exists(logo_path):
         try:
-            logo = Image.open(LOGO_PATH).convert("RGBA"); logo.thumbnail((180,180))
+            logo = Image.open(logo_path).convert("RGBA")
+            logo.thumbnail((140,140))  # scale logos smaller for neatness
             img.alpha_composite(logo, (CANVAS_W - logo.width - MARGIN, MARGIN))
         except:
             pass
 
-    # Chart area
-    top = 220
+    # --- Chart area
+    top = 260
     bot = CANVAS_H - 100
     left = MARGIN
     right = CANVAS_W - MARGIN
     d.rectangle((left, top, right, bot), fill=(255,255,255))
 
-    # Grid
+    # --- Grid lines
     for gy in (0.25, 0.5, 0.75):
         y = int(top + gy*(bot-top))
         d.line([(left+4,y),(right-4,y)], fill=GRID, width=1)
@@ -194,7 +181,7 @@ def render_single_post(path, ticker, payload):
     step = (right-left)/max(1,n)
     wick = max(1, int(step*0.12)); body = max(3, int(step*0.4))
 
-    # Candles
+    # --- Candlesticks
     for i,row in enumerate(df.itertuples(index=False)):
         o,h,l,c = float(row.Open), float(row.High), float(row.Low), float(row.Close)
         cx = int(left + i*step + step*0.5)
@@ -208,31 +195,25 @@ def render_single_post(path, ticker, payload):
         if b-t < 2: b = t+2
         d.rectangle((cx-body//2, t, cx+body//2, b), fill=col)
 
-    # Zones (support + resistance)
+    # --- Zones
     overlay = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0,0,0,0))
     od = ImageDraw.Draw(overlay)
-
-    # Support: blue (min -> mean)
     if sup_low and sup_high:
-        y1 = y_map(sup_low,  vmin, vmax, top, bot)
+        y1 = y_map(sup_low, vmin, vmax, top, bot)
         y2 = y_map(sup_high, vmin, vmax, top, bot)
         od.rectangle((left, min(y1,y2), right, max(y1,y2)),
                      fill=SUPPORT_FILL, outline=SUPPORT_EDGE, width=1)
-
-    # Resistance: red (mean -> max)
     if res_low and res_high:
-        y1 = y_map(res_low,  vmin, vmax, top, bot)
+        y1 = y_map(res_low, vmin, vmax, top, bot)
         y2 = y_map(res_high, vmin, vmax, top, bot)
         od.rectangle((left, min(y1,y2), right, max(y1,y2)),
                      fill=RESIST_FILL, outline=RESIST_EDGE, width=1)
-
     img.alpha_composite(overlay)
 
-    # Footer
-    d.text((MARGIN, CANVAS_H-40), "Ideas only – Not financial advice",
-           fill=TEXT_MUT, font=F_META)
+    # --- Footer
+    d.text((MARGIN, CANVAS_H-40), "Ideas only – Not financial advice", fill=TEXT_MUT, font=F_META)
 
-    # Save as RGB PNG
+    # --- Save
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     out = Image.new("RGB", img.size, (255,255,255))
     out.paste(img, mask=img.split()[-1])
@@ -242,10 +223,7 @@ def render_single_post(path, ticker, payload):
 if __name__ == "__main__":
     now = datetime.datetime.now(pytz.timezone(TIMEZONE))
     datestr = now.strftime("%Y%m%d")
-
-    # pick tickers daily (weighted)
-    seed = datestr
-    tickers = weighted_sample(POOL, N_TICKERS, seed)
+    tickers = weighted_sample(POOL, N_TICKERS, seed=datestr)
 
     for t in tickers:
         payload = fetch_one(t)
