@@ -6,13 +6,15 @@ from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 import yfinance as yf
 
-# -------- CONFIG --------
+# =========================
+# CONFIG
+# =========================
 BRAND_NAME = "TrendWatchDesk"
 TIMEZONE   = "Europe/London"
 CANVAS_W, CANVAS_H = 1080, 1080
 MARGIN = 40
 
-# Visuals
+# Colors
 BG        = (255,255,255)
 TEXT_MAIN = (20,20,22)
 TEXT_MUT  = (145,150,160)
@@ -30,7 +32,7 @@ SUMMARY_LOOKBACK = 30
 YAHOO_PERIOD     = "2y"
 STOOQ_MAX_DAYS   = 400
 
-# -------- CATEGORY POOLS --------
+# Pools / quotas (8 images per run: quotas + 2 wildcards)
 POOLS = {
     "AI": ["NVDA","MSFT","GOOG","META","AMD","AVGO","CRM","SNOW","PLTR","NOW"],
     "QUANTUM": ["IONQ","IBM","RGTI","AMZN","MSFT"],
@@ -39,45 +41,58 @@ POOLS = {
     "FINTECH": ["V","MA","PYPL","SQ","SOFI"],
     "SEMIS": ["TSM","ASML","QCOM","INTC","AMD","MU","TXN"]
 }
-# Quotas + 2 wildcards = 8 per run
-QUOTAS = [("AI", 2), ("MAG7", 1), ("HEALTHCARE", 1), ("FINTECH", 1), ("SEMIS", 1)]
+QUOTAS    = [("AI",2), ("MAG7",1), ("HEALTHCARE",1), ("FINTECH",1), ("SEMIS",1)]
 WILDCARDS = 2
 
 OUTPUT_DIR = "output"
 LOGO_DIR   = "assets/logos"
 BRAND_DIR  = "assets"
 
-# -------- HTTP session (with retry) --------
+# =========================
+# HTTP session with retry
+# =========================
 def make_session():
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0"})
-    retry = Retry(total=5, backoff_factor=0.7,
-                  status_forcelist=[429,500,502,503,504],
-                  allowed_methods=["GET","POST"])
+    retry = Retry(
+        total=5, backoff_factor=0.7,
+        status_forcelist=[429,500,502,503,504],
+        allowed_methods=["GET","POST"]
+    )
     adapter = HTTPAdapter(max_retries=retry)
     s.mount("http://", adapter)
     s.mount("https://", adapter)
     return s
 SESS = make_session()
 
-# -------- Fonts --------
+# =========================
+# Fonts
+# =========================
 def load_font(size=42, bold=False):
     pref = "fonts/Roboto-Bold.ttf" if bold else "fonts/Roboto-Regular.ttf"
     if os.path.exists(pref):
-        try: return ImageFont.truetype(pref, size)
-        except: pass
+        try:
+            return ImageFont.truetype(pref, size)
+        except:
+            pass
     fam = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
-    try: return ImageFont.truetype(fam, size)
-    except: return ImageFont.load_default()
+    try:
+        return ImageFont.truetype(fam, size)
+    except:
+        return ImageFont.load_default()
+
 F_TITLE = load_font(70,  bold=True)
 F_PRICE = load_font(46,  bold=True)
 F_CHG   = load_font(34,  bold=True)
 F_SUB   = load_font(28,  bold=False)
-F_META  = load_font(20,  bold=False)  # tiny caption font
+F_META  = load_font(20,  bold=False)  # tiny captions + chip subtext
 
-# -------- Helpers --------
+# =========================
+# Helpers
+# =========================
 def y_map(v, vmin, vmax, y0, y1):
-    if vmax - vmin < 1e-6: return (y0 + y1)//2
+    if vmax - vmin < 1e-6:
+        return (y0 + y1)//2
     return int(y1 - (v - vmin) * (y1 - y0) / (vmax - vmin))
 
 def case_insensitive_find(directory, base_no_ext):
@@ -112,7 +127,8 @@ def sample_with_quotas_and_wildcards(quotas, wildcards, pools, seed):
         rnd.shuffle(src)
         for t in src:
             if t not in chosen:
-                chosen.append(t); k -= 1
+                chosen.append(t)
+                k -= 1
                 if k == 0: break
     for cat, q in quotas:
         pick_from(cat, q)
@@ -126,11 +142,13 @@ def sample_with_quotas_and_wildcards(quotas, wildcards, pools, seed):
         if t not in chosen: chosen.append(t)
     return chosen
 
-# -------- Indicators & S/R --------
+# =========================
+# Indicators & S/R
+# =========================
 def atr(df, n=14):
     high = df["High"]; low = df["Low"]; close = df["Close"]
     prev_close = close.shift(1)
-    tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    tr = pd.concat([(high-low), (high-prev_close).abs(), (low-prev_close).abs()], axis=1).max(axis=1)
     return tr.rolling(n).mean()
 
 def sma(series, n): return series.rolling(n).mean()
@@ -168,8 +186,7 @@ def volume_percentile(series, p=0.6): return series.quantile(p)
 def cluster_levels(levels, tol):
     if not levels: return []
     levels = sorted(levels)
-    clusters = []
-    cluster = [levels[0]]
+    clusters, cluster = [], [levels[0]]
     for x in levels[1:]:
         if abs(x - cluster[-1]) <= tol: cluster.append(x)
         else:
@@ -195,7 +212,8 @@ def confluence_support_resistance(df):
 
     cand = swing_low_lvls + swing_high_lvls
     for col in ["SMA50","SMA200"]:
-        if not df[col].dropna().empty: cand.append(float(df[col].iloc[-1]))
+        if not df[col].dropna().empty:
+            cand.append(float(df[col].iloc[-1]))
     cand += fibs + pivs
     cand = [float(x) for x in cand if x and math.isfinite(x)]
     if not cand: return None, None, None, None, None, None, (lows, highs)
@@ -246,7 +264,6 @@ def detect_bos(df, swings, buffer_pct=0.0005, vol_threshold_pct=0.4):
     """
     lows, highs = swings
     if df is None or len(df) < 5: return (None, None, None)
-
     close_last = float(df["Close"].iloc[-1])
     vol_last   = float(df["Volume"].iloc[-1])
     vol_bar = volume_percentile(df["Volume"].tail(120), vol_threshold_pct)
@@ -263,7 +280,9 @@ def detect_bos(df, swings, buffer_pct=0.0005, vol_threshold_pct=0.4):
 
     return (None, None, None)
 
-# -------- Data --------
+# =========================
+# Data
+# =========================
 def to_stooq_symbol(t): return f"{t.lower()}.us"
 
 def fetch_stooq_daily(t):
@@ -308,7 +327,44 @@ def fetch_one(t):
     if df is None: df = fetch_yahoo_daily(t)
     return clean_and_summarize(df)
 
-# -------- Drawing --------
+# =========================
+# Drawing helpers
+# =========================
+def draw_bos_line_with_chip(d, left, right, top, bot, y, color, font_big, font_small):
+    """High-contrast BoS: white underlay + colored dotted overlay + BOS chip."""
+    y = int(max(top + 4, min(bot - 4, y)))  # clamp inside chart
+
+    # 1) solid white underlay (contrast over zones/candles)
+    d.line([(left, y), (right, y)], fill=(255,255,255), width=6)
+
+    # 2) colored dotted overlay
+    dot_len, gap = 12, 6
+    xx = left
+    while xx < right:
+        x_end = min(xx + dot_len, right)
+        d.line([(xx, y), (x_end, y)], fill=color, width=3)
+        xx += dot_len + gap
+
+    # 3) right-side chip "BOS 1D"
+    lbl, tf = "BOS", "1D"
+    tw, th = d.textbbox((0,0), lbl, font=font_big)[2:]
+    tw2, th2 = d.textbbox((0,0), tf,  font=font_small)[2:]
+    padx, pady = 8, 6
+    box_w = max(tw, tw2) + 2*padx
+    box_h = th + th2 + 3 + 2*pady
+    bx = right - box_w - 12
+    by = max(top + 8, min(bot - box_h - 8, y - box_h//2))
+    # chip bg + border
+    d.rectangle((bx, by, bx + box_w, by + box_h), fill=(255,255,255), outline=(220,220,220), width=1)
+    # texts
+    tx = bx + (box_w - tw)//2
+    d.text((tx, by + pady), lbl, fill=color, font=font_big)
+    tx2 = bx + (box_w - tw2)//2
+    d.text((tx2, by + pady + th + 3), tf,  fill=color, font=font_small)
+
+# =========================
+# Render one post
+# =========================
 def render_single_post(path, ticker, payload, brand_logo_path):
     (df,last,chg30,sup_low,sup_high,res_low,res_high,
      sup_label,res_label,bos_dir,bos_level,bos_idx) = payload
@@ -323,7 +379,7 @@ def render_single_post(path, ticker, payload, brand_logo_path):
     d.text((MARGIN, MARGIN+122), f"{chg30:+.2f}% past {SUMMARY_LOOKBACK}d", fill=chg_col, font=F_CHG)
     d.text((MARGIN, MARGIN+122+38), "Daily chart • confluence S/R zones", fill=TEXT_MUT, font=F_SUB)
 
-    # Ticker logo top-right
+    # Ticker logo
     t_logo = find_ticker_logo_path(ticker)
     if t_logo:
         try:
@@ -354,7 +410,7 @@ def render_single_post(path, ticker, payload, brand_logo_path):
         if b-t < 2: b = t+2
         d.rectangle((cx-body//2, t, cx+body//2, b), fill=col)
 
-    # Zones overlay
+    # Zones (overlay first)
     overlay = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0,0,0,0))
     od = ImageDraw.Draw(overlay)
     if sup_low and sup_high:
@@ -369,36 +425,18 @@ def render_single_post(path, ticker, payload, brand_logo_path):
                      fill=RESIST_FILL, outline=RESIST_EDGE, width=1)
     img.alpha_composite(overlay)
 
-    # --- TradingView-style BoS: dotted line + BOS label (no shading) ---
+    # ---- BoS (draw LAST so it's on top) ----
     bos_caption = None
-    if bos_dir in ("up","down") and bos_level is not None and bos_idx is not None:
+    if bos_dir in ("up","down") and (bos_level is not None) and (bos_idx is not None):
         try:
             yL = y_map(bos_level, vmin, vmax, top, bot)
             bos_col = UP_COL if bos_dir == "up" else DOWN_COL
-
-            # Dotted horizontal line
-            dot_len, gap = 12, 6
-            xx = left
-            while xx < right:
-                x_end = min(xx + dot_len, right)
-                d.line([(xx, yL), (x_end, yL)], fill=bos_col, width=2)
-                xx += dot_len + gap
-
-            # Centered "BOS" label above the line
-            lbl = "BOS"
-            tw, th = d.textbbox((0,0), lbl, font=F_CHG)[2:]
-            lx = (left + right)//2 - tw//2
-            ly = yL - 26
-            d.text((lx, ly), lbl, fill=bos_col, font=F_CHG)
-
-            # Tiny timeframe tag under the label
-            d.text((lx, ly+20), "1D", fill=bos_col, font=F_META)
-
+            draw_bos_line_with_chip(d, left, right, top, bot, yL, bos_col, F_CHG, F_META)
             bos_caption = "BOS 1D (close+vol)"
-        except Exception:
-            bos_caption = None
+        except Exception as e:
+            print("[warn] BoS draw failed:", e)
 
-    # Tiny captions just above footer
+    # Captions
     caption_y = CANVAS_H - 68
     if sup_label:
         d.text((MARGIN, caption_y), sup_label, fill=TEXT_MUT, font=F_META); caption_y -= 18
@@ -407,18 +445,16 @@ def render_single_post(path, ticker, payload, brand_logo_path):
     if bos_caption:
         d.text((MARGIN, caption_y), bos_caption, fill=TEXT_MUT, font=F_META)
 
-    # Footer
+    # Footer + brand
     d.text((MARGIN, CANVAS_H-40), "Not financial advice", fill=TEXT_MUT, font=F_META)
 
-    # Brand logo (max 120px width)
     brand_logo_path = brand_logo_path or find_brand_logo_path()
     if brand_logo_path and os.path.exists(brand_logo_path):
         try:
             brand = Image.open(brand_logo_path).convert("RGBA")
             w,h = brand.size
             if w > 120:
-                scale = 120 / float(w)
-                brand = brand.resize((120, int(h*scale)), Image.LANCZOS)
+                scale = 120/float(w); brand = brand.resize((120, int(h*scale)), Image.LANCZOS)
             bx = CANVAS_W - brand.width - MARGIN
             by = CANVAS_H - brand.height - MARGIN
             img.alpha_composite(brand, (bx, by))
@@ -431,7 +467,9 @@ def render_single_post(path, ticker, payload, brand_logo_path):
     out.paste(img, mask=img.split()[-1])
     out.save(path, "PNG", optimize=True)
 
-# -------- Main --------
+# =========================
+# Main
+# =========================
 if __name__ == "__main__":
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     now = datetime.datetime.now(pytz.timezone(TIMEZONE))
