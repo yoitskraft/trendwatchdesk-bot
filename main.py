@@ -39,7 +39,7 @@ N_TICKERS = 3   # how many separate 1000x1000 posts to generate per run
 OUTPUT_DIR= "output"
 DOCS_DIR  = "docs"
 LOGO_PATH = "assets/logo.png"
-PAGES_URL = "https://<your-username>.github.io/trendwatchdesk-bot/"
+PAGES_URL = "https://yoitskraft.github.io/trendwatchdesk-bot/"
 
 # -------- HTTP session --------
 def make_session():
