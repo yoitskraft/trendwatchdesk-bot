@@ -2,38 +2,55 @@ name: TrendWatchDesk Daily
 
 on:
   schedule:
-    - cron: "0 8 * * *"   # every day at 8am UTC
-  workflow_dispatch:
+    - cron: "0 9 * * 1-5"   # every weekday at 09:00 UTC
+  workflow_dispatch:        # allow manual runs
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-        with:
-          persist-credentials: false
+
+      - name: Debug: show assets folder
+        run: |
+          echo "Listing assets directory..."
+          ls -la assets || echo "assets/ missing"
+          ls -la assets/brand_logo.png || echo "brand_logo.png missing"
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.10"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pandas pillow yfinance requests urllib3 pytz
 
+      - name: Run generator
+        run: |
+          echo "Running main.py..."
+          python main.py
+          echo "---- output ----"
+          ls -la output || true
 
-      - name: Run script
-        run: python main.py
+      - name: Upload images as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: twd-output
+          path: output/*.png
+          if-no-files-found: warn
 
-      - name: Commit & Push
+      - name: Commit & push results
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .
-          git commit -m "Daily image $(date +'%Y%m%d')" || echo "No changes to commit"
-          git pull --rebase origin main || true
-          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git HEAD:main
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add output/*.png || true
+          git commit -m "Daily images $(date +'%Y%m%d')" || echo "No new images to commit"
+          git push
+        
