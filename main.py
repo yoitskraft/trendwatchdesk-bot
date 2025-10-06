@@ -30,25 +30,31 @@ SUMMARY_LOOKBACK = 30
 YAHOO_PERIOD     = "2y"
 STOOQ_MAX_DAYS   = 400
 
+# Weighted pool
 POOL = {
     "NVDA": 5, "MSFT": 4, "TSLA": 3, "AMZN": 5, "META": 4, "GOOG": 4, "AMD": 3,
     "UNH": 2, "AAPL": 5, "NFLX": 2, "BABA": 2, "JPM": 2, "DIS": 2, "BA": 1,
     "ORCL": 2, "NKE": 1, "PYPL": 1, "INTC": 2, "CRM": 2, "KO": 2
 }
-N_TICKERS = 3
+N_TICKERS = 3   # how many separate posts per run
 
-OUTPUT_DIR= "output"
-LOGO_DIR  = "assets/logos"   # <-- put ticker logos here
+OUTPUT_DIR = "output"
+LOGO_DIR   = "assets/logos"     # ticker logos as PNG named AAPL.png, MSFT.png, etc.
+BRAND_LOGO = "assets/brand_logo.png"  # your TrendWatchDesk logo PNG
 
-# -------- HTTP session --------
+# -------- HTTP session (with retry) --------
 def make_session():
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0"})
-    retry = Retry(total=5, backoff_factor=0.6,
-                  status_forcelist=[429,500,502,503,504],
-                  allowed_methods=["GET","POST"])
+    retry = Retry(
+        total=5,
+        backoff_factor=0.6,
+        status_forcelist=[429,500,502,503,504],
+        allowed_methods=["GET","POST"],
+    )
     adapter = HTTPAdapter(max_retries=retry)
-    s.mount("http://", adapter); s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    s.mount("https://", adapter)
     return s
 
 SESS = make_session()
@@ -57,17 +63,21 @@ SESS = make_session()
 def load_font(size=42, bold=False):
     pref = "fonts/Roboto-Bold.ttf" if bold else "fonts/Roboto-Regular.ttf"
     if os.path.exists(pref):
-        try: return ImageFont.truetype(pref, size)
-        except: pass
+        try:
+            return ImageFont.truetype(pref, size)
+        except:
+            pass
     fam = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
-    try: return ImageFont.truetype(fam, size)
-    except: return ImageFont.load_default()
+    try:
+        return ImageFont.truetype(fam, size)
+    except:
+        return ImageFont.load_default()
 
-F_TITLE     = load_font(70,  bold=True)
-F_PRICE     = load_font(46,  bold=True)
-F_CHG       = load_font(34,  bold=True)
-F_SUB       = load_font(28,  bold=False)
-F_META      = load_font(22,  bold=False)
+F_TITLE = load_font(70,  bold=True)
+F_PRICE = load_font(46,  bold=True)
+F_CHG   = load_font(34,  bold=True)
+F_SUB   = load_font(28,  bold=False)
+F_META  = load_font(22,  bold=False)
 
 # -------- Helpers --------
 def weighted_sample(pool: dict, n: int, seed: str):
@@ -78,23 +88,29 @@ def weighted_sample(pool: dict, n: int, seed: str):
     picked = []
     while len(picked) < n and expanded:
         t = rnd.choice(expanded)
-        if t not in picked: picked.append(t)
+        if t not in picked:
+            picked.append(t)
     return picked
 
 def y_map(v, vmin, vmax, y0, y1):
-    if vmax - vmin < 1e-6: return (y0 + y1)//2
+    if vmax - vmin < 1e-6:
+        return (y0 + y1)//2
     return int(y1 - (v - vmin) * (y1 - y0) / (vmax - vmin))
 
 # -------- Zones --------
 def support_zone(df):
+    """Support = min -> mean of last 15 swing lows (rolling 5-bar mins)."""
     lows = df["Low"].rolling(5).min().dropna()
-    if len(lows) < 15: return None, None
+    if len(lows) < 15:
+        return None, None
     recent = lows.tail(15)
     return float(recent.min()), float(recent.mean())
 
 def resistance_zone(df):
+    """Resistance = mean -> max of last 15 swing highs (rolling 5-bar maxes)."""
     highs = df["High"].rolling(5).max().dropna()
-    if len(highs) < 15: return None, None
+    if len(highs) < 15:
+        return None, None
     recent = highs.tail(15)
     return float(recent.mean()), float(recent.max())
 
@@ -106,7 +122,8 @@ def fetch_stooq_daily(t):
         url = f"https://stooq.com/q/d/l/?s={to_stooq_symbol(t)}&i=d"
         r = SESS.get(url, timeout=10); r.raise_for_status()
         df = pd.read_csv(io.StringIO(r.text))
-        if df is None or df.empty: return None
+        if df is None or df.empty:
+            return None
         df = df.rename(columns=str.title)
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         df = df.dropna().set_index("Date").sort_index()
@@ -118,26 +135,30 @@ def fetch_yahoo_daily(t):
     try:
         df = yf.download(tickers=t, period=YAHOO_PERIOD, interval="1d",
                          auto_adjust=False, progress=False, session=SESS)
-        if df is not None and not df.empty: return df
+        if df is not None and not df.empty:
+            return df
     except:
         return None
     return None
 
 def clean_and_summarize(df):
-    if df is None or df.empty: return None
+    if df is None or df.empty:
+        return None
     df = df[["Open","High","Low","Close"]].dropna()
     dfc = df.iloc[-CHART_LOOKBACK:].copy()
-    if dfc.empty: return None
+    if dfc.empty:
+        return None
     dfs = df.iloc[-SUMMARY_LOOKBACK:].copy()
     last = float(dfc["Close"].iloc[-1])
-    chg30 = (last/float(dfs["Close"].iloc[0]) - 1.0)*100 if len(dfs)>1 else 0
+    chg30 = (last/float(dfs["Close"].iloc[0]) - 1.0)*100 if len(dfs)>1 else 0.0
     sup_low, sup_high = support_zone(dfc)
     res_low, res_high = resistance_zone(dfc)
     return (dfc,last,chg30,sup_low,sup_high,res_low,res_high)
 
 def fetch_one(t):
     df = fetch_stooq_daily(t)
-    if df is None: df = fetch_yahoo_daily(t)
+    if df is None:
+        df = fetch_yahoo_daily(t)
     return clean_and_summarize(df)
 
 # -------- Render single post --------
@@ -159,7 +180,7 @@ def render_single_post(path, ticker, payload):
     if os.path.exists(logo_path):
         try:
             logo = Image.open(logo_path).convert("RGBA")
-            logo.thumbnail((140,140))  # scale logos smaller for neatness
+            logo.thumbnail((140,140))
             img.alpha_composite(logo, (CANVAS_W - logo.width - MARGIN, MARGIN))
         except:
             pass
@@ -195,7 +216,7 @@ def render_single_post(path, ticker, payload):
         if b-t < 2: b = t+2
         d.rectangle((cx-body//2, t, cx+body//2, b), fill=col)
 
-    # --- Zones
+    # --- Zones overlay
     overlay = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0,0,0,0))
     od = ImageDraw.Draw(overlay)
     if sup_low and sup_high:
@@ -210,10 +231,21 @@ def render_single_post(path, ticker, payload):
                      fill=RESIST_FILL, outline=RESIST_EDGE, width=1)
     img.alpha_composite(overlay)
 
-    # --- Footer
+    # --- Footer text
     d.text((MARGIN, CANVAS_H-40), "Ideas only – Not financial advice", fill=TEXT_MUT, font=F_META)
 
-    # --- Save
+    # --- Brand logo bottom-right
+    if os.path.exists(BRAND_LOGO):
+        try:
+            brand = Image.open(BRAND_LOGO).convert("RGBA")
+            brand.thumbnail((180,180))  # adjust if you want larger/smaller
+            bx = CANVAS_W - brand.width - MARGIN
+            by = CANVAS_H - brand.height - MARGIN
+            img.alpha_composite(brand, (bx, by))
+        except:
+            pass
+
+    # --- Save final
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     out = Image.new("RGB", img.size, (255,255,255))
     out.paste(img, mask=img.split()[-1])
