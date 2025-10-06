@@ -30,7 +30,6 @@ SUMMARY_LOOKBACK = 30
 YAHOO_PERIOD     = "2y"
 STOOQ_MAX_DAYS   = 400
 
-# Keep pool simple/reliable while debugging
 POOL = {"AAPL":5, "MSFT":5, "NVDA":5, "AMZN":4, "GOOG":4, "META":3}
 N_TICKERS = 3
 
@@ -42,12 +41,9 @@ BRAND_LOGO = "assets/brand_logo.png"
 def make_session():
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0"})
-    retry = Retry(
-        total=5,
-        backoff_factor=0.7,
-        status_forcelist=[429,500,502,503,504],
-        allowed_methods=["GET","POST"],
-    )
+    retry = Retry(total=5, backoff_factor=0.7,
+                  status_forcelist=[429,500,502,503,504],
+                  allowed_methods=["GET","POST"])
     adapter = HTTPAdapter(max_retries=retry)
     s.mount("http://", adapter)
     s.mount("https://", adapter)
@@ -59,15 +55,11 @@ SESS = make_session()
 def load_font(size=42, bold=False):
     pref = "fonts/Roboto-Bold.ttf" if bold else "fonts/Roboto-Regular.ttf"
     if os.path.exists(pref):
-        try:
-            return ImageFont.truetype(pref, size)
-        except:
-            pass
+        try: return ImageFont.truetype(pref, size)
+        except: pass
     fam = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
-    try:
-        return ImageFont.truetype(fam, size)
-    except:
-        return ImageFont.load_default()
+    try: return ImageFont.truetype(fam, size)
+    except: return ImageFont.load_default()
 
 F_TITLE = load_font(70,  bold=True)
 F_PRICE = load_font(46,  bold=True)
@@ -84,27 +76,23 @@ def weighted_sample(pool: dict, n: int, seed: str):
     picked = []
     while len(picked) < n and expanded:
         t = rnd.choice(expanded)
-        if t not in picked:
-            picked.append(t)
+        if t not in picked: picked.append(t)
     return picked
 
 def y_map(v, vmin, vmax, y0, y1):
-    if vmax - vmin < 1e-6:
-        return (y0 + y1)//2
+    if vmax - vmin < 1e-6: return (y0 + y1)//2
     return int(y1 - (v - vmin) * (y1 - y0) / (vmax - vmin))
 
 # -------- Zones --------
 def support_zone(df):
     lows = df["Low"].rolling(5).min().dropna()
-    if len(lows) < 15:
-        return None, None
+    if len(lows) < 15: return None, None
     recent = lows.tail(15)
     return float(recent.min()), float(recent.mean())
 
 def resistance_zone(df):
     highs = df["High"].rolling(5).max().dropna()
-    if len(highs) < 15:
-        return None, None
+    if len(highs) < 15: return None, None
     recent = highs.tail(15)
     return float(recent.mean()), float(recent.max())
 
@@ -116,32 +104,26 @@ def fetch_stooq_daily(t):
         url = f"https://stooq.com/q/d/l/?s={to_stooq_symbol(t)}&i=d"
         r = SESS.get(url, timeout=10); r.raise_for_status()
         df = pd.read_csv(io.StringIO(r.text))
-        if df is None or df.empty:
-            return None
+        if df is None or df.empty: return None
         df = df.rename(columns=str.title)
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         df = df.dropna().set_index("Date").sort_index()
         return df.iloc[-STOOQ_MAX_DAYS:]
-    except Exception:
-        return None
+    except: return None
 
 def fetch_yahoo_daily(t):
     try:
         df = yf.download(tickers=t, period=YAHOO_PERIOD, interval="1d",
                          auto_adjust=False, progress=False, session=SESS)
-        if df is not None and not df.empty:
-            return df
-    except Exception:
-        return None
+        if df is not None and not df.empty: return df
+    except: return None
     return None
 
 def clean_and_summarize(df):
-    if df is None or df.empty:
-        return None
+    if df is None or df.empty: return None
     df = df[["Open","High","Low","Close"]].dropna()
     dfc = df.iloc[-CHART_LOOKBACK:].copy()
-    if dfc.empty:
-        return None
+    if dfc.empty: return None
     dfs = df.iloc[-SUMMARY_LOOKBACK:].copy()
     last = float(dfc["Close"].iloc[-1])
     chg30 = (last/float(dfs["Close"].iloc[0]) - 1.0)*100 if len(dfs)>1 else 0.0
@@ -151,8 +133,7 @@ def clean_and_summarize(df):
 
 def fetch_one(t):
     df = fetch_stooq_daily(t)
-    if df is None:
-        df = fetch_yahoo_daily(t)
+    if df is None: df = fetch_yahoo_daily(t)
     return clean_and_summarize(df)
 
 # -------- Drawing --------
@@ -168,15 +149,14 @@ def render_single_post(path, ticker, payload):
     d.text((MARGIN, MARGIN+72+50), f"{chg30:+.2f}% past {SUMMARY_LOOKBACK}d", fill=chg_col, font=F_CHG)
     d.text((MARGIN, MARGIN+72+50+38), "Daily chart • support & resistance zones", fill=TEXT_MUT, font=F_SUB)
 
-    # Ticker logo top-right (optional)
+    # Ticker logo top-right
     logo_path = os.path.join(LOGO_DIR, f"{ticker}.png")
     if os.path.exists(logo_path):
         try:
             logo = Image.open(logo_path).convert("RGBA")
             logo.thumbnail((140,140))
             img.alpha_composite(logo, (CANVAS_W - logo.width - MARGIN, MARGIN))
-        except Exception:
-            pass
+        except: pass
 
     # Chart area
     top = 260
@@ -227,16 +207,29 @@ def render_single_post(path, ticker, payload):
     # Footer
     d.text((MARGIN, CANVAS_H-40), "Ideas only – Not financial advice", fill=TEXT_MUT, font=F_META)
 
-    # Brand logo bottom-right (optional)
+    # --- Brand logo with chip (Option B)
     if os.path.exists(BRAND_LOGO):
         try:
             brand = Image.open(BRAND_LOGO).convert("RGBA")
             brand.thumbnail((180,180))
             bx = CANVAS_W - brand.width - MARGIN
             by = CANVAS_H - brand.height - MARGIN
+
+            # chip backdrop (light grey with rounded corners)
+            overlay = Image.new("RGBA", img.size, (0,0,0,0))
+            od = ImageDraw.Draw(overlay)
+            pad = 16
+            od.rounded_rectangle(
+                (bx - pad, by - pad, bx + brand.width + pad, by + brand.height + pad),
+                radius=20,
+                fill=(240,240,240,255)
+            )
+            img.alpha_composite(overlay)
+
+            # then logo on top
             img.alpha_composite(brand, (bx, by))
-        except Exception:
-            pass
+        except Exception as e:
+            print("[warn] brand logo draw failed:", e)
 
     # Save
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -244,57 +237,24 @@ def render_single_post(path, ticker, payload):
     out.paste(img, mask=img.split()[-1])
     out.save(path, "PNG", optimize=True)
 
-# -------- Placeholder helpers --------
-def write_placeholder(path, ticker, reason):
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    img = Image.new("RGB", (CANVAS_W, CANVAS_H), (255,255,255))
-    d = ImageDraw.Draw(img)
-    d.text((MARGIN, MARGIN), ticker, fill=(0,0,0), font=F_TITLE)
-    d.text((MARGIN, MARGIN+90), "Data unavailable", fill=(200,0,0), font=F_PRICE)
-    d.text((MARGIN, MARGIN+150), reason[:60], fill=(80,80,80), font=F_SUB)
-    img.save(path, "PNG", optimize=True)
-
 # -------- Main --------
 if __name__ == "__main__":
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-
     now = datetime.datetime.now(pytz.timezone(TIMEZONE))
     datestr = now.strftime("%Y%m%d")
     tickers = weighted_sample(POOL, N_TICKERS, seed=datestr)
-    print("[info] selected tickers:", tickers, flush=True)
+    print("[info] selected tickers:", tickers)
 
-    made = 0
     for t in tickers:
         try:
-            print(f"[info] fetching {t} ...", flush=True)
+            print(f"[info] fetching {t} ...")
             payload = fetch_one(t)
             out_path = os.path.join(OUTPUT_DIR, f"twd_{t}_{datestr}.png")
             if not payload:
-                print(f"[warn] no data for {t}, writing placeholder", flush=True)
-                write_placeholder(out_path, t, "fetch failed")
-            else:
-                try:
-                    render_single_post(out_path, t, payload)
-                except Exception as e:
-                    print(f"[error] render failed for {t}: {e}", flush=True)
-                    traceback.print_exc()
-                    write_placeholder(out_path, t, "render failed")
-            print("done:", out_path, flush=True)
-            made += 1
+                print(f"[warn] no data for {t}, skipping")
+                continue
+            render_single_post(out_path, t, payload)
+            print("done:", out_path)
         except Exception as e:
-            print(f"[fatal] {t} crashed: {e}", flush=True)
+            print(f"[error] failed for {t}: {e}")
             traceback.print_exc()
-            # still try to write something
-            try:
-                out_path = os.path.join(OUTPUT_DIR, f"twd_{t}_{datestr}.png")
-                write_placeholder(out_path, t, "fatal error")
-                print("done (placeholder):", out_path, flush=True)
-                made += 1
-            except:
-                pass
-
-    # If somehow nothing got written, produce a global diagnostic PNG
-    if made == 0:
-        diag = os.path.join(OUTPUT_DIR, f"twd_NO_DATA_{datestr}.png")
-        write_placeholder(diag, "NO_DATA", "all tickers failed")
-        print("done (global placeholder):", diag, flush=True)
