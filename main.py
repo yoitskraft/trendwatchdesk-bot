@@ -14,21 +14,20 @@ TIMEZONE   = "Europe/London"
 CANVAS_W, CANVAS_H = 1080, 1080
 MARGIN = 40
 
-# Turn on only to debug BOS visibility (prints + forced test line)
-DEBUG_BOS = False
+DEBUG_BOS = False  # set True for a test line/logs
 
-# Colors (lighter grid, softer zones)
+# Colors / styling
 BG        = (255,255,255)
 TEXT_MAIN = (20,20,22)
 TEXT_MUT  = (145,150,160)
-GRID      = (238,241,244)            # lighter
+GRID      = (238,241,244)            # lighter grid
 UP_COL    = (20,170,90)
 DOWN_COL  = (230,70,70)
 
-# Softer S/R (≈25–28% opacity)
-SUPPORT_FILL = (40,120,255,64)       # ~25%
+# Softer zones (≈25–28% opacity)
+SUPPORT_FILL = (40,120,255,64)
 SUPPORT_EDGE = (40,120,255,110)
-RESIST_FILL  = (230,70,70,72)        # ~28%
+RESIST_FILL  = (230,70,70,72)
 RESIST_EDGE  = (230,70,70,120)
 
 CHART_LOOKBACK   = 120
@@ -36,7 +35,6 @@ SUMMARY_LOOKBACK = 30
 YAHOO_PERIOD     = "2y"
 STOOQ_MAX_DAYS   = 400
 
-# Pools / quotas (8 per run: quotas + 2 wildcards)
 POOLS = {
     "AI": ["NVDA","MSFT","GOOG","META","AMD","AVGO","CRM","SNOW","PLTR","NOW"],
     "QUANTUM": ["IONQ","IBM","RGTI","AMZN","MSFT"],
@@ -49,11 +47,11 @@ QUOTAS    = [("AI",2), ("MAG7",1), ("HEALTHCARE",1), ("FINTECH",1), ("SEMIS",1)]
 WILDCARDS = 2
 
 OUTPUT_DIR = "output"
-LOGO_DIR   = "assets/logos"   # company logos: AAPL.png, MSFT.png, ...
-BRAND_DIR  = "assets"         # brand_logo.png (bottom-right)
+LOGO_DIR   = "assets/logos"   # company logos: <TICKER>.png
+BRAND_DIR  = "assets"         # brand_logo.png or logo.png
 
 # =========================
-# HTTP session with retry
+# HTTP with retry
 # =========================
 def make_session():
     s = requests.Session()
@@ -82,7 +80,7 @@ def load_font(size=42, bold=False):
 F_TITLE = load_font(70,  bold=True)
 F_PRICE = load_font(46,  bold=True)
 F_CHG   = load_font(34,  bold=True)
-F_SUB   = load_font(28,  bold=False)   # also BOS "BOS" label
+F_SUB   = load_font(28,  bold=False)   # also BOS label
 F_META  = load_font(20,  bold=False)   # tiny captions + BOS timeframe
 
 # =========================
@@ -358,35 +356,51 @@ def fetch_one(t):
     return clean_and_summarize(df)
 
 # =========================
-# Drawing helpers
+# BOS draw helper (opaque line, stops at last candle)
 # =========================
-def draw_bos_line_with_chip(d, left, right, top, bot, y, color, font_lbl, font_tf, tf_text="1W"):
-    """High-contrast BOS: white underlay + colored dotted overlay + compact chip."""
+def draw_bos_line_with_chip(d, left, x_end, top, bot, y, color, font_lbl, font_tf, base_img, tf_text="1W"):
+    """
+    High-contrast BOS line:
+      • opaque white underlay
+      • opaque colored dotted overlay (thicker)
+      • compact chip near the right end (x_end)
+    Line stops at x_end (last candle), not the chart edge.
+    """
     y = int(max(top + 4, min(bot - 4, y)))
+    x0 = left + 2
+    xe = max(x0 + 20, int(x_end) - 6)  # small inset
 
-    # white underlay for contrast
-    d.line([(left, y), (right, y)], fill=(255,255,255), width=6)
+    # Draw on an overlay for crisp opacity
+    overlay = Image.new("RGBA", (base_img.width, base_img.height), (0,0,0,0))
+    od = ImageDraw.Draw(overlay)
 
-    # colored dotted overlay
-    dot_len, gap = 12, 6
-    xx = left
-    while xx < right:
-        x_end = min(xx + dot_len, right)
-        d.line([(xx, y), (x_end, y)], fill=color, width=3)
+    # 1) white underlay
+    od.line([(x0, y), (xe, y)], fill=(255,255,255,255), width=6)
+
+    # 2) opaque colored dotted overlay
+    dot_len, gap = 14, 6
+    xx = x0
+    colored = (color[0], color[1], color[2], 255)
+    while xx < xe:
+        x2 = min(xx + dot_len, xe)
+        od.line([(xx, y), (x2, y)], fill=colored, width=4)
         xx += dot_len + gap
 
-    # compact chip
+    base_img.alpha_composite(overlay)
+
+    # 3) compact chip anchored near right end
     lbl = "BOS"
+    d = ImageDraw.Draw(base_img)
     tw, th   = d.textbbox((0,0), lbl, font=font_lbl)[2:]
     tw2, th2 = d.textbbox((0,0), tf_text, font=font_tf)[2:]
     padx, pady = 6, 4
     box_w = min(max(tw, tw2) + 2*padx, 86)
     box_h = th + th2 + 3 + 2*pady
-    bx = right - box_w - 10
+    bx = int(xe - box_w - 8)
     by = max(top + 8, min(bot - box_h - 8, y - box_h//2))
     d.rectangle((bx, by, bx + box_w, by + box_h), fill=(255,255,255), outline=(220,220,220), width=1)
-    d.text((bx + max(0,(box_w - tw)//2),  by + pady),           lbl,   fill=color, font=font_lbl)
-    d.text((bx + max(0,(box_w - tw2)//2), by + pady + th + 3), tf_text, fill=color, font=font_tf)
+    d.text((bx + max(0,(box_w - tw)//2),  by + pady),           lbl,    fill=(color[0],color[1],color[2]), font=font_lbl)
+    d.text((bx + max(0,(box_w - tw2)//2), by + pady + th + 3),  tf_text,fill=(color[0],color[1],color[2]), font=font_tf)
 
 # =========================
 # Render one post
@@ -398,23 +412,20 @@ def render_single_post(path, ticker, payload, brand_logo_path):
     img = Image.new("RGBA", (CANVAS_W, CANVAS_H), BG + (255,))
     d = ImageDraw.Draw(img)
 
-    # Header (reserve space for ticker logo at right)
-    right_pad_for_logo = 180
+    # Header
     d.text((MARGIN, MARGIN), ticker, fill=TEXT_MAIN, font=F_TITLE)
     d.text((MARGIN, MARGIN+72), f"{last:,.2f} USD", fill=TEXT_MAIN, font=F_PRICE)
     chg_col = UP_COL if chg30>=0 else DOWN_COL
     d.text((MARGIN, MARGIN+122), f"{chg30:+.2f}% past {SUMMARY_LOOKBACK}d", fill=chg_col, font=F_CHG)
     d.text((MARGIN, MARGIN+122+38), "Daily chart • confluence S/R zones", fill=TEXT_MUT, font=F_SUB)
 
-    # Ticker/company logo (top-right)
+    # Ticker logo top-right
     t_logo = find_ticker_logo_path(ticker)
     if t_logo:
         try:
             logo = Image.open(t_logo).convert("RGBA")
             logo.thumbnail((140,140))
-            lx = CANVAS_W - logo.width - MARGIN
-            ly = MARGIN
-            img.alpha_composite(logo, (lx, ly))
+            img.alpha_composite(logo, (CANVAS_W - logo.width - MARGIN, MARGIN))
         except Exception as e:
             print("[warn] ticker logo draw failed:", e)
 
@@ -440,7 +451,7 @@ def render_single_post(path, ticker, payload, brand_logo_path):
         if b-t < 2: b = t+2
         d.rectangle((cx-body//2, t, cx+body//2, b), fill=col)
 
-    # Zones overlay (draw before BOS)
+    # Zones overlay (under BOS)
     overlay = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0,0,0,0))
     od = ImageDraw.Draw(overlay)
     if sup_low and sup_high:
@@ -455,16 +466,22 @@ def render_single_post(path, ticker, payload, brand_logo_path):
                      fill=RESIST_FILL, outline=RESIST_EDGE, width=1)
     img.alpha_composite(overlay)
 
-    # --- DEBUG: test line if no BOS ---
+    # --- DEBUG: show test line if no BOS ---
     if DEBUG_BOS and not (bos_dir in ("up","down") and bos_level is not None):
         y_test = (top + bot) // 2
-        draw_bos_line_with_chip(d, left, right, top, bot, y_test, (0,0,0), F_SUB, F_META, tf_text="TEST")
+        last_candle_x = int(left + (n-1)*step + step*0.5)  # stop at last candle
+        draw_bos_line_with_chip(ImageDraw.Draw(img), left, last_candle_x, top, bot, y_test,
+                                (0,0,0), F_SUB, F_META, img, tf_text="TEST")
 
     # ---- BOS (draw LAST on top) ----
     if bos_dir in ("up","down") and (bos_level is not None) and (bos_idx is not None):
         yL = y_map(bos_level, vmin, vmax, top, bot)
         bos_col = UP_COL if bos_dir == "up" else DOWN_COL
-        draw_bos_line_with_chip(d, left, right, top, bot, yL, bos_col, F_SUB, F_META, tf_text=bos_tf)
+        last_candle_x = int(left + (n-1)*step + step*0.5)
+        # If you want the line to end earlier, e.g. 2 candles before:
+        # last_candle_x = int(left + (n-3)*step + step*0.5)
+        draw_bos_line_with_chip(ImageDraw.Draw(img), left, last_candle_x, top, bot, yL,
+                                bos_col, F_SUB, F_META, img, tf_text=bos_tf)
 
     # Captions
     caption_y = CANVAS_H - 68
