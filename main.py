@@ -219,20 +219,35 @@ def fetch_one(ticker):
 # ------------------ Renderer (polished weekly, Grift font) ------------------
 def render_single_post(out_path, ticker, payload):
     """
-    Weekly chart (last ~52w) — fully scalable via env TWD_UI_SCALE.
-    Scales fonts, paddings, grid, candle widths, badges, and logos together.
+    Weekly chart (last ~52w) with independent scale controls:
+      - TWD_UI_SCALE   : layout/chart/grid/brand (default 0.90)
+      - TWD_TEXT_SCALE : text & badges          (default 0.75)
+      - TWD_TLOGO_SCALE: ticker logo            (default 0.65)
     """
     (df_w, last, chg30, sup_low, sup_high, res_low, res_high,
      sup_label, res_label, bos_dir, bos_level, bos_idx, bos_tf) = payload
 
-    # ---------- global scale ----------
+    # ---------- scales ----------
     try:
-        S = float(os.getenv("TWD_UI_SCALE", "0.90"))  # e.g. 0.88 to shrink 12%
+        S_LAYOUT = float(os.getenv("TWD_UI_SCALE", "0.90"))
     except Exception:
-        S = 0.90
+        S_LAYOUT = 0.90
+    try:
+        S_TEXT = float(os.getenv("TWD_TEXT_SCALE", "0.75"))
+    except Exception:
+        S_TEXT = 0.75
+    try:
+        S_LOGO = float(os.getenv("TWD_TLOGO_SCALE", "0.65"))
+    except Exception:
+        S_LOGO = 0.65
 
     def sp(x: float) -> int:
-        return int(round(x * S))
+        """scale for layout/geometry"""
+        return int(round(x * S_LAYOUT))
+
+    def st(x: float) -> int:
+        """scale for text sizes"""
+        return int(round(x * S_TEXT))
 
     # ---------- theme ----------
     W, H = 1080, 1080
@@ -269,7 +284,7 @@ def render_single_post(out_path, ticker, payload):
     base = Image.alpha_composite(base, card_layer)
     draw = ImageDraw.Draw(base)
 
-    # ---------- fonts (Grift → Roboto → default), scaled ----------
+    # ---------- fonts (Grift → Roboto → default), text-scaled ----------
     def _try_font(path, size):
         try:
             return ImageFont.truetype(path, size)
@@ -277,7 +292,7 @@ def render_single_post(out_path, ticker, payload):
             return None
 
     def _font(size, bold=False):
-        sz = sp(size)
+        sz = st(size)
         grift_bold = _try_font("assets/fonts/Grift-Bold.ttf", sz)
         grift_reg  = _try_font("assets/fonts/Grift-Regular.ttf", sz)
         roboto_bold = (_try_font("assets/fonts/Roboto-Bold.ttf", sz)
@@ -314,12 +329,13 @@ def render_single_post(out_path, ticker, payload):
     draw.text((title_x, price_y + sp(50)), f"{chg30:+.2f}% past 30d", fill=delta_col, font=f_delta)
     draw.text((title_x, price_y + sp(98)), "Weekly chart • last 52 weeks", fill=TEXT_LT, font=f_sub)
 
-    # ticker logo (optional)
+    # ticker logo (optional, scaled with S_LOGO independently)
     tlogo_path = os.path.join("assets", "logos", f"{ticker}.png")
     if os.path.exists(tlogo_path):
         try:
             tlogo = Image.open(tlogo_path).convert("RGBA")
-            hmax = sp(92)
+            hmax = int(sp(92) * S_LOGO)  # independent logo scale
+            hmax = max(1, hmax)
             scl = min(1.0, hmax / max(1, tlogo.height))
             tlogo = tlogo.resize((int(tlogo.width * scl), int(tlogo.height * scl)))
             base.alpha_composite(tlogo, (card[2] - sp(28) - tlogo.width, title_y + sp(2)))
@@ -397,7 +413,7 @@ def render_single_post(out_path, ticker, payload):
     # ---------- candlesticks ----------
     n = len(df2)
     base_body_px = max(4, int((cx2 - cx1) / max(60, n * 1.35)))
-    body_px = max(2, int(round(base_body_px * S)))
+    body_px = max(2, int(round(base_body_px * S_LAYOUT)))
     half = body_px // 2
     wick_w = max(1, sp(1))
 
@@ -423,7 +439,7 @@ def render_single_post(out_path, ticker, payload):
     draw.text((meta_x, meta_y + sp(26)), f"Support ~{sup_low:.2f}",     fill=TEXT_LT, font=f_sm)
     draw.text((meta_x, meta_y + sp(52)), "Not financial advice",        fill=(160, 160, 160, 255), font=f_sm)
 
-    # ---------- brand logo ----------
+    # ---------- brand logo (keeps layout scale; unaffected by text/logo scales) ----------
     logo_path = BRAND_LOGO_PATH or "assets/brand_logo.png"
     if logo_path and os.path.exists(logo_path):
         try:
