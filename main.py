@@ -1,4 +1,4 @@
-import os, io, math, random, datetime, pytz, traceback
+import os, io, random, datetime, pytz, traceback
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
@@ -15,8 +15,6 @@ TIMEZONE   = "Europe/London"
 CANVAS_W, CANVAS_H = 1080, 1080
 MARGIN = 40
 
-DEBUG_BOS = False  # set True to draw a visible test line if no BoS is found
-
 # Colors / styling
 BG        = (255,255,255)
 TEXT_MAIN = (20,20,22)
@@ -25,43 +23,46 @@ GRID      = (238,241,244)
 UP_COL    = (20,170,90)
 DOWN_COL  = (230,70,70)
 
-# Softer zones (≈25–28% opacity)
+# Softer zones (≈25–30% opacity)
 SUPPORT_FILL = (40,120,255,64)
 SUPPORT_EDGE = (40,120,255,110)
 RESIST_FILL  = (230,70,70,72)
 RESIST_EDGE  = (230,70,70,120)
 
-# Show ~1 year of daily bars
-CHART_LOOKBACK   = 252
+# Data windows
+CHART_LOOKBACK   = 252    # ~1y of daily bars
 SUMMARY_LOOKBACK = 30
 YAHOO_PERIOD     = "1y"
 STOOQ_MAX_DAYS   = 500
 
-# Pools / quotas (8 images/run: 6 by quotas + 2 wildcards)
+# Pools / quotas (+2 wildcards daily)
 POOLS = {
-    "AI": ["NVDA","MSFT","GOOG","META","AMD","AVGO","CRM","SNOW","PLTR","NOW"],
-    "QUANTUM": ["IONQ","IBM","RGTI","AMZN","MSFT"],
-    "MAG7": ["AAPL","MSFT","GOOG","AMZN","META","NVDA","TSLA"],
+    "AI":         ["NVDA","MSFT","GOOG","META","AMD","AVGO","CRM","SNOW","PLTR","NOW"],
+    "QUANTUM":    ["IONQ","IBM","RGTI","AMZN","MSFT"],
+    "MAG7":       ["AAPL","MSFT","GOOG","AMZN","META","NVDA","TSLA"],
     "HEALTHCARE": ["UNH","LLY","JNJ","ABBV","MRK"],
-    "FINTECH": ["V","MA","PYPL","SQ","SOFI"],
-    "SEMIS": ["TSM","ASML","QCOM","INTC","AMD","MU","TXN"]
+    "FINTECH":    ["V","MA","PYPL","SQ","SOFI"],
+    "SEMIS":      ["TSM","ASML","QCOM","INTC","AMD","MU","TXN"],
 }
 QUOTAS    = [("AI",2), ("MAG7",1), ("HEALTHCARE",1), ("FINTECH",1), ("SEMIS",1)]
 WILDCARDS = 2
 
 OUTPUT_DIR = "output"
-LOGO_DIR   = "assets/logos"   # company logos: <TICKER>.png
-BRAND_DIR  = "assets"         # brand_logo.png or logo.png
+LOGO_DIR   = "assets/logos"   # optional: <TICKER>.png
+BRAND_DIR  = "assets"         # optional: brand_logo.png or logo.png
 
 # =========================
-# HTTP with retry (for Stooq and robustness)
+# HTTP session with retry
 # =========================
 def make_session():
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0"})
-    retry = Retry(total=5, backoff_factor=0.7,
-                  status_forcelist=[429,500,502,503,504],
-                  allowed_methods=["GET","POST"])
+    retry = Retry(
+        total=5,
+        backoff_factor=0.7,
+        status_forcelist=[429,500,502,503,504],
+        allowed_methods=["GET","POST"],
+    )
     adapter = HTTPAdapter(max_retries=retry)
     s.mount("http://", adapter)
     s.mount("https://", adapter)
@@ -74,27 +75,33 @@ SESS = make_session()
 def load_font(size=42, bold=False):
     pref = "fonts/Roboto-Bold.ttf" if bold else "fonts/Roboto-Regular.ttf"
     if os.path.exists(pref):
-        try: return ImageFont.truetype(pref, size)
-        except: pass
+        try:
+            return ImageFont.truetype(pref, size)
+        except:
+            pass
     fam = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
-    try: return ImageFont.truetype(fam, size)
-    except: return ImageFont.load_default()
+    try:
+        return ImageFont.truetype(fam, size)
+    except:
+        return ImageFont.load_default()
 
 F_TITLE = load_font(70,  bold=True)
 F_PRICE = load_font(46,  bold=True)
 F_CHG   = load_font(34,  bold=True)
-F_SUB   = load_font(28,  bold=False)   # also BOS label
-F_META  = load_font(20,  bold=False)   # tiny captions + BOS timeframe
+F_SUB   = load_font(28,  bold=False)
+F_META  = load_font(20,  bold=False)
 
 # =========================
 # Helpers
 # =========================
 def y_map(v, vmin, vmax, y0, y1):
-    if vmax - vmin < 1e-6: return (y0 + y1)//2
+    if vmax - vmin < 1e-6:
+        return (y0 + y1)//2
     return int(y1 - (v - vmin) * (y1 - y0) / (vmax - vmin))
 
 def case_insensitive_find(directory, base_no_ext):
-    if not os.path.isdir(directory): return None
+    if not os.path.isdir(directory):
+        return None
     for fn in os.listdir(directory):
         stem, ext = os.path.splitext(fn)
         if stem.upper() == base_no_ext.upper() and ext.lower() in (".png",".jpg",".jpeg",".webp"):
@@ -125,21 +132,28 @@ def sample_with_quotas_and_wildcards(quotas, wildcards, pools, seed):
         rnd.shuffle(src)
         for t in src:
             if t not in chosen:
-                chosen.append(t); k -= 1
-                if k == 0: break
-    for cat, q in quotas: pick_from(cat, q)
+                chosen.append(t)
+                k -= 1
+                if k == 0:
+                    break
+    for cat, q in quotas:
+        pick_from(cat, q)
+    # Wildcards from full universe
     universe = []
     for arr in pools.values():
         for t in arr:
-            if t not in universe: universe.append(t)
+            if t not in universe:
+                universe.append(t)
     rnd.shuffle(universe)
     for t in universe:
-        if len(chosen) >= sum(q for _, q in quotas) + wildcards: break
-        if t not in chosen: chosen.append(t)
+        if len(chosen) >= sum(q for _, q in quotas) + wildcards:
+            break
+        if t not in chosen:
+            chosen.append(t)
     return chosen
 
 # =========================
-# Indicators & S/R primitives
+# Indicators & pivots
 # =========================
 def atr(df, n=14):
     high = df["High"]; low = df["Low"]; close = df["Close"]
@@ -147,14 +161,11 @@ def atr(df, n=14):
     tr = pd.concat([(high-low), (high-prev_close).abs(), (low-prev_close).abs()], axis=1).max(axis=1)
     return tr.rolling(n).mean()
 
-def sma(series, n): return series.rolling(n).mean()
-
 def swing_points(df, w=2):
     """
     Return lists of pivot lows and highs as (i, timestamp, price).
     Uses scalar comparisons to avoid 'truth value of a Series' errors.
     """
-    # Safely get required columns
     try:
         H = df["High"].astype(float)
         L = df["Low"].astype(float)
@@ -167,7 +178,6 @@ def swing_points(df, w=2):
 
     highs, lows = [], []
     for i in range(w, n - w):
-        # scalar values to avoid ambiguous truth values
         cur_h = float(H.iloc[i])
         max_h = float(H.iloc[i - w:i + w + 1].max())
 
@@ -181,8 +191,13 @@ def swing_points(df, w=2):
 
     return lows, highs
 
-# ---- 4H pivot fetchers ----
+# =========================
+# 4H pivots for S/R
+# =========================
 def last_left_swing_low_high_4h(ticker, w=2, period="60d", interval="4h"):
+    """
+    Return last confirmed swing low and swing high from 4H timeframe (floats or None).
+    """
     try:
         df4 = yf.download(tickers=ticker, period=period, interval=interval,
                           auto_adjust=False, progress=False)
@@ -201,7 +216,7 @@ def last_left_swing_low_high_4h(ticker, w=2, period="60d", interval="4h"):
     return s_val, r_val
 
 # =========================
-# BoS detection (Weekly + Daily fallback)
+# BoS detection (weekly → daily fallback)
 # =========================
 def resample_weekly(df):
     w = pd.DataFrame({
@@ -219,9 +234,11 @@ def detect_bos_weekly(dfd, buffer_pct=0.0005, vol_threshold_pct=0.4, w_fractal=2
     if dfw is None or dfw.empty or len(dfw) < 6: return (None, None, None)
     lows_w, highs_w = swing_points(dfw, w=w_fractal)
     if not (lows_w or highs_w): return (None, None, None)
+
     close_w_last = float(dfw["Close"].iloc[-1])
     vol_w_last   = float(dfw["Volume"].iloc[-1])
     vol_w_bar    = dfw["Volume"].tail(60).quantile(vol_threshold_pct)
+
     if highs_w:
         i_hi, _, hi_price = highs_w[-1]
         if (close_w_last > hi_price * (1 + buffer_pct)) and (vol_w_last >= vol_w_bar):
@@ -236,13 +253,15 @@ def detect_bos_daily(dfd, buffer_pct=0.0003, vol_threshold_pct=0.3, d_fractal=2)
     if dfd is None or len(dfd) < 20: return (None, None, None)
     lows_d, highs_d = swing_points(dfd, w=d_fractal)
     if not (lows_d or highs_d): return (None, None, None)
+
     close_last = float(dfd["Close"].iloc[-1])
     vol_last   = float(dfd["Volume"].iloc[-1])
     vol_bar    = dfd["Volume"].tail(120).quantile(vol_threshold_pct)
+
     if highs_d:
         i_hi, _, hi_price = highs_d[-1]
         if (close_last > hi_price * (1 + buffer_pct)) and (vol_last >= vol_bar):
-            return ("up", hi_price, i_hi)   # fixed var name
+            return ("up", hi_price, i_hi)
     if lows_d:
         i_lo, _, lo_price = lows_d[-1]
         if (close_last < lo_price * (1 - buffer_pct)) and (vol_last >= vol_bar):
@@ -250,7 +269,7 @@ def detect_bos_daily(dfd, buffer_pct=0.0003, vol_threshold_pct=0.3, d_fractal=2)
     return (None, None, None)
 
 # =========================
-# Data fetch/clean
+# Data fetch & prep
 # =========================
 def to_stooq_symbol(t): return f"{t.lower()}.us"
 
@@ -271,7 +290,8 @@ def fetch_yahoo_daily(t):
     try:
         df = yf.download(tickers=t, period=YAHOO_PERIOD, interval="1d",
                          auto_adjust=False, progress=False)
-        if df is not None and not df.empty: return df
+        if df is not None and not df.empty:
+            return df
     except Exception:
         return None
     return None
@@ -286,12 +306,12 @@ def clean_and_summarize(df, ticker):
     last = float(dfs["Close"].iloc[-1])
     chg30 = (last/float(dfs["Close"].iloc[0]) - 1.0)*100 if len(dfs)>1 else 0.0
 
-    # ATR (daily) for zone width scaling
+    # ATR for zone sizing
     atr_series = atr(dfc, n=14)
     atr_val = float(atr_series.iloc[-1]) if not atr_series.dropna().empty else max(last*0.005, 0.5)
     half = max(0.35*atr_val, 0.0015*last)
 
-       # --- Support/Resistance from 4H pivots (last confirmed to the left) ---
+    # S/R from 4H pivots
     s_val, r_val = last_left_swing_low_high_4h(ticker, w=2, period="60d", interval="4h")
     sup_low = sup_high = res_low = res_high = None
     sup_label = res_label = None
@@ -306,30 +326,27 @@ def clean_and_summarize(df, ticker):
         res_low, res_high = r_val - half, r_val + half
         res_label = f"Resistance (4H swing high) ~{r_val:.2f}"
 
-    # --- BoS (weekly first, daily fallback) ---
+    # BoS weekly → daily fallback
     bos_dir, bos_level, bos_idx = detect_bos_weekly(dfc, buffer_pct=0.0005, vol_threshold_pct=0.4, w_fractal=2)
     bos_tf = "1W"
     if bos_dir is None:
         bos_dir, bos_level, bos_idx = detect_bos_daily(dfc, buffer_pct=0.0003, vol_threshold_pct=0.3, d_fractal=2)
-        if bos_dir is not None: bos_tf = "1D"
+        if bos_dir is not None:
+            bos_tf = "1D"
 
     return (dfc,last,chg30,sup_low,sup_high,res_low,res_high,
             sup_label,res_label,bos_dir,bos_level,bos_idx,bos_tf)
 
 def fetch_one(t):
-    """Daily data (Stooq → Yahoo fallback) + summarize with 4H S/R + BoS."""
     df = fetch_stooq_daily(t)
     if df is None:
         df = fetch_yahoo_daily(t)
     return clean_and_summarize(df, t)
 
 # =========================
-# BOS draw helper (faint dotted, stops at last candle)
+# Draw helpers
 # =========================
 def draw_bos_line_with_chip(d, left, x_end, top, bot, y, color, font_lbl, font_tf, base_img, tf_text="1W"):
-    """
-    Fainter BoS line: semi-transparent dotted line, compact chip; ends at last candle (x_end).
-    """
     y = int(max(top + 4, min(bot - 4, y)))
     x0 = left + 2
     xe = max(x0 + 20, int(x_end) - 6)
@@ -337,10 +354,10 @@ def draw_bos_line_with_chip(d, left, x_end, top, bot, y, color, font_lbl, font_t
     overlay = Image.new("RGBA", (base_img.width, base_img.height), (0,0,0,0))
     od = ImageDraw.Draw(overlay)
 
-    # fine dotted line (not dashed)
+    # dotted line
     dot_len, gap = 3, 6
     xx = x0
-    faint = (color[0], color[1], color[2], 160)  # ~60-65% opacity
+    faint = (color[0], color[1], color[2], 160)
     while xx < xe:
         x2 = min(xx + dot_len, xe)
         od.line([(xx, y), (x2, y)], fill=faint, width=2)
@@ -363,9 +380,9 @@ def draw_bos_line_with_chip(d, left, x_end, top, bot, y, color, font_lbl, font_t
     d2.text((bx + max(0,(box_w - tw2)//2), by + pady + th + 3),  tf_text,fill=color, font=font_tf)
 
 # =========================
-# Render one post
+# Render single post
 # =========================
-def render_single_post(path, ticker, payload, brand_logo_path):
+def render_single_post(path, ticker, payload):
     (df,last,chg30,sup_low,sup_high,res_low,res_high,
      sup_label,res_label,bos_dir,bos_level,bos_idx,bos_tf) = payload
 
@@ -379,7 +396,7 @@ def render_single_post(path, ticker, payload, brand_logo_path):
     d.text((MARGIN, MARGIN+122), f"{chg30:+.2f}% past {SUMMARY_LOOKBACK}d", fill=chg_col, font=F_CHG)
     d.text((MARGIN, MARGIN+122+38), "Daily chart • 4H pivots for S/R", fill=TEXT_MUT, font=F_SUB)
 
-    # Ticker logo top-right (optional)
+    # Ticker logo (optional)
     t_logo = find_ticker_logo_path(ticker)
     if t_logo:
         try:
@@ -411,30 +428,23 @@ def render_single_post(path, ticker, payload, brand_logo_path):
         if b-t < 2: b = t+2
         d.rectangle((cx-body//2, t, cx+body//2, b), fill=col)
 
-    # Zones overlay (under BOS)
+    # Zones (under BOS)
     overlay = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0,0,0,0))
     od = ImageDraw.Draw(overlay)
-    if sup_low and sup_high:
+    if sup_low is not None and sup_high is not None:
         y1 = y_map(sup_low, vmin, vmax, top, bot)
         y2 = y_map(sup_high, vmin, vmax, top, bot)
         od.rectangle((left, min(y1,y2), right, max(y1,y2)),
                      fill=SUPPORT_FILL, outline=SUPPORT_EDGE, width=1)
-    if res_low and res_high:
+    if res_low is not None and res_high is not None:
         y1 = y_map(res_low, vmin, vmax, top, bot)
         y2 = y_map(res_high, vmin, vmax, top, bot)
         od.rectangle((left, min(y1,y2), right, max(y1,y2)),
                      fill=RESIST_FILL, outline=RESIST_EDGE, width=1)
     img.alpha_composite(overlay)
 
-    # --- DEBUG: show test line if no BOS ---
-    if DEBUG_BOS and not (bos_dir in ("up","down") and bos_level is not None):
-        y_test = (top + bot) // 2
-        last_candle_x = int(left + (n-1)*step + step*0.5)
-        draw_bos_line_with_chip(ImageDraw.Draw(img), left, last_candle_x, top, bot, y_test,
-                                (0,0,0), F_SUB, F_META, img, tf_text="TEST")
-
-    # ---- BOS (faint dotted, draw LAST on top) ----
-    if bos_dir in ("up","down") and (bos_level is not None) and (bos_idx is not None):
+    # BoS (draw last, faint dotted)
+    if bos_dir in ("up","down") and (bos_level is not None):
         yL = y_map(bos_level, vmin, vmax, top, bot)
         bos_col = UP_COL if bos_dir == "up" else DOWN_COL
         last_candle_x = int(left + (n-1)*step + step*0.5)
@@ -448,7 +458,7 @@ def render_single_post(path, ticker, payload, brand_logo_path):
     if res_label:
         d.text((MARGIN, caption_y), res_label, fill=TEXT_MUT, font=F_META); caption_y -= 18
 
-    # Footer + brand (optional)
+    # Footer (brand optional)
     d.text((MARGIN, CANVAS_H-40), "Not financial advice", fill=TEXT_MUT, font=F_META)
     brand_logo_path = find_brand_logo_path()
     if brand_logo_path and os.path.exists(brand_logo_path):
@@ -473,28 +483,16 @@ def render_single_post(path, ticker, payload, brand_logo_path):
 # Main
 # =========================
 if __name__ == "__main__":
-    os.makedirs(OUTPUT_DIR, exist_ok=True)   # <-- ensures output/ always exists
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     print("[debug] OUTPUT_DIR:", os.path.abspath(OUTPUT_DIR))
 
-    results = []
-    for t in selected:
-        try:
-            payload = fetch_one(t)
-            if payload:
-                out_path = os.path.join(OUTPUT_DIR, f"twd_{t}_{datestr}.png")
-                print(f"[debug] saving {out_path}")   # <-- look for this line in run.log
-                render_single_post(out_path, t, payload, None)
-                print("done:", out_path)             # <-- look for this line in run.log
-                results.append(out_path)
-            else:
-                print(f"[warn] no data for {t}, skipping")
-        except Exception as e:
-            print("Error: ", " failed for", t, ":", e)
+    now = datetime.datetime.now(pytz.timezone(TIMEZONE))
+    datestr = now.strftime("%Y%m%d")
 
-    # Select tickers using quotas + wildcards (deterministic per day)
     tickers = sample_with_quotas_and_wildcards(QUOTAS, WILDCARDS, POOLS, seed=datestr)
     print("[info] selected tickers:", tickers)
 
+    saved = 0
     for t in tickers:
         try:
             payload = fetch_one(t)
@@ -504,8 +502,11 @@ if __name__ == "__main__":
                 continue
             out_path = os.path.join(OUTPUT_DIR, f"twd_{t}_{datestr}.png")
             print(f"[debug] saving {out_path}")
-            render_single_post(out_path, t, payload, None)
+            render_single_post(out_path, t, payload)
             print("done:", out_path)
+            saved += 1
         except Exception as e:
-            print(f"[error] failed for {t}: {e}")
+            print(f"Error:  failed for {t}: {e}")
             traceback.print_exc()
+
+    print(f"[info] saved images: {saved}")
