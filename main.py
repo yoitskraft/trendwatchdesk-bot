@@ -14,12 +14,12 @@ NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "").strip()
 BRAND_LOGO_PATH = os.getenv("BRAND_LOGO_PATH", "assets/brand_logo.png")
 
 # Controls
-DEFAULT_TF = (os.getenv("TWD_TF", "D") or "D").upper()  # 'D' daily (render), 'W' weekly (render). S/R detection uses 4H regardless.
-FOURH_LOOKBACK_DAYS = int(os.getenv("TWD_4H_LOOKBACK_DAYS", "120"))  # 4h S/R detection window
-SWING_WINDOW = int(os.getenv("TWD_SWING_WINDOW", "3"))               # swing window for local extrema (3–5 is typical)
-MIN_TOUCHES = int(os.getenv("TWD_MIN_TOUCHES", "3"))                  # require >= touches per zone
-ZONE_PCT_TOL = float(os.getenv("TWD_ZONE_PCT_TOL", "0.004"))          # 0.4% price tolerance for clustering
-ATR_LEN = int(os.getenv("TWD_ATR_LEN", "14"))                         # ATR for tolerance/visuals
+DEFAULT_TF = (os.getenv("TWD_TF", "D") or "D").upper()  # 'D' (daily render) or 'W' (weekly render)
+FOURH_LOOKBACK_DAYS = int(os.getenv("TWD_4H_LOOKBACK_DAYS", "120"))
+SWING_WINDOW = int(os.getenv("TWD_SWING_WINDOW", "3"))
+MIN_TOUCHES = int(os.getenv("TWD_MIN_TOUCHES", "3"))
+ZONE_PCT_TOL = float(os.getenv("TWD_ZONE_PCT_TOL", "0.004"))  # 0.4%
+ATR_LEN = int(os.getenv("TWD_ATR_LEN", "14"))
 
 # ------------------ Company names (pool) ------------------
 COMPANY_QUERY = {
@@ -36,17 +36,11 @@ SESS.headers.update({"User-Agent": "TWD/1.0"})
 # ------------------ News fetcher ------------------
 def news_headline_for(ticker):
     name = COMPANY_QUERY.get(ticker, ticker)
-    # NewsAPI (if key provided)
     if NEWSAPI_KEY:
         try:
             r = SESS.get(
                 "https://newsapi.org/v2/everything",
-                params={
-                    "q": f'"{name}" OR {ticker}',
-                    "language": "en",
-                    "sortBy": "publishedAt",
-                    "pageSize": 1
-                },
+                params={"q": f'"{name}" OR {ticker}', "language": "en", "sortBy": "publishedAt", "pageSize": 1},
                 headers={"X-Api-Key": NEWSAPI_KEY},
                 timeout=8
             )
@@ -59,7 +53,6 @@ def news_headline_for(ticker):
                         return f"{title} ({src})" if src else title
         except Exception:
             pass
-    # yfinance fallback
     try:
         items = getattr(yf.Ticker(ticker), "news", []) or []
         if items:
@@ -82,13 +75,11 @@ def choose_tickers_somehow():
 def _find_col(df: pd.DataFrame, name: str):
     if df is None or df.empty:
         return None
-    # single-index
     if name in df.columns:
         ser = df[name]
         if isinstance(ser, pd.DataFrame):
             ser = ser.iloc[:, 0]
         return pd.to_numeric(ser, errors="coerce")
-    # normalized names
     try:
         norm = {str(c).lower().replace(" ", ""): c for c in df.columns}
         key = name.lower().replace(" ", "")
@@ -99,7 +90,6 @@ def _find_col(df: pd.DataFrame, name: str):
             return pd.to_numeric(ser, errors="coerce")
     except Exception:
         pass
-    # MultiIndex
     if isinstance(df.columns, pd.MultiIndex):
         lvl0 = df.columns.get_level_values(0)
         lvlN = df.columns.get_level_values(-1)
@@ -142,25 +132,20 @@ def atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
     return tr.rolling(n, min_periods=1).mean()
 
 def swing_points(df: pd.DataFrame, w: int = 3):
-    """Return indices and values of swing highs/lows (local extrema) for window w."""
     highs_idx, lows_idx = [], []
     h, l = df["High"], df["Low"]
     for i in range(w, len(df) - w):
         left_h = h.iloc[i - w:i].max(); right_h = h.iloc[i + 1:i + 1 + w].max()
         left_l = l.iloc[i - w:i].min(); right_l = l.iloc[i + 1:i + 1 + w].min()
         hi = h.iloc[i]; lo = l.iloc[i]
-        if hi >= left_h and hi >= right_h:
-            highs_idx.append(i)
-        if lo <= left_l and lo <= right_l:
-            lows_idx.append(i)
+        if hi >= left_h and hi >= right_h: highs_idx.append(i)
+        if lo <= left_l and lo <= right_l: lows_idx.append(i)
     highs = [(i, float(h.iloc[i])) for i in highs_idx]
     lows  = [(i, float(l.iloc[i])) for i in lows_idx]
     return highs, lows
 
 def cluster_levels(levels, tol_abs):
-    """Cluster 1D price levels into horizontal bands within ±tol_abs."""
-    if not levels:
-        return []
+    if not levels: return []
     levels = sorted(levels)
     clusters = [[levels[0]]]
     for lv in levels[1:]:
@@ -175,67 +160,53 @@ def cluster_levels(levels, tol_abs):
         bands.append({"center": center, "low": lo, "high": hi, "touches": len(cl)})
     return bands
 
-def pick_sr_zones_from_4h(df4h: pd.DataFrame, min_touches=3, w=3, pct_tol=0.004, atr_len=14):
+def pick_support_zone_from_4h(df4h: pd.DataFrame, min_touches=3, w=3, pct_tol=0.004, atr_len=14):
     """
-    Build support/resistance zones from 4H swings.
-    - Find swing highs/lows
-    - Cluster by tolerance (ATR-anchored with pct fallback)
+    Build a single SUPPORT zone from 4H swings:
+    - Find swing lows
+    - Cluster by tolerance (ATR-anchored with percent fallback)
     - Keep clusters with >= min_touches
-    - Return (support_zone, resistance_zone) as (low, high) rectangles
+    - Pick the nearest cluster whose center is <= last (support below price)
+    Return (sup_low, sup_high) or (None, None)
     """
     if df4h is None or df4h.empty:
-        return None, None
+        return (None, None)
 
-    # swings
-    highs, lows = swing_points(df4h, w=w)
-
-    # raw levels (values only)
-    hi_vals = [v for _, v in highs]
+    lows = swing_points(df4h, w=w)[1]  # (idx, value)
     lo_vals = [v for _, v in lows]
+    if not lo_vals:
+        return (None, None)
 
-    # tolerance: ATR or pct of recent price
-    atrv = atr(df4h, n=atr_len).iloc[-1]
+    atrv = float(atr(df4h, n=atr_len).iloc[-1])
     last = float(df4h["Close"].iloc[-1])
     tol_abs = float(max(atrv, last * pct_tol))
 
-    # cluster into bands
-    hi_bands = cluster_levels(hi_vals, tol_abs)
     lo_bands = cluster_levels(lo_vals, tol_abs)
-
-    # filter by touches
-    hi_bands = [b for b in hi_bands if b["touches"] >= min_touches]
     lo_bands = [b for b in lo_bands if b["touches"] >= min_touches]
+    if not lo_bands:
+        return (None, None)
 
-    if not hi_bands and not lo_bands:
-        return None, None
-
-    # choose nearest significant zones around current price
-    res_zone = None
-    sup_zone = None
-    # resistance: band center >= last, pick nearest
-    candidates_r = sorted([b for b in hi_bands if b["center"] >= last], key=lambda x: x["center"])
-    if candidates_r:
-        b = candidates_r[0]
-        # widen band slightly by tolerance for visualization
-        res_zone = (max(b["low"], b["center"] - tol_abs), min(b["high"], b["center"] + tol_abs))
-    # support: band center <= last, pick nearest
+    # nearest support below price
     candidates_s = sorted([b for b in lo_bands if b["center"] <= last], key=lambda x: x["center"], reverse=True)
-    if candidates_s:
-        b = candidates_s[0]
-        sup_zone = (max(b["low"], b["center"] - tol_abs), min(b["high"], b["center"] + tol_abs))
+    if not candidates_s:
+        return (None, None)
 
-    return sup_zone, res_zone
+    b = candidates_s[0]
+    # widen slightly by tolerance for visualization
+    sup_low = max(b["low"], b["center"] - tol_abs)
+    sup_high = min(b["high"], b["center"] + tol_abs)
+    return (float(sup_low), float(sup_high))
 
 # ------------------ Data fetcher ------------------
 def fetch_one(ticker):
     """
-    - Daily or Weekly frame for rendering (TWD_TF)
-    - 4H S/R zones via resampled 60m data (last ~FOURH_LOOKBACK_DAYS)
+    - Daily/Weekly render frame (env TWD_TF)
+    - 4H support zone detection via resampled 60m bars
     - 30d % change from daily closes
     """
     tf = (os.getenv("TWD_TF", DEFAULT_TF) or DEFAULT_TF).upper().strip()  # 'D' or 'W'
 
-    # --- Daily (1y) for change calc and possibly rendering
+    # Daily 1y for change calc (and possibly render)
     try:
         df_d = yf.Ticker(ticker).history(period="1y", interval="1d", auto_adjust=True)
     except Exception:
@@ -261,7 +232,7 @@ def fetch_one(ticker):
         base_val = float(base_series.iloc[-1])
         chg30 = float(100.0 * (float(close_d.iloc[-1]) - base_val) / base_val) if base_val != 0 else 0.0
 
-    # --- 60m → 4H for S/R
+    # 60m → 4H for support zone
     try:
         df_60 = yf.Ticker(ticker).history(period="6mo", interval="60m", auto_adjust=True)
     except Exception:
@@ -269,61 +240,44 @@ def fetch_one(ticker):
     if df_60 is None or df_60.empty:
         df_60 = yf.download(ticker, period="6mo", interval="60m", auto_adjust=True)
 
-    ohlc_60 = _get_ohlc_df(df_60)
-    sr_sup_zone, sr_res_zone = (None, None)
-    if ohlc_60 is not None and not ohlc_60.empty:
-        # Limit lookback
-        cutoff = ohlc_60.index.max() - pd.Timedelta(days=FOURH_LOOKBACK_DAYS)
-        df_60_clip = ohlc_60.loc[ohlc_60.index >= cutoff].copy()
-        if not df_60_clip.empty:
-            df_4h = df_60_clip.resample("4H").agg(
-                {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
-            ).dropna()
-            if not df_4h.empty:
-                sr_sup_zone, sr_res_zone = pick_sr_zones_from_4h(
-                    df_4h, min_touches=MIN_TOUCHES, w=SWING_WINDOW, pct_tol=ZONE_PCT_TOL, atr_len=ATR_LEN
-                )
+    sup_low, sup_high = (None, None)
+    if df_60 is not None and not df_60.empty:
+        ohlc_60 = _get_ohlc_df(df_60)
+        if ohlc_60 is not None and not ohlc_60.empty:
+            cutoff = ohlc_60.index.max() - pd.Timedelta(days=FOURH_LOOKBACK_DAYS)
+            df_60_clip = ohlc_60.loc[ohlc_60.index >= cutoff].copy()
+            if not df_60_clip.empty:
+                df_4h = df_60_clip.resample("4H").agg(
+                    {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+                ).dropna()
+                if not df_4h.empty:
+                    sup_low, sup_high = pick_support_zone_from_4h(
+                        df_4h, min_touches=MIN_TOUCHES, w=SWING_WINDOW, pct_tol=ZONE_PCT_TOL, atr_len=ATR_LEN
+                    )
 
-    # fallback S/R if 4H detection failed
-    if sr_sup_zone is None or sr_res_zone is None:
-        if tf == "W":
-            df_render = ohlc_d.resample("W-FRI").agg({"Open":"first","High":"max","Low":"min","Close":"last"}).dropna().tail(60)
-            if df_render.empty: return None
-            w_low, w_high = float(df_render["Low"].min()), float(df_render["High"].max())
-            sup_low, sup_high = w_low, w_low * 1.03
-            res_low, res_high = w_high * 0.97, w_high
-        else:
-            df_render = ohlc_d.dropna().tail(260)
-            if df_render.empty: return None
-            q15, q25 = np.nanquantile(df_render["Close"], [0.15, 0.25])
-            q75, q85 = np.nanquantile(df_render["Close"], [0.75, 0.85])
-            sup_low, sup_high = float(q15), float(q25)
-            res_low, res_high = float(q75), float(q85)
+    # choose render frame
+    if tf == "W":
+        df_render = ohlc_d.resample("W-FRI").agg({"Open":"first","High":"max","Low":"min","Close":"last"}).dropna().tail(60)
+        if df_render.empty: return None
+        tf_tag = "W"
     else:
-        # Use 4H-detected zones
-        sup_low, sup_high = sr_sup_zone if sr_sup_zone else (None, None)
-        res_low, res_high = sr_res_zone if sr_res_zone else (None, None)
-        # choose render frame
-        if tf == "W":
-            df_render = ohlc_d.resample("W-FRI").agg({"Open":"first","High":"max","Low":"min","Close":"last"}).dropna().tail(60)
-            if df_render.empty: return None
-        else:
-            df_render = ohlc_d.dropna().tail(260)
-            if df_render.empty: return None
+        df_render = ohlc_d.dropna().tail(260)
+        if df_render.empty: return None
+        tf_tag = "D"
 
-    bos_dir = "up" if chg30 > 5 else ("down" if chg30 < -5 else None)
+    # BOS orientation (for copy; zone selection already uses nearest support)
+    bos_dir = "up" if chg30 > 0 else ("down" if chg30 < 0 else None)
     bos_level = last
     bos_idx = int(len(df_render) - 1)
-    tf_tag = "Weekly" if tf == "W" else "Daily"
 
     return (df_render, last, float(chg30),
-            sup_low, sup_high, res_low, res_high,
-            "Support", "Resistance", bos_dir, bos_level, bos_idx, ("W" if tf == "W" else "D"))
+            sup_low, sup_high, None, None,      # only support values; no resistance
+            "Support", "", bos_dir, bos_level, bos_idx, tf_tag)
 
-# ------------------ Renderer (white, even header spacing, no pill badges) ------------------
+# ------------------ Renderer (white, single support zone, no labels) ------------------
 def render_single_post(out_path, ticker, payload):
-    (df, last, chg30, sup_low, sup_high, res_low, res_high,
-     sup_label, res_label, bos_dir, bos_level, bos_idx, bos_tf) = payload
+    (df, last, chg30, sup_low, sup_high, _res_low, _res_high,
+     _sup_label, _res_label, bos_dir, bos_level, bos_idx, bos_tf) = payload
 
     # Scales
     try:    S_LAYOUT = float(os.getenv("TWD_UI_SCALE", "0.90"))
@@ -346,10 +300,8 @@ def render_single_post(out_path, ticker, payload):
     GREEN    = (22, 163, 74, 255)
     RED      = (239, 68, 68, 255)
     WICK     = (140, 140, 140, 255)
-    SR_BLUE  = (120, 162, 255, 50)
-    SR_RED   = (255, 154, 154, 50)
+    SR_BLUE  = (120, 162, 255, 50)   # support fill
     SR_BLUE_ST = (120, 162, 255, 120)
-    SR_RED_ST  = (255, 154, 154, 120)
     ACCENT   = (255, 210, 0, 255)
 
     base = Image.new("RGBA", (W, H), BG)
@@ -363,10 +315,8 @@ def render_single_post(out_path, ticker, payload):
         sz = st(size)
         grift_bold = _try_font("assets/fonts/Grift-Bold.ttf", sz)
         grift_reg  = _try_font("assets/fonts/Grift-Regular.ttf", sz)
-        roboto_bold = (_try_font("assets/fonts/Roboto-Bold.ttf", sz)
-                       or _try_font("Roboto-Bold.ttf", sz))
-        roboto_reg  = (_try_font("assets/fonts/Roboto-Regular.ttf", sz)
-                       or _try_font("Roboto-Regular.ttf", sz))
+        roboto_bold = (_try_font("assets/fonts/Roboto-Bold.ttf", sz) or _try_font("Roboto-Bold.ttf", sz))
+        roboto_reg  = (_try_font("assets/fonts/Roboto-Regular.ttf", sz) or _try_font("Roboto-Regular.ttf", sz))
         if bold: return grift_bold or roboto_bold or ImageFont.load_default()
         return grift_reg or roboto_reg or ImageFont.load_default()
 
@@ -377,16 +327,13 @@ def render_single_post(out_path, ticker, payload):
     f_sm     = _font(26)
     f_axis   = _font(24)
 
-    # Layout
-    outer_top = sp(60)
-    outer_lr  = sp(64)
-    outer_bot = sp(60)
-    header_h  = sp(200)
-    footer_h  = sp(140)
+    # Layout (whitespace; smaller chart box)
+    outer_top = sp(60); outer_lr = sp(64); outer_bot = sp(60)
+    header_h = sp(200); footer_h = sp(140)
     chart = [outer_lr, outer_top + header_h, W - outer_lr, H - outer_bot - footer_h]
     cx1, cy1, cx2, cy2 = chart
 
-    # Header (equal vertical spacing)
+    # Header with equal spacing
     title_x, title_y = outer_lr, outer_top
     GAP = st(18)
     def draw_line(x, y, text, font, fill):
@@ -437,24 +384,14 @@ def render_single_post(out_path, ticker, payload):
         x = cx1 + i * (cx2 - cx1) / 9.0; g.line([(x, cy1), (x, cy2)], fill=GRID_MIN, width=sp(1))
     base = Image.alpha_composite(base, grid); draw = ImageDraw.Draw(base)
 
-    # S/R zones from 4H detection (if available)
+    # ----- Support zone ONLY (blue), closest below last price; NO text label -----
     if sup_low is not None and sup_high is not None:
         sup_y1, sup_y2 = sy(sup_high), sy(sup_low)
         sup_rect = [cx1, min(sup_y1, sup_y2), cx2, max(sup_y1, sup_y2)]
         sup_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         ImageDraw.Draw(sup_layer).rectangle(sup_rect, fill=SR_BLUE, outline=SR_BLUE_ST, width=sp(2))
-        base = Image.alpha_composite(base, sup_layer); draw = ImageDraw.Draw(base)
-        draw.text((cx2 - sp(220), min(sup_y1, sup_y2) + sp(6)),
-                  f"{sup_label} ~{sup_low:.2f}", fill=(65, 90, 140, 255), font=f_sm)
-
-    if res_low is not None and res_high is not None:
-        res_y1, res_y2 = sy(res_high), sy(res_low)
-        res_rect = [cx1, min(res_y1, res_y2), cx2, max(res_y1, res_y2)]
-        res_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        ImageDraw.Draw(res_layer).rectangle(res_rect, fill=SR_RED, outline=SR_RED_ST, width=sp(2))
-        base = Image.alpha_composite(base, res_layer); draw = ImageDraw.Draw(base)
-        draw.text((cx2 - sp(220), min(res_y1, res_y2) + sp(6)),
-                  f"{res_label} ~{res_high:.2f}", fill=(150, 60, 60, 255), font=f_sm)
+        base = Image.alpha_composite(base, sup_layer)
+        draw = ImageDraw.Draw(base)
 
     # Candles
     n = len(df2)
@@ -471,7 +408,7 @@ def render_single_post(out_path, ticker, payload):
         if abs(y2 - y1) < 1: y2 = y1 + 1
         draw.rectangle([xx - half, y1, xx + half, y2], fill=col, outline=None)
 
-    # BOS line
+    # BOS line (optional visual)
     if bos_dir is not None and np.isfinite(bos_level):
         by = sy(bos_level); draw.line([(cx1, by), (cx2, by)], fill=ACCENT, width=sp(3))
 
@@ -485,9 +422,8 @@ def render_single_post(out_path, ticker, payload):
 
     # Footer
     meta_x = outer_lr; meta_y = H - outer_bot - st(64)
-    if res_high is not None: draw.text((meta_x, meta_y),          f"Resistance ~{res_high:.2f}", fill=TEXT_LT, font=f_sm)
-    if sup_low  is not None: draw.text((meta_x, meta_y + st(24)), f"Support ~{sup_low:.2f}",     fill=TEXT_LT, font=f_sm)
-    draw.text((meta_x, meta_y + st(48)), "Not financial advice",  fill=(160,160,160,255), font=f_sm)
+    draw.text((meta_x, meta_y),          "Support zone highlighted", fill=TEXT_LT, font=f_sm)
+    draw.text((meta_x, meta_y + st(24)), "Not financial advice",    fill=(160,160,160,255), font=f_sm)
 
     # Brand logo
     logo_path = BRAND_LOGO_PATH or "assets/brand_logo.png"
@@ -507,8 +443,8 @@ def render_single_post(out_path, ticker, payload):
 
 # ------------------ Captions ------------------
 def plain_english_line(ticker, headline, payload, seed=None):
-    (df,last,chg30,sup_low,sup_high,res_low,res_high,
-     sup_label,res_label,bos_dir,bos_level,bos_idx,bos_tf) = payload
+    (df,last,chg30,sup_low,sup_high,_res_low,_res_high,
+     _sup_label,_res_label,bos_dir,bos_level,bos_idx,bos_tf) = payload
 
     if seed is None: seed = f"{ticker}-{DATESTR}"
     rnd = random.Random(str(seed))
@@ -517,17 +453,11 @@ def plain_english_line(ticker, headline, payload, seed=None):
     lead = headline or rnd.choice(["No major headlines today.","Quiet on the news front.","News flow is light."])
 
     cues = []
-    if chg30 >= 8: cues.append("momentum looks strong 🔥")
-    elif chg30 <= -8: cues.append("recent pullback showing ⚠️")
-    if bos_dir == "up": cues.append("breakout pressure building 🚀")
-    if bos_dir == "down": cues.append("post-breakdown chop ⚠️")
-    if not cues:
-        cues = rnd.sample([
-            "price action is steady", "range bound but coiling",
-            "watching for a decisive move soon", "tightening ranges"
-        ], k=1)
-    cue_txt = "; ".join(cues)
-    return f"📈 {ticker} — {lead} — {cue_txt}"[:280]
+    if chg30 >= 8: cues.append("trend tone is bullish 🔥 — support marked for potential pullbacks")
+    elif chg30 <= -8: cues.append("tone is cautious ⚠️ — watching support for possible bounce")
+    else: cues.append("neutral tone — key support in focus")
+
+    return f"📈 {ticker} — {lead} — {'; '.join(cues)}"[:280]
 
 CTA_POOL = [
     "Save for later 📌 · Comment your levels 💬 · See charts in carousel ➡️",
@@ -564,7 +494,7 @@ def main():
     print(f"[info] saved images: {saved}")
 
     if saved > 0:
-        caption_path = os.path.join(OUTPUT_DIR, f"caption_${DATESTR}.txt".replace("$","") )
+        caption_path = os.path.join(OUTPUT_DIR, f"caption_{DATESTR}.txt")
         now_str = TODAY.strftime("%d %b %Y")
         footer = f"\n\n{random.choice(CTA_POOL)}\n\nIdeas only — not financial advice"
         with open(caption_path, "w", encoding="utf-8") as f:
