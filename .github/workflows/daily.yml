@@ -75,26 +75,31 @@ jobs:
 
       # ---- Publish ONLY the generated PNGs to a separate 'charts' branch ----
       - name: Publish charts to 'charts' branch (single-commit)
-        if: success()
-        run: |
-          set -e
-          test -d output
-          ls output/*.png >/dev/null 2>&1
+  if: success()
+  env:
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    REPO: ${{ github.repository }}
+  run: |
+    set -e
+    test -d output
+    ls output/*.png >/dev/null 2>&1
 
-          # Build a minimal repo containing only the PNGs to push to 'charts'
-          rm -rf publish && mkdir publish
-          cp -r output/* publish/
+    # Build a minimal repo containing only the PNGs to push to 'charts'
+    rm -rf publish && mkdir publish
+    cp -r output/* publish/
 
-          cd publish
-          git init
-          git checkout -b charts
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+    cd publish
+    git init
+    git checkout -b charts
+    git config user.name  "github-actions[bot]"
+    git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add -A
-          git commit -m "Publish charts $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
-          git push -f origin charts
+    # Use token-authenticated remote so push works non-interactively
+    git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+
+    git add -A
+    git commit -m "Publish charts $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+    git push -f origin charts
 
       # Keep artifacts (logs + PNGs) for easy download from Actions
       - name: Upload artifacts
