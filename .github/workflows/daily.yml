@@ -76,37 +76,30 @@ jobs:
           fi
 
           
-      - name: Commit charts back to repo
-        if: success()     # only try if charts exist and job didn't fail
+            - name: Publish charts to 'charts' branch (single-commit)
+        if: success()
         run: |
           set -e
-          # Ensure output exists and there are PNGs
           test -d output
           ls output/*.png >/dev/null 2>&1
 
-          # Configure git identity for the bot
-          git config user.name "github-actions[bot]"
+          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Make sure we’re on the same branch and up-to-date
-          CURRENT_BRANCH="${GITHUB_REF_NAME:-main}"
-          git fetch origin "$CURRENT_BRANCH"
-          # Rebase to avoid non-fast-forward errors
-          git pull --rebase origin "$CURRENT_BRANCH" || true
+          # Prepare a clean worktree for the 'charts' branch
+          git fetch origin charts || true
+          rm -rf publish && mkdir publish
+          cp -r output/* publish/
 
-          # Stage and commit only if there are changes
-          git add -A output
-          if git diff --cached --quiet; then
-            echo "No changes to commit."
-            exit 0
-          fi
+          # Initialize a temporary repo in publish/
+          cd publish
+          git init -b charts
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git add -A
+          git commit -m "Publish charts $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
 
-          COMMIT_MSG="Add generated charts $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
-          git commit -m "$COMMIT_MSG"
-
-          # Push back to the same branch
-          git push origin "HEAD:$CURRENT_BRANCH"
-
+          # Force push to make this a single-commit branch
+          git push -f origin charts
         
       - name: Upload artifacts
         if: always()
