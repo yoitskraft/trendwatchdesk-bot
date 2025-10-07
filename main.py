@@ -12,7 +12,7 @@ DATESTR = TODAY.strftime("%Y%m%d")
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "").strip()
 BRAND_LOGO_PATH = os.getenv("BRAND_LOGO_PATH", "assets/brand_logo.png")  # optional
 
-# ------------------ Ticker pool ------------------
+# ------------------ Ticker Pool ------------------
 COMPANY_QUERY = {
     "META":"Meta Platforms", "AMD":"Advanced Micro Devices", "GOOG":"Google Alphabet", "GOOGL":"Alphabet",
     "AAPL":"Apple", "MSFT":"Microsoft", "TSM":"Taiwan Semiconductor", "TSLA":"Tesla",
@@ -20,11 +20,10 @@ COMPANY_QUERY = {
     "AMZN":"Amazon", "SNOW":"Snowflake", "SQ":"Block Inc", "PYPL":"PayPal", "UNH":"UnitedHealth"
 }
 
-# ------------------ Weighted, varied ticker selection ------------------
+# ------------------ Ticker Picker ------------------
 def choose_tickers_somehow():
     """
-    Selects 6 varied tickers from weighted sector pools.
-    Ensures different results across days with randomness seeded by DATESTR.
+    Weighted, random selection of 6 tickers from sectors, seeded by date.
     """
     tech =     ["AAPL", "MSFT", "TSLA", "NVDA", "META", "AMD", "GOOG", "GOOGL", "AMZN", "SNOW"]
     fintech =  ["MA", "V", "PYPL", "SQ"]
@@ -43,7 +42,7 @@ def choose_tickers_somehow():
 
     return pick
 
-# ------------------ News helpers ------------------
+# ------------------ News Helper ------------------
 import requests
 SESS = requests.Session()
 SESS.headers.update({"User-Agent":"TWD/1.0"})
@@ -56,10 +55,12 @@ def news_headline_for(ticker):
                          params={"q": f'"{name}" OR {ticker}', "language":"en",
                                  "sortBy":"publishedAt", "pageSize":1},
                          headers={"X-Api-Key": NEWSAPI_KEY}, timeout=8)
-            if r.ok and d := r.json().get("articles"):
-                title = d[0].get("title") or ""
-                src = d[0].get("source",{}).get("name","")
-                return f"{title} ({src})" if title else None
+            if r.ok:
+                d = r.json().get("articles")
+                if d:
+                    title = d[0].get("title") or ""
+                    src = d[0].get("source",{}).get("name","")
+                    return f"{title} ({src})" if title else None
         except Exception:
             pass
     try:
@@ -72,7 +73,7 @@ def news_headline_for(ticker):
         pass
     return None
 
-# ------------------ Caption builder ------------------
+# ------------------ Caption Generator ------------------
 def plain_english_line(ticker, headline, payload, seed=None):
     (df,last,chg30,sup_low,sup_high,res_low,res_high,
      sup_label,res_label,bos_dir,bos_level,bos_idx,bos_tf) = payload
@@ -134,11 +135,8 @@ def plain_english_line(ticker, headline, payload, seed=None):
     ending = rnd.choice(endings_bull if bull_score > bear_score else endings_bear if bear_score > bull_score else endings_neutral)
 
     sector_emoji = {
-        "AMD":"🖥️","NVDA":"🧠","TSM":"🔧","ASML":"🔬","QCOM":"📶","INTC":"💾","MU":"💽","TXN":"📟",
-        "META":"🤖","GOOG":"🔎","AAPL":"📱","MSFT":"☁️","AMZN":"📦",
-        "JNJ":"💊","UNH":"🏥","LLY":"🧪","ABBV":"🧬","MRK":"🧫",
-        "MA":"💳","V":"💳","PYPL":"💸","SQ":"💸","SOFI":"🏦",
-        "SNOW":"🧊","CRM":"📇","NOW":"🛠️","PLTR":"🛰️"
+        "AMD":"🖥️","NVDA":"🧠","TSM":"🔧","META":"🤖","GOOG":"🔎","AAPL":"📱","MSFT":"☁️","AMZN":"📦",
+        "JNJ":"💊","UNH":"🏥","MA":"💳","V":"💳","PYPL":"💸","SQ":"💸","SNOW":"🧊"
     }.get(ticker, "📈")
 
     joiners = [" — ", " · ", " — ", " • "]
@@ -152,7 +150,7 @@ CTA_POOL = [
     "Bookmark 📌 · What did we miss? 💬 · More charts inside ➡️"
 ]
 
-# ------------------ Main script ------------------
+# ------------------ Main Entry ------------------
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     tickers = choose_tickers_somehow()
