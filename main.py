@@ -304,12 +304,12 @@ if not _FETCH_RENDER_IMPORTED:
                 return grift_reg or roboto_reg or ImageFont.load_default()
 
         # Size tune for IG (bigger, clean hierarchy)
-        f_ticker = _font(100, bold=True)   # BIG ticker
-        f_price  = _font(56,  bold=True)   # price
-        f_delta  = _font(50,  bold=True)   # 30d change
-        f_sub    = _font(34,  bold=False)  # subtitle
-        f_sm     = _font(28,  bold=False)  # footer/meta
-        f_badge  = _font(26,  bold=True)   # S/R badges
+       f_ticker = _font(100, bold=True)   # big ticker text
+f_price  = _font(56,  bold=True)
+f_delta  = _font(50,  bold=True)
+f_sub    = _font(34)
+f_sm     = _font(28)
+f_badge  = _font(26, bold=True)
 
         # card
         margin = 40
