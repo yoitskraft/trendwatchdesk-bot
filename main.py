@@ -219,19 +219,19 @@ def fetch_one(ticker):
 # ------------------ Renderer (polished weekly, Grift font) ------------------
 def render_single_post(out_path, ticker, payload):
     """
-    Weekly chart (last ~52w) — fully scalable.
-    Use env TWD_UI_SCALE (float) to scale the whole layout (fonts, paddings, chart, logos).
+    Weekly chart (last ~52w) — fully scalable via env TWD_UI_SCALE.
+    Scales fonts, paddings, grid, candle widths, badges, and logos together.
     """
     (df_w, last, chg30, sup_low, sup_high, res_low, res_high,
      sup_label, res_label, bos_dir, bos_level, bos_idx, bos_tf) = payload
 
-    # ---------- scale (global) ----------
+    # ---------- global scale ----------
     try:
-        S = float(os.getenv("TWD_UI_SCALE", "0.90"))  # 0.90 = 10% smaller than before
+        S = float(os.getenv("TWD_UI_SCALE", "0.90"))  # e.g. 0.88 to shrink 12%
     except Exception:
         S = 0.90
 
-    def sp(x):  # scale to int px
+    def sp(x: float) -> int:
         return int(round(x * S))
 
     # ---------- theme ----------
@@ -253,7 +253,7 @@ def render_single_post(out_path, ticker, payload):
     MAJOR_GL = (231, 235, 240, 255)
     MINOR_GL = (238, 241, 245, 255)
 
-    # ---------- canvas + card + shadow ----------
+    # ---------- canvas + card ----------
     base = Image.new("RGBA", (W, H), BG)
     outer_margin = sp(44)
     card = [outer_margin, outer_margin, W - outer_margin, H - outer_margin]
@@ -289,7 +289,6 @@ def render_single_post(out_path, ticker, payload):
         else:
             return grift_reg  or roboto_reg  or ImageFont.load_default()
 
-    # base sizes now pass through _font which scales via sp()
     f_ticker = _font(100, bold=True)
     f_price  = _font(56,  bold=True)
     f_delta  = _font(50,  bold=True)
@@ -297,14 +296,14 @@ def render_single_post(out_path, ticker, payload):
     f_sm     = _font(28)
     f_badge  = _font(26,  bold=True)
 
-    # ---------- layout boxes (scaled) ----------
+    # ---------- layout ----------
     header_h = sp(180)
     footer_h = sp(116)
     pad_l, pad_r = sp(64), sp(58)
     chart = [card[0] + pad_l, card[1] + header_h, card[2] - pad_r, card[3] - footer_h]
     cx1, cy1, cx2, cy2 = chart
 
-    # ---------- header (scaled offsets) ----------
+    # ---------- header ----------
     title_x, title_y = card[0] + sp(28), card[1] + sp(24)
     draw.text((title_x, title_y), ticker, fill=TEXT_DK, font=f_ticker)
 
@@ -315,7 +314,7 @@ def render_single_post(out_path, ticker, payload):
     draw.text((title_x, price_y + sp(50)), f"{chg30:+.2f}% past 30d", fill=delta_col, font=f_delta)
     draw.text((title_x, price_y + sp(98)), "Weekly chart • last 52 weeks", fill=TEXT_LT, font=f_sub)
 
-    # ticker logo (scaled)
+    # ticker logo (optional)
     tlogo_path = os.path.join("assets", "logos", f"{ticker}.png")
     if os.path.exists(tlogo_path):
         try:
@@ -327,7 +326,7 @@ def render_single_post(out_path, ticker, payload):
         except Exception:
             pass
 
-    # ---------- grid (scaled stroke positions) ----------
+    # ---------- grid ----------
     grid = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     g = ImageDraw.Draw(grid)
     for i in range(1, 5):
@@ -356,7 +355,7 @@ def render_single_post(out_path, ticker, payload):
     def sx(i): return cx1 + (i / max(1, len(df2) - 1)) * (cx2 - cx1)
     def sy(v): return cy2 - ((float(v) - ymin) / (ymax - ymin)) * (cy2 - cy1)
 
-    # ---------- S/R zones + badges (scaled) ----------
+    # ---------- S/R zones + badges ----------
     # support
     sup_y1, sup_y2 = sy(sup_high), sy(sup_low)
     sup_rect = [cx1, min(sup_y1, sup_y2), cx2, max(sup_y1, sup_y2)]
@@ -364,9 +363,9 @@ def render_single_post(out_path, ticker, payload):
     ImageDraw.Draw(sup_layer).rectangle(sup_rect, fill=SR_BLUE, outline=SR_BLUE_ST, width=sp(2))
     base = Image.alpha_composite(base, sup_layer)
     draw = ImageDraw.Draw(base)
-    # badge
     badge_txt = f"{sup_label} ~{sup_low:.2f}"
-    tw, th = draw.textbbox((0, 0), badge_txt, font=f_badge)[2:]
+    bbox = draw.textbbox((0, 0), badge_txt, font=f_badge)
+    tw, th = (bbox[2] - bbox[0], bbox[3] - bbox[1])
     bx1 = cx2 - tw - sp(14)
     by1 = min(sup_y1, sup_y2) + sp(8)
     bg = Image.new("RGBA", (W, H), (0, 0, 0, 0))
@@ -383,9 +382,9 @@ def render_single_post(out_path, ticker, payload):
     ImageDraw.Draw(res_layer).rectangle(res_rect, fill=SR_RED, outline=SR_RED_ST, width=sp(2))
     base = Image.alpha_composite(base, res_layer)
     draw = ImageDraw.Draw(base)
-    # badge
     badge_txt2 = f"{res_label} ~{res_high:.2f}"
-    tw2, th2 = draw.textbbox((0, 0), badge_txt2, font=f_badge)[2:]
+    bbox2 = draw.textbbox((0, 0), badge_txt2, font=f_badge)
+    tw2, th2 = (bbox2[2] - bbox2[0], bbox2[3] - bbox2[1])
     bx2 = cx2 - tw2 - sp(14)
     by2 = min(res_y1, res_y2) + sp(8)
     bg2 = Image.new("RGBA", (W, H), (0, 0, 0, 0))
@@ -395,14 +394,13 @@ def render_single_post(out_path, ticker, payload):
     draw = ImageDraw.Draw(base)
     draw.text((bx2, by2), badge_txt2, fill=(150, 60, 60, 255), font=f_badge)
 
-    # ---------- candlesticks (scaled widths) ----------
+    # ---------- candlesticks ----------
     n = len(df2)
-    # narrower bodies when more weeks; width scaled with S
     base_body_px = max(4, int((cx2 - cx1) / max(60, n * 1.35)))
     body_px = max(2, int(round(base_body_px * S)))
     half = body_px // 2
-
     wick_w = max(1, sp(1))
+
     for i, row in enumerate(df2.itertuples(index=False)):
         O, Hh, Ll, C = row
         xx = sx(i)
@@ -413,19 +411,19 @@ def render_single_post(out_path, ticker, payload):
             y2 = y1 + 1
         draw.rectangle([xx - half, y1, xx + half, y2], fill=col, outline=None)
 
-    # ---------- BOS line (scaled) ----------
+    # ---------- BOS line ----------
     if bos_dir is not None and np.isfinite(bos_level):
-    by = sy(bos_level)
-    draw.line([(cx1, by), (cx2, by)], fill=ACCENT, width=sp(3))
+        by = sy(bos_level)
+        draw.line([(cx1, by), (cx2, by)], fill=ACCENT, width=sp(3))
 
-    # ---------- footer (scaled) ----------
+    # ---------- footer ----------
     meta_x = card[0] + sp(24)
     meta_y = card[3] - sp(76)
     draw.text((meta_x, meta_y),          f"Resistance ~{res_high:.2f}", fill=TEXT_LT, font=f_sm)
     draw.text((meta_x, meta_y + sp(26)), f"Support ~{sup_low:.2f}",     fill=TEXT_LT, font=f_sm)
     draw.text((meta_x, meta_y + sp(52)), "Not financial advice",        fill=(160, 160, 160, 255), font=f_sm)
 
-    # ---------- brand logo (scaled) ----------
+    # ---------- brand logo ----------
     logo_path = BRAND_LOGO_PATH or "assets/brand_logo.png"
     if logo_path and os.path.exists(logo_path):
         try:
@@ -441,7 +439,7 @@ def render_single_post(out_path, ticker, payload):
     out = base.convert("RGB")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     out.save(out_path, quality=95)
-
+    
 # ------------------ Caption Builder ------------------
 def plain_english_line(ticker, headline, payload, seed=None):
     """
