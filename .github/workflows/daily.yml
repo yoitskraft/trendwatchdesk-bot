@@ -11,6 +11,19 @@ jobs:
     permissions:
       contents: write
 
+    env:
+      # ---- Rendering scale knobs ----
+      TWD_UI_SCALE: "0.90"       # chart/card/brand size
+      TWD_TEXT_SCALE: "0.70"     # shrink all text/badges
+      TWD_TLOGO_SCALE: "0.55"    # shrink ticker logo only
+
+      # ---- Brand/logo + news (optional) ----
+      BRAND_LOGO_PATH: "assets/brand_logo.png"
+      NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+
+      # ---- Python behavior ----
+      PYTHONUNBUFFERED: "1"
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -35,17 +48,18 @@ jobs:
         run: |
           pip install -r requirements.txt || true
 
-      - name: Ensure output folder
+      - name: Ensure output + check assets
         run: |
           mkdir -p output
           echo "Output dir:" && pwd && ls -la output || true
+          echo "Fonts:" && ls -la assets/fonts || true
+          echo "Logos:" && ls -la assets/logos || true
+          echo "Brand logo:" && test -f "${BRAND_LOGO_PATH}" && echo "OK" || echo "Missing (set BRAND_LOGO_PATH or add file)."
 
       - name: Run bot (tee log)
         run: |
           set -x
           python -u main.py 2>&1 | tee run.log
-        env:
-          PYTHONUNBUFFERED: "1"
 
       - name: Print run.log to console
         if: always()
@@ -61,6 +75,8 @@ jobs:
           ls -la output || true
           echo "== any pngs =="
           find output -maxdepth 1 -type f -name "*.png" -printf "%f\n" 2>/dev/null || true
+          echo "== caption file =="
+          ls -la output/caption_* 2>/dev/null || true
 
       - name: Require charts
         if: always()
@@ -74,7 +90,6 @@ jobs:
           fi
 
       # ---- Publish ONLY the generated PNGs to a separate 'charts' branch ----
-      
       - name: Publish charts to 'charts' branch (single-commit)
         if: success()
         env:
@@ -95,13 +110,13 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Use the workflow token so push works non-interactively
           git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
 
           git add -A
           git commit -m "Publish charts $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
           git push -f origin charts
-      # Keep artifacts (logs + PNGs) for easy download from Actions
+
+      # Keep artifacts (logs + PNGs + caption) for easy download from Actions
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
