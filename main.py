@@ -63,7 +63,7 @@ def news_headline_for(ticker):
         pass
     return None
 
-# ------------------ Ticker chooser (keep simple/deterministic by day) ------------------
+# ------------------ Ticker chooser (deterministic by date) ------------------
 def choose_tickers_somehow():
     """
     Deterministic daily pick of 6 tickers from the pool.
@@ -74,8 +74,8 @@ def choose_tickers_somehow():
     k = min(6, len(pool))
     return rnd.sample(pool, k)
 
-# ------------------ Robust OHLC helpers (fixes MultiIndex + missing cols) ------------------
-def _find_col(df, name):
+# ------------------ Robust OHLC helpers (MultiIndex + missing cols) ------------------
+def _find_col(df: pd.DataFrame, name: str):
     """
     Return a 1D numeric Series for 'Open'/'High'/'Low'/'Close'/'Adj Close'
     from either single-level or MultiIndex yfinance frames. Returns None if not found.
@@ -91,13 +91,16 @@ def _find_col(df, name):
         return pd.to_numeric(ser, errors="coerce")
 
     # 2) Normalized-name match (lowercase, no spaces)
-    norm = {str(c).lower().replace(" ", ""): c for c in df.columns}
-    key = name.lower().replace(" ", "")
-    if key in norm:
-        ser = df[norm[key]]
-        if isinstance(ser, pd.DataFrame):
-            ser = ser.iloc[:, 0]
-        return pd.to_numeric(ser, errors="coerce")
+    try:
+        norm = {str(c).lower().replace(" ", ""): c for c in df.columns}
+        key = name.lower().replace(" ", "")
+        if key in norm:
+            ser = df[norm[key]]
+            if isinstance(ser, pd.DataFrame):
+                ser = ser.iloc[:, 0]
+            return pd.to_numeric(ser, errors="coerce")
+    except Exception:
+        pass
 
     # 3) MultiIndex match (yfinance often uses level0=field, level1=ticker)
     if isinstance(df.columns, pd.MultiIndex):
@@ -122,7 +125,7 @@ def _find_col(df, name):
 
     return None
 
-def _get_ohlc_df(df):
+def _get_ohlc_df(df: pd.DataFrame):
     """
     Build a clean OHLC DataFrame with simple columns ['Open','High','Low','Close'].
     If some fields are missing, fill from Close as best-effort.
@@ -134,7 +137,7 @@ def _get_ohlc_df(df):
     h = _find_col(df, "High")
     l = _find_col(df, "Low")
 
-    # DO NOT use Python `or` on Series — it’s ambiguous.
+    # Avoid Python `or` on Series — it's ambiguous.
     c = _find_col(df, "Close")
     if c is None or c.dropna().empty:
         c = _find_col(df, "Adj Close")
@@ -161,6 +164,7 @@ def _get_ohlc_df(df):
     if out.empty:
         return None
     return out
+
 # ------------------ Data fetcher (daily → weekly) ------------------
 def fetch_one(ticker):
     """
@@ -216,7 +220,7 @@ def fetch_one(ticker):
     return (df_w, last, float(chg30), sup_low, sup_high, res_low, res_high,
             "Support", "Resistance", bos_dir, bos_level, bos_idx, "W")
 
-# ------------------ Renderer (polished weekly, Grift font) ------------------
+# ------------------ Renderer (independent scales) ------------------
 def render_single_post(out_path, ticker, payload):
     """
     Weekly chart (last ~52w) with independent scale controls:
@@ -329,17 +333,18 @@ def render_single_post(out_path, ticker, payload):
     draw.text((title_x, price_y + sp(50)), f"{chg30:+.2f}% past 30d", fill=delta_col, font=f_delta)
     draw.text((title_x, price_y + sp(98)), "Weekly chart • last 52 weeks", fill=TEXT_LT, font=f_sub)
 
-    # ticker logo (optional, scaled with S_LOGO)
-tlogo_path = os.path.join("assets", "logos", f"{ticker}.png")
-if os.path.exists(tlogo_path):
-    try:
-        tlogo = Image.open(tlogo_path).convert("RGBA")
-        hmax = int(sp(92) * S_LOGO)   # apply logo-specific scale
-        scl = min(1.0, hmax / max(1, tlogo.height))
-        tlogo = tlogo.resize((int(tlogo.width * scl), int(tlogo.height * scl)))
-        base.alpha_composite(tlogo, (card[2] - sp(28) - tlogo.width, title_y + sp(2)))
-    except Exception:
-        pass
+    # ticker logo (optional, scaled with S_LOGO independently)
+    tlogo_path = os.path.join("assets", "logos", f"{ticker}.png")
+    if os.path.exists(tlogo_path):
+        try:
+            tlogo = Image.open(tlogo_path).convert("RGBA")
+            hmax = int(sp(92) * S_LOGO)  # independent logo scale
+            hmax = max(1, hmax)
+            scl = min(1.0, hmax / max(1, tlogo.height))
+            tlogo = tlogo.resize((int(tlogo.width * scl), int(tlogo.height * scl)))
+            base.alpha_composite(tlogo, (card[2] - sp(28) - tlogo.width, title_y + sp(2)))
+        except Exception:
+            pass
 
     # ---------- grid ----------
     grid = Image.new("RGBA", (W, H), (0, 0, 0, 0))
@@ -438,7 +443,7 @@ if os.path.exists(tlogo_path):
     draw.text((meta_x, meta_y + sp(26)), f"Support ~{sup_low:.2f}",     fill=TEXT_LT, font=f_sm)
     draw.text((meta_x, meta_y + sp(52)), "Not financial advice",        fill=(160, 160, 160, 255), font=f_sm)
 
-    # ---------- brand logo (keeps layout scale; unaffected by text/logo scales) ----------
+    # ---------- brand logo (layout-scaled only) ----------
     logo_path = BRAND_LOGO_PATH or "assets/brand_logo.png"
     if logo_path and os.path.exists(logo_path):
         try:
@@ -454,7 +459,7 @@ if os.path.exists(tlogo_path):
     out = base.convert("RGB")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     out.save(out_path, quality=95)
-    
+
 # ------------------ Caption Builder ------------------
 def plain_english_line(ticker, headline, payload, seed=None):
     """
