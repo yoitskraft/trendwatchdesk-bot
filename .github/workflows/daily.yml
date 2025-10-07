@@ -12,6 +12,7 @@ jobs:
       contents: write
 
     steps:
+      # ✅ Correct: "uses" belongs to the SAME step as "name"
       - name: Checkout repo
         uses: actions/checkout@v4
 
@@ -25,60 +26,41 @@ jobs:
           python --version
           pip --version
 
-      # Always install baseline deps first
+      # Always install baseline deps (even if requirements.txt exists)
       - name: Install baseline deps
         run: |
           python -m pip install --upgrade pip
           pip install --upgrade yfinance pillow pandas numpy requests pytz urllib3
 
-      # Then optionally install your requirements (if present)
+      # Optionally install your project's requirements (if present)
       - name: Install project requirements (optional)
         if: hashFiles('requirements.txt') != ''
         run: |
           pip install -r requirements.txt || true
 
-      - name: Debug assets (logos/brand)
+      # Ensure output dir exists BEFORE running the script
+      - name: Ensure output folder
         run: |
-          echo "== assets =="
-          ls -la assets || true
-          echo "== assets/logos =="
-          ls -la assets/logos || true
-          echo "== brand logo candidates =="
-          ls -la assets/brand_logo.png assets/logo.png || true
+          mkdir -p output
+          echo "Output dir:" && pwd && ls -la output || true
 
-      # Make the probe non-fatal so the job continues either way
-      - name: Probe Yahoo 4H (AAPL)
-        continue-on-error: true
+      # Run your bot and capture logs
+      - name: Run bot (tee log)
         run: |
-          python - << 'PY'
-          import yfinance as yf
-          try:
-              df = yf.download("AAPL", period="10d", interval="4h", progress=False)
-              print("Probe rows:", 0 if df is None else len(df))
-              print(df.tail(3))
-          except Exception as e:
-              print("Probe failed:", e)
-          PY
+          set -x
+          python -u main.py 2>&1 | tee run.log
+        env:
+          PYTHONUNBUFFERED: "1"
 
-        - name: Ensure output folder
-     run: |
-       mkdir -p output
-       echo "Output dir:" && pwd && ls -la output || true
+      # Print the tail of the run log for quick visibility
+      - name: Print run.log to console
+        if: always()
+        run: |
+          echo "===== BEGIN run.log ====="
+          (test -f run.log && tail -n 300 run.log) || echo "run.log missing"
+          echo "===== END run.log ====="
 
-   - name: Run bot (tee log)
-     run: |
-       set -x
-       python -u main.py 2>&1 | tee run.log
-     env:
-       PYTHONUNBUFFERED: "1"
-
-   - name: Print run.log to console
-     if: always()
-     run: |
-       echo "===== BEGIN run.log ====="
-       (test -f run.log && tail -n 300 run.log) || echo "run.log missing"
-       echo "===== END run.log ====="
-
+      # Show what ended up in output/
       - name: Debug output folder
         if: always()
         run: |
@@ -87,6 +69,7 @@ jobs:
           echo "== any pngs =="
           find output -maxdepth 1 -type f -name "*.png" -printf "%f\n" 2>/dev/null || true
 
+      # Hard fail if nothing was generated
       - name: Require charts
         if: always()
         run: |
@@ -94,20 +77,12 @@ jobs:
           COUNT=$(find output -maxdepth 1 -type f -name "*.png" 2>/dev/null | wc -l | tr -d ' ')
           echo "PNG count: $COUNT"
           if [ "$COUNT" = "0" ]; then
-            echo "::error::No charts generated. Check previous steps:"
-            echo " - If the probe printed 0 rows, Yahoo intraday may be rate-limited."
-            echo " - Check main.py logs in run.log for errors per ticker."
+            echo "::error::No charts generated. Check run.log above for errors."
             exit 1
           fi
 
-      - name: Upload charts
-        uses: actions/upload-artifact@v4
-        with:
-          name: charts-${{ github.run_id }}
-          path: output/*.png
-          if-no-files-found: warn
-
-      - name: Upload logs and output folder
+      # Upload results + logs as artifact
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
