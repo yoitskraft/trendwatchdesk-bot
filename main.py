@@ -192,22 +192,20 @@ def resample_weekly(df):
     }).dropna()
     return w
 
-def detect_bos_weekly(dfd, buffer_pct=0.0005, vol_threshold_pct=0.4, w_fractal=2):
-    if dfd is None or len(dfd) < 10: return (None, None, None)
-    dfw = resample_weekly(dfd)
-    if dfw is None or dfw.empty or len(dfw) < 6: return (None, None, None)
-    lows_w, highs_w = swing_points(dfw, w=w_fractal)
-    if not (lows_w or highs_w): return (None, None, None)
-    close_w_last = float(dfw["Close"].iloc[-1])
-    vol_w_last   = float(dfw["Volume"].iloc[-1])
-    vol_w_bar    = dfw["Volume"].tail(60).quantile(vol_threshold_pct)
-    if highs_w:
-        i_hi, _, hi_price = highs_w[-1]
-        if (close_w_last > hi_price * (1 + buffer_pct)) and (vol_w_last >= vol_w_bar):
-            return ("up", hi_price, i_hi)
-    if lows_w:
-        i_lo, _, lo_price = lows_w[-1]
-        if (close_w_last < lo_price * (1 - buffer_pct)) and (vol_w_last >= vol_w_bar):
+def detect_bos_daily(dfd, buffer_pct=0.0003, vol_threshold_pct=0.3, d_fractal=2):
+    if dfd is None or len(dfd) < 20: return (None, None, None)
+    lows_d, highs_d = swing_points(dfd, w=d_fractal)
+    if not (lows_d or highs_d): return (None, None, None)
+    close_last = float(dfd["Close"].iloc[-1])
+    vol_last   = float(dfd["Volume"].iloc[-1])
+    vol_bar    = dfd["Volume"].tail(120).quantile(vol_threshold_pct)
+    if highs_d:
+        i_hi, _, hi_price = highs_d[-1]
+        if (close_last > hi_price * (1 + buffer_pct)) and (vol_last >= vol_bar):
+            return ("up", hi_price, i_hi)   # ← fixed: i_hi (not i_i)
+    if lows_d:
+        i_lo, _, lo_price = lows_d[-1]
+        if (close_last < lo_price * (1 - buffer_pct)) and (vol_last >= vol_bar):
             return ("down", lo_price, i_lo)
     return (None, None, None)
 
