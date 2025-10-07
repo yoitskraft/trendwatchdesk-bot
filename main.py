@@ -281,16 +281,35 @@ if not _FETCH_RENDER_IMPORTED:
         draw = ImageDraw.Draw(canvas)
 
         # fonts
-        def _font(size):
+        def _try_font(path, size):
             try:
-                return ImageFont.truetype("arial.ttf", size)
+                return ImageFont.truetype(path, size)
             except Exception:
-                return ImageFont.load_default()
-        f_title = _font(80)
-        f_price = _font(44)
-        f_delta = _font(40)
-        f_sub   = _font(28)
-        f_sm    = _font(24)
+                return None
+
+        def _font(size, bold=False):
+            # 1) Prefer your Grift family in repo
+            grift_bold = _try_font("assets/fonts/Grift-Bold.ttf", size)
+            grift_reg  = _try_font("assets/fonts/Grift-Regular.ttf", size)
+
+            # 2) Then Roboto (repo or system)
+            roboto_bold = (_try_font("assets/fonts/Roboto-Bold.ttf", size)
+                           or _try_font("Roboto-Bold.ttf", size))
+            roboto_reg  = (_try_font("assets/fonts/Roboto-Regular.ttf", size)
+                           or _try_font("Roboto-Regular.ttf", size))
+
+            if bold:
+                return grift_bold or roboto_bold or ImageFont.load_default()
+            else:
+                return grift_reg or roboto_reg or ImageFont.load_default()
+
+        # Size tune for IG (bigger, clean hierarchy)
+        f_ticker = _font(100, bold=True)   # BIG ticker
+        f_price  = _font(56,  bold=True)   # price
+        f_delta  = _font(50,  bold=True)   # 30d change
+        f_sub    = _font(34,  bold=False)  # subtitle
+        f_sm     = _font(28,  bold=False)  # footer/meta
+        f_badge  = _font(26,  bold=True)   # S/R badges
 
         # card
         margin = 40
