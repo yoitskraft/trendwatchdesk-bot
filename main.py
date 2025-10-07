@@ -228,14 +228,14 @@ def fetch_one(ticker):
 # ------------------ Renderer (clean white, no pill/badges) ------------------
 def render_single_post(out_path, ticker, payload):
     """
-    Clean white background.
-    - No card/shadow; no rounded S/R badges.
-    - S/R shown as subtle shaded zones with plain text labels.
-    - Right-side price ticks.
-    - Independent scales:
-        TWD_UI_SCALE   : layout/chart/brand (default 0.90)
-        TWD_TEXT_SCALE : text               (default 0.70)
-        TWD_TLOGO_SCALE: ticker logo        (default 0.55)
+    Clean white background, improved header alignment:
+      - Left header (ticker, price, % change, timeframe) uses equal vertical spacing
+      - S/R shaded zones with plain labels (no rounded badges)
+      - Right-side price ticks
+      - Independent scales:
+          TWD_UI_SCALE   : layout/chart/brand (default 0.90)
+          TWD_TEXT_SCALE : text               (default 0.70)
+          TWD_TLOGO_SCALE: ticker logo        (default 0.55)
     """
     (df, last, chg30, sup_low, sup_high, res_low, res_high,
      sup_label, res_label, bos_dir, bos_level, bos_idx, bos_tf) = payload
@@ -295,37 +295,48 @@ def render_single_post(out_path, ticker, payload):
     f_sm     = _font(26)
     f_axis   = _font(24)
 
-    # ---------- layout (more whitespace; smaller chart area) ----------
-    # margins define the "card" implicitly on white
+    # ---------- layout (whitespace + smaller chart area) ----------
     outer_top = sp(60)
     outer_lr  = sp(64)
     outer_bot = sp(60)
 
-    # header + footer heights
     header_h = sp(200)
     footer_h = sp(140)
 
     chart = [outer_lr, outer_top + header_h, W - outer_lr, H - outer_bot - footer_h]
     cx1, cy1, cx2, cy2 = chart
 
-    # ---------- header ----------
+    # ---------- header (equal spacing) ----------
     title_x, title_y = outer_lr, outer_top
-    draw.text((title_x, title_y), ticker, fill=TEXT_DK, font=f_ticker)
+    GAP = st(18)  # equal vertical gap between each header line
 
-    price_y = title_y + st(70)
-    draw.text((title_x, price_y), f"{last:,.2f} USD", fill=TEXT_MD, font=f_price)
+    def draw_line(x, y, text, font, fill):
+        # draw, then return new y with equal gap using measured text height
+        draw.text((x, y), text, fill=fill, font=font)
+        bbox = draw.textbbox((x, y), text, font=font)
+        h = bbox[3] - bbox[1]
+        return y + h + GAP
 
+    # 1) Ticker
+    y_cursor = draw_line(title_x, title_y, ticker, f_ticker, TEXT_DK)
+
+    # 2) Price
+    y_cursor = draw_line(title_x, y_cursor, f"{last:,.2f} USD", f_price, TEXT_MD)
+
+    # 3) 30d change
     delta_col = GREEN if chg30 >= 0 else RED
-    draw.text((title_x, price_y + st(38)), f"{chg30:+.2f}% past 30d", fill=delta_col, font=f_delta)
-    sub_label = "Daily chart • last ~1 year" if bos_tf == "D" else "Weekly chart • last 52 weeks"
-    draw.text((title_x, price_y + st(72)), sub_label, fill=TEXT_LT, font=f_sub)
+    y_cursor = draw_line(title_x, y_cursor, f"{chg30:+.2f}% past 30d", f_delta, delta_col)
 
-    # ticker logo (scaled independently)
+    # 4) Sub label (timeframe)
+    sub_label = "Daily chart • last ~1 year" if bos_tf == "D" else "Weekly chart • last 52 weeks"
+    y_cursor = draw_line(title_x, y_cursor, sub_label, f_sub, TEXT_LT)
+
+    # Ticker logo (independent scale), aligned to top of header block
     tlogo_path = os.path.join("assets", "logos", f"{ticker}.png")
     if os.path.exists(tlogo_path):
         try:
             tlogo = Image.open(tlogo_path).convert("RGBA")
-            hmax = int(sp(86) * S_LOGO)  # independent logo scale
+            hmax = int(sp(86) * S_LOGO)
             hmax = max(1, hmax)
             scl = min(1.0, hmax / max(1, tlogo.height))
             tlogo = tlogo.resize((int(tlogo.width * scl), int(tlogo.height * scl)))
@@ -346,7 +357,7 @@ def render_single_post(out_path, ticker, payload):
     if not np.isfinite(ymin) or not np.isfinite(ymax) or abs(ymax - ymin) < 1e-6:
         ymin, ymax = (ymin - 0.5, ymax + 0.5) if np.isfinite(ymin) else (0, 1)
 
-    # slight padding so labels/zones breathe
+    # tiny padding so labels/zones breathe
     yr = ymax - ymin
     ymin -= 0.02 * yr
     ymax += 0.02 * yr
@@ -354,24 +365,22 @@ def render_single_post(out_path, ticker, payload):
     def sx(i): return cx1 + (i / max(1, len(df2) - 1)) * (cx2 - cx1)
     def sy(v): return cy2 - ((float(v) - ymin) / (ymax - ymin)) * (cy2 - cy1)
 
-    # ---------- grid (light and subtle) ----------
+    # ---------- grid (light) ----------
     grid = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     g = ImageDraw.Draw(grid)
-    # horizontals
     for i in range(1, 7):
         y = cy1 + i * (cy2 - cy1) / 7.0
         g.line([(cx1, y), (cx2, y)], fill=GRID_MIN, width=sp(1))
     for frac in (0.33, 0.66):
         y = cy1 + frac * (cy2 - cy1)
         g.line([(cx1, y), (cx2, y)], fill=GRID_MAJ, width=sp(1))
-    # verticals (denser for daily)
     for i in range(1, 9):
         x = cx1 + i * (cx2 - cx1) / 9.0
         g.line([(x, cy1), (x, cy2)], fill=GRID_MIN, width=sp(1))
     base = Image.alpha_composite(base, grid)
     draw = ImageDraw.Draw(base)
 
-    # ---------- S/R shaded zones (no rounded badges) ----------
+    # ---------- S/R shaded zones (plain labels, no rounded backgrounds) ----------
     # support
     sup_y1, sup_y2 = sy(sup_high), sy(sup_low)
     sup_rect = [cx1, min(sup_y1, sup_y2), cx2, max(sup_y1, sup_y2)]
@@ -379,7 +388,6 @@ def render_single_post(out_path, ticker, payload):
     ImageDraw.Draw(sup_layer).rectangle(sup_rect, fill=SR_BLUE, outline=SR_BLUE_ST, width=sp(2))
     base = Image.alpha_composite(base, sup_layer)
     draw = ImageDraw.Draw(base)
-    # label text only (no rounded background)
     draw.text((cx2 - sp(240), min(sup_y1, sup_y2) + sp(6)),
               f"{sup_label} ~{sup_low:.2f}", fill=(65, 90, 140, 255), font=f_sm)
 
@@ -395,7 +403,7 @@ def render_single_post(out_path, ticker, payload):
 
     # ---------- candlesticks (thin for density) ----------
     n = len(df2)
-    base_body_px = max(2, int((cx2 - cx1) / max(260, n * 1.1)))  # thin bodies for many bars
+    base_body_px = max(2, int((cx2 - cx1) / max(260, n * 1.1)))
     body_px = max(1, int(round(base_body_px * S_LAYOUT)))
     half = max(1, body_px // 2)
     wick_w = max(1, sp(1))
@@ -403,16 +411,14 @@ def render_single_post(out_path, ticker, payload):
     for i, row in enumerate(df2.itertuples(index=False)):
         O, Hh, Ll, C = row
         xx = sx(i)
-        # wick
         draw.line([(xx, sy(Hh)), (xx, sy(Ll))], fill=WICK, width=wick_w)
-        # body
         col = GREEN if C >= O else RED
         y1 = sy(max(O, C)); y2 = sy(min(O, C))
         if abs(y2 - y1) < 1:
             y2 = y1 + 1
         draw.rectangle([xx - half, y1, xx + half, y2], fill=col, outline=None)
 
-    # ---------- BOS line (optional)
+    # ---------- BOS line (optional) ----------
     if bos_dir is not None and np.isfinite(bos_level):
         by = sy(bos_level)
         draw.line([(cx1, by), (cx2, by)], fill=ACCENT, width=sp(3))
