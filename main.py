@@ -414,9 +414,9 @@ def render_single_post(out_path, ticker, payload):
         draw.rectangle([xx - half, y1, xx + half, y2], fill=col, outline=None)
 
     # ---------- BOS line (scaled) ----------
-    if bos_dir is not None and np.isfinite(bos_level)):
-        by = sy(bos_level)
-        draw.line([(cx1, by), (cx2, by)], fill=ACCENT, width=sp(3))
+    if bos_dir is not None and np.isfinite(bos_level):
+    by = sy(bos_level)
+    draw.line([(cx1, by), (cx2, by)], fill=ACCENT, width=sp(3))
 
     # ---------- footer (scaled) ----------
     meta_x = card[0] + sp(24)
