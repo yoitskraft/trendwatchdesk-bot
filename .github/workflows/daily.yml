@@ -81,9 +81,6 @@ jobs:
           test -d output
           ls output/*.png >/dev/null 2>&1
 
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
           # Build a minimal repo containing only the PNGs to push to 'charts'
           rm -rf publish && mkdir publish
           cp -r output/* publish/
@@ -91,7 +88,10 @@ jobs:
           cd publish
           git init
           git checkout -b charts
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+
           git add -A
           git commit -m "Publish charts $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
           git push -f origin charts
