@@ -271,7 +271,7 @@ def clean_and_summarize(df, ticker):
     half = max(0.35*atr_val, 0.0015*last)
 
     # --- Support/Resistance from 4H pivots (last confirmed to the left) ---
-    if s_val is not None and not pd.isna(s_val) and float(s_val) <= last:
+ if s_val is not None and not pd.isna(s_val) and float(s_val) <= last:
     s_val = float(s_val)
     sup_low, sup_high = s_val - half, s_val + half
     sup_label = f"Support (4H swing low) ~{s_val:.2f}"
