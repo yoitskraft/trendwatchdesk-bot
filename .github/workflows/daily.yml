@@ -29,7 +29,7 @@ jobs:
         run: |
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
-          else
+          else:
             pip install pillow pandas numpy requests yfinance pytz urllib3
           fi
 
@@ -55,6 +55,9 @@ jobs:
               print("Probe failed:", e)
               sys.exit(3)
           PY
+
+      - name: Ensure output folder
+        run: mkdir -p output
 
       - name: Run bot
         run: |
