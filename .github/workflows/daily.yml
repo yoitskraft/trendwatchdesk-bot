@@ -42,20 +42,19 @@ jobs:
           echo "== brand logo candidates =="
           ls -la assets/brand_logo.png assets/logo.png || true
 
-      # Quick probe to confirm Yahoo 4H works from this runner
       - name: Probe Yahoo 4H (AAPL)
         run: |
           python - << 'PY'
-import yfinance as yf, sys
-try:
-    df = yf.download("AAPL", period="10d", interval="4h", progress=False)
-    print("Probe rows:", 0 if df is None else len(df))
-    print(df.tail(3))
-    sys.exit(0 if df is not None and len(df)>0 else 2)
-except Exception as e:
-    print("Probe failed:", e)
-    sys.exit(3)
-PY
+          import yfinance as yf, sys
+          try:
+              df = yf.download("AAPL", period="10d", interval="4h", progress=False)
+              print("Probe rows:", 0 if df is None else len(df))
+              print(df.tail(3))
+              sys.exit(0 if df is not None and len(df)>0 else 2)
+          except Exception as e:
+              print("Probe failed:", e)
+              sys.exit(3)
+          PY
 
       - name: Run bot
         run: |
@@ -72,7 +71,6 @@ PY
           echo "== any pngs =="
           find output -maxdepth 1 -type f -name "*.png" -printf "%f\n" 2>/dev/null || true
 
-      # Hard fail if no PNGs: this makes the cause obvious in the UI
       - name: Require charts
         if: always()
         run: |
@@ -83,7 +81,7 @@ PY
             echo "::error::No charts generated. Check previous steps:"
             echo " - If the Yahoo 4H probe failed, yfinance/data access is the issue."
             echo " - If main.py printed '[warn] no data for ...', your fetch functions returned None."
-            echo " - If errors printed per ticker, inspect run.log below."
+            echo " - If errors printed per ticker, inspect run.log artifact."
             exit 1
           fi
 
@@ -102,17 +100,3 @@ PY
           path: |
             run.log
             output/**
-
-      # Optional commit of images
-      - name: Commit images (optional)
-        if: success() && hashFiles('output/*.png') != ''
-        run: |
-          datestr=$(date +'%Y%m%d')
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          mkdir -p posts
-          cp output/*.png posts/ || true
-          git add posts || true
-          git commit -m "Ones to Watch charts ${datestr}" || echo "Nothing to commit"
-          git pull --rebase --autostash
-          git push
