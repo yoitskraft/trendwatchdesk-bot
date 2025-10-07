@@ -152,14 +152,13 @@ def sma(series, n): return series.rolling(n).mean()
 def swing_points(df, w=2):
     """
     Return lists of pivot lows and highs as (i, timestamp, price).
-    Uses scalar comparisons to avoid pandas' 'truth value of a Series' errors.
+    Uses scalar comparisons to avoid 'truth value of a Series' errors.
     """
-    highs, lows = []
-    L = []
+    # Safely get required columns
     try:
-        H = df["High"]
-        Ls = df["Low"]
-    except KeyError:
+        H = df["High"].astype(float)
+        L = df["Low"].astype(float)
+    except Exception:
         return [], []
 
     n = len(df)
@@ -168,28 +167,22 @@ def swing_points(df, w=2):
 
     highs, lows = [], []
     for i in range(w, n - w):
-        # work with scalars to avoid ambiguous truth values
+        # scalar values to avoid ambiguous truth values
         cur_h = float(H.iloc[i])
-        win_h = H.iloc[i - w:i + w + 1]
-        max_h = float(win_h.max())
+        max_h = float(H.iloc[i - w:i + w + 1].max())
 
-        cur_l = float(Ls.iloc[i])
-        win_l = Ls.iloc[i - w:i + w + 1]
-        min_l = float(win_l.min())
+        cur_l = float(L.iloc[i])
+        min_l = float(L.iloc[i - w:i + w + 1].min())
 
-        if cur_h == max_h:
+        if cur_h >= max_h - 1e-12:
             highs.append((i, df.index[i], cur_h))
-        if cur_l == min_l:
+        if cur_l <= min_l + 1e-12:
             lows.append((i, df.index[i], cur_l))
 
     return lows, highs
 
 # ---- 4H pivot fetchers ----
 def last_left_swing_low_high_4h(ticker, w=2, period="60d", interval="4h"):
-    """
-    Return last confirmed swing low and swing high from 4H timeframe (prices only).
-    Uses Yahoo Finance for intraday aggregated candles.
-    """
     try:
         df4 = yf.download(tickers=ticker, period=period, interval=interval,
                           auto_adjust=False, progress=False)
@@ -197,7 +190,11 @@ def last_left_swing_low_high_4h(ticker, w=2, period="60d", interval="4h"):
         return None, None
     if df4 is None or df4.empty:
         return None, None
+
     df4 = df4[["Open","High","Low","Close","Volume"]].dropna()
+    if len(df4) < 2*w + 1:
+        return None, None
+
     lows, highs = swing_points(df4, w=w)
     s_val = float(lows[-1][2]) if lows else None
     r_val = float(highs[-1][2]) if highs else None
