@@ -60,15 +60,24 @@ jobs:
               print("Probe failed:", e)
           PY
 
-      - name: Ensure output folder
-        run: mkdir -p output
+        - name: Ensure output folder
+     run: |
+       mkdir -p output
+       echo "Output dir:" && pwd && ls -la output || true
 
-      - name: Run bot
-        run: |
-          set -x
-          python main.py | tee run.log
-        env:
-          PYTHONUNBUFFERED: "1"
+   - name: Run bot (tee log)
+     run: |
+       set -x
+       python -u main.py 2>&1 | tee run.log
+     env:
+       PYTHONUNBUFFERED: "1"
+
+   - name: Print run.log to console
+     if: always()
+     run: |
+       echo "===== BEGIN run.log ====="
+       (test -f run.log && tail -n 300 run.log) || echo "run.log missing"
+       echo "===== END run.log ====="
 
       - name: Debug output folder
         if: always()
