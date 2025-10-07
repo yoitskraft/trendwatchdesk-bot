@@ -15,13 +15,13 @@ TIMEZONE   = "Europe/London"
 CANVAS_W, CANVAS_H = 1080, 1080
 MARGIN = 40
 
-DEBUG_BOS = False  # set True for a visible TEST line if no BoS
+DEBUG_BOS = False  # set True to force a visible test line when no BoS is found
 
 # Colors / styling
 BG        = (255,255,255)
 TEXT_MAIN = (20,20,22)
 TEXT_MUT  = (145,150,160)
-GRID      = (238,241,244)            # lighter grid
+GRID      = (238,241,244)
 UP_COL    = (20,170,90)
 DOWN_COL  = (230,70,70)
 
@@ -37,7 +37,7 @@ SUMMARY_LOOKBACK = 30
 YAHOO_PERIOD     = "1y"
 STOOQ_MAX_DAYS   = 500
 
-# Pools / quotas (8 images/run: quotas + 2 wildcards)
+# Pools / quotas (8 per run: quotas + 2 wildcards)
 POOLS = {
     "AI": ["NVDA","MSFT","GOOG","META","AMD","AVGO","CRM","SNOW","PLTR","NOW"],
     "QUANTUM": ["IONQ","IBM","RGTI","AMZN","MSFT"],
@@ -192,20 +192,22 @@ def resample_weekly(df):
     }).dropna()
     return w
 
-def detect_bos_daily(dfd, buffer_pct=0.0003, vol_threshold_pct=0.3, d_fractal=2):
-    if dfd is None or len(dfd) < 20: return (None, None, None)
-    lows_d, highs_d = swing_points(dfd, w=d_fractal)
-    if not (lows_d or highs_d): return (None, None, None)
-    close_last = float(dfd["Close"].iloc[-1])
-    vol_last   = float(dfd["Volume"].iloc[-1])
-    vol_bar    = dfd["Volume"].tail(120).quantile(vol_threshold_pct)
-    if highs_d:
-        i_hi, _, hi_price = highs_d[-1]
-        if (close_last > hi_price * (1 + buffer_pct)) and (vol_last >= vol_bar):
-            return ("up", hi_price, i_hi)   # ← fixed: i_hi (not i_i)
-    if lows_d:
-        i_lo, _, lo_price = lows_d[-1]
-        if (close_last < lo_price * (1 - buffer_pct)) and (vol_last >= vol_bar):
+def detect_bos_weekly(dfd, buffer_pct=0.0005, vol_threshold_pct=0.4, w_fractal=2):
+    if dfd is None or len(dfd) < 10: return (None, None, None)
+    dfw = resample_weekly(dfd)
+    if dfw is None or dfw.empty or len(dfw) < 6: return (None, None, None)
+    lows_w, highs_w = swing_points(dfw, w=w_fractal)
+    if not (lows_w or highs_w): return (None, None, None)
+    close_w_last = float(dfw["Close"].iloc[-1])
+    vol_w_last   = float(dfw["Volume"].iloc[-1])
+    vol_w_bar    = dfw["Volume"].tail(60).quantile(vol_threshold_pct)
+    if highs_w:
+        i_hi, _, hi_price = highs_w[-1]
+        if (close_w_last > hi_price * (1 + buffer_pct)) and (vol_w_last >= vol_w_bar):
+            return ("up", hi_price, i_hi)
+    if lows_w:
+        i_lo, _, lo_price = lows_w[-1]
+        if (close_w_last < lo_price * (1 - buffer_pct)) and (vol_w_last >= vol_w_bar):
             return ("down", lo_price, i_lo)
     return (None, None, None)
 
@@ -219,7 +221,7 @@ def detect_bos_daily(dfd, buffer_pct=0.0003, vol_threshold_pct=0.3, d_fractal=2)
     if highs_d:
         i_hi, _, hi_price = highs_d[-1]
         if (close_last > hi_price * (1 + buffer_pct)) and (vol_last >= vol_bar):
-            return ("up", hi_price, i_i)
+            return ("up", hi_price, i_hi)   # FIXED: i_hi (not i_i)
     if lows_d:
         i_lo, _, lo_price = lows_d[-1]
         if (close_last < lo_price * (1 - buffer_pct)) and (vol_last >= vol_bar):
@@ -290,8 +292,10 @@ def clean_and_summarize(df, ticker):
             sup_label,res_label,bos_dir,bos_level,bos_idx,bos_tf)
 
 def fetch_one(t):
+    # Try Stooq first (fast), then Yahoo daily
     df = fetch_stooq_daily(t)
-    if df is None: df = fetch_yahoo_daily(t)
+    if df is None:
+        df = fetch_yahoo_daily(t)
     return clean_and_summarize(df, t)
 
 # =========================
@@ -374,3 +378,94 @@ def render_single_post(path, ticker, payload, brand_logo_path):
     for i,row in enumerate(df.itertuples(index=False)):
         o,h,l,c = float(row.Open), float(row.High), float(row.Low), float(row.Close)
         cx = int(left + i*step + step*0.5)
+        yH = y_map(h, vmin, vmax, top, bot); yL = y_map(l, vmin, vmax, top, bot)
+        yO = y_map(o, vmin, vmax, top, bot); yC = y_map(c, vmin, vmax, top, bot)
+        col = UP_COL if c>=o else DOWN_COL
+        d.line([(cx,yH),(cx,yL)], fill=col, width=wick)
+        t, b = min(yO,yC), max(yO,yC)
+        if b-t < 2: b = t+2
+        d.rectangle((cx-body//2, t, cx+body//2, b), fill=col)
+
+    # Zones overlay (under BOS)
+    overlay = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0,0,0,0))
+    od = ImageDraw.Draw(overlay)
+    if sup_low and sup_high:
+        y1 = y_map(sup_low, vmin, vmax, top, bot)
+        y2 = y_map(sup_high, vmin, vmax, top, bot)
+        od.rectangle((left, min(y1,y2), right, max(y1,y2)),
+                     fill=SUPPORT_FILL, outline=SUPPORT_EDGE, width=1)
+    if res_low and res_high:
+        y1 = y_map(res_low, vmin, vmax, top, bot)
+        y2 = y_map(res_high, vmin, vmax, top, bot)
+        od.rectangle((left, min(y1,y2), right, max(y1,y2)),
+                     fill=RESIST_FILL, outline=RESIST_EDGE, width=1)
+    img.alpha_composite(overlay)
+
+    # --- DEBUG: show test line if no BOS ---
+    if DEBUG_BOS and not (bos_dir in ("up","down") and bos_level is not None):
+        y_test = (top + bot) // 2
+        last_candle_x = int(left + (n-1)*step + step*0.5)  # stop at last candle
+        draw_bos_line_with_chip(ImageDraw.Draw(img), left, last_candle_x, top, bot, y_test,
+                                (0,0,0), F_SUB, F_META, img, tf_text="TEST")
+
+    # ---- BOS (faint dotted, draw LAST on top) ----
+    if bos_dir in ("up","down") and (bos_level is not None) and (bos_idx is not None):
+        yL = y_map(bos_level, vmin, vmax, top, bot)
+        bos_col = UP_COL if bos_dir == "up" else DOWN_COL
+        last_candle_x = int(left + (n-1)*step + step*0.5)
+        draw_bos_line_with_chip(ImageDraw.Draw(img), left, last_candle_x, top, bot, yL,
+                                bos_col, F_SUB, F_META, img, tf_text=bos_tf)
+
+    # Captions
+    caption_y = CANVAS_H - 68
+    if sup_label:
+        d.text((MARGIN, caption_y), sup_label, fill=TEXT_MUT, font=F_META); caption_y -= 18
+    if res_label:
+        d.text((MARGIN, caption_y), res_label, fill=TEXT_MUT, font=F_META); caption_y -= 18
+
+    # Footer + brand
+    d.text((MARGIN, CANVAS_H-40), "Not financial advice", fill=TEXT_MUT, font=F_META)
+    brand_logo_path = find_brand_logo_path()
+    if brand_logo_path and os.path.exists(brand_logo_path):
+        try:
+            brand = Image.open(brand_logo_path).convert("RGBA")
+            w,h = brand.size
+            if w > 120:
+                scale = 120/float(w); brand = brand.resize((120, int(h*scale)), Image.LANCZOS)
+            bx = CANVAS_W - brand.width - MARGIN
+            by = CANVAS_H - brand.height - MARGIN
+            img.alpha_composite(brand, (bx, by))
+        except Exception as e:
+            print(f"[warn] brand logo draw failed: {brand_logo_path} ({e})")
+
+    # Save
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    out = Image.new("RGB", img.size, (255,255,255))
+    out.paste(img, mask=img.split()[-1])
+    out.save(path, "PNG", optimize=True)
+
+# =========================
+# Main
+# =========================
+if __name__ == "__main__":
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    now = datetime.datetime.now(pytz.timezone(TIMEZONE))
+    datestr = now.strftime("%Y%m%d")
+
+    tickers = sample_with_quotas_and_wildcards(QUOTAS, WILDCARDS, POOLS, seed=datestr)
+    print("[info] selected tickers:", tickers)
+
+    for t in tickers:
+        try:
+            payload = fetch_one(t)
+            print(f"[debug] fetched {t}: payload is {'ok' if payload else 'None'}")
+            if not payload:
+                print(f"[warn] no data for {t}, skipping")
+                continue
+            out_path = os.path.join(OUTPUT_DIR, f"twd_{t}_{datestr}.png")
+            print(f"[debug] saving {out_path}")
+            render_single_post(out_path, t, payload, None)
+            print("done:", out_path)
+        except Exception as e:
+            print(f"[error] failed for {t}: {e}")
+            traceback.print_exc()
