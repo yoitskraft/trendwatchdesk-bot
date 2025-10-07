@@ -2,8 +2,12 @@ name: TrendWatchDesk Generate
 
 on:
   schedule:
-    - cron: "10 7 * * 1,3,5"   # Mon/Wed/Fri 07:10 UTC
-  workflow_dispatch:
+    - cron: "10 7 * * 1,3,5"   # Run Mon/Wed/Fri at 07:10 UTC
+  workflow_dispatch:            # Allow manual trigger from Actions tab
+
+concurrency:
+  group: trendwatchdesk-generate
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -12,18 +16,29 @@ jobs:
       contents: write
 
     env:
-      # ---- Rendering scale knobs ----
-      TWD_TF: "D"                # daily (more candles)
-      TWD_UI_SCALE: "0.75"       # chart/card/brand size
-      TWD_TEXT_SCALE: "0.55"     # shrink all text/badges
-      TWD_TLOGO_SCALE: "0.35"    # shrink ticker logo only
-
-      # ---- Brand/logo + news (optional) ----
-      BRAND_LOGO_PATH: "assets/brand_logo.png"
-      NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
-
-      # ---- Python behavior ----
       PYTHONUNBUFFERED: "1"
+
+      # ---------------- Chart Settings ----------------
+      TWD_TF: "D"                # Chart timeframe: "D" for daily (~1y), "W" for weekly (~60 bars)
+      TWD_4H_LOOKBACK_DAYS: "120" # Lookback for 4h swing analysis in days
+      TWD_SWING_WINDOW: "3"       # Swing point sensitivity (higher = fewer swings)
+      TWD_ATR_LEN: "14"           # ATR length for volatility calc
+      TWD_ZONE_PCT_TOL: "0.004"   # Min width of support/resistance zones (as % of price range)
+
+      # ---------------- UI Scaling ----------------
+      TWD_UI_SCALE: "0.90"        # Overall chart scaling (smaller = more margin)
+      TWD_TEXT_SCALE: "0.70"      # Font scaling for headers & labels
+      TWD_TLOGO_SCALE: "0.55"     # Scale for top-right ticker logo (0.55 = 55%)
+      TWD_BRAND_MAXH: "220"       # Max height (px) of bottom-right TrendWatchDesk logo
+      TWD_BRAND_MARGIN: "56"      # Margin (px) from edges for brand logo
+
+      # ---------------- Caption Chatter Settings ----------------
+      TWD_PT_CHATTER: "on"        # "on" enables random bank PT mentions, "off" disables
+      TWD_PT_CHANCE: "8"          # Chance denominator for chatter: 8 = 1 in 8 captions (on average)
+
+      # ---------------- External API / Assets ----------------
+      NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}  # Optional NewsAPI key (falls back to yfinance headlines)
+      BRAND_LOGO_PATH: assets/brand_logo.png   # Path to TrendWatchDesk logo inside repo
 
     steps:
       - name: Checkout repo
@@ -49,13 +64,17 @@ jobs:
         run: |
           pip install -r requirements.txt || true
 
-      - name: Ensure output + check assets
+      - name: Ensure output folder
         run: |
           mkdir -p output
           echo "Output dir:" && pwd && ls -la output || true
-          echo "Fonts:" && ls -la assets/fonts || true
-          echo "Logos:" && ls -la assets/logos || true
-          echo "Brand logo:" && test -f "${BRAND_LOGO_PATH}" && echo "OK" || echo "Missing (set BRAND_LOGO_PATH or add file)."
+
+      - name: Verify assets exist (logos/fonts)
+        run: |
+          ls -la assets || true
+          ls -la assets/logos || true
+          ls -la assets/fonts || true
+          test -f "${BRAND_LOGO_PATH}" && echo "Brand logo OK: ${BRAND_LOGO_PATH}" || echo "Brand logo missing (will skip)."
 
       - name: Run bot (tee log)
         run: |
@@ -66,7 +85,7 @@ jobs:
         if: always()
         run: |
           echo "===== BEGIN run.log ====="
-          (test -f run.log && tail -n 300 run.log) || echo "run.log missing"
+          (test -f run.log && tail -n 400 run.log) || echo "run.log missing"
           echo "===== END run.log ====="
 
       - name: Debug output folder
@@ -76,8 +95,8 @@ jobs:
           ls -la output || true
           echo "== any pngs =="
           find output -maxdepth 1 -type f -name "*.png" -printf "%f\n" 2>/dev/null || true
-          echo "== caption file =="
-          ls -la output/caption_* 2>/dev/null || true
+          echo "== any captions =="
+          find output -maxdepth 1 -type f -name "caption_*.txt" -printf "%f\n" 2>/dev/null || true
 
       - name: Require charts
         if: always()
@@ -90,8 +109,7 @@ jobs:
             exit 1
           fi
 
-      # ---- Publish ONLY the generated PNGs to a separate 'charts' branch ----
-      - name: Publish charts to 'charts' branch (single-commit)
+      - name: Publish outputs to 'charts' branch (single force-push)
         if: success()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -99,9 +117,8 @@ jobs:
         run: |
           set -e
           test -d output
-          ls output/*.png >/dev/null 2>&1
+          ls output/* >/dev/null 2>&1
 
-          # Build a minimal repo containing only the PNGs to push to 'charts'
           rm -rf publish && mkdir publish
           cp -r output/* publish/
 
@@ -112,13 +129,11 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
-
           git add -A
-          git commit -m "Publish charts $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+          git commit -m "Publish outputs $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
           git push -f origin charts
 
-      # Keep artifacts (logs + PNGs + caption) for easy download from Actions
-      - name: Upload artifacts
+      - name: Upload artifacts (logs + outputs)
         if: always()
         uses: actions/upload-artifact@v4
         with:
