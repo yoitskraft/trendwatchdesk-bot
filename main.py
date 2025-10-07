@@ -13,7 +13,7 @@ DATESTR = TODAY.strftime("%Y%m%d")
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "").strip()
 BRAND_LOGO_PATH = os.getenv("BRAND_LOGO_PATH", "assets/brand_logo.png")
 
-# ------------------ Company names ------------------
+# ------------------ Company names (pool) ------------------
 COMPANY_QUERY = {
     "META": "Meta Platforms", "AMD": "Advanced Micro Devices", "GOOG": "Google Alphabet",
     "GOOGL": "Alphabet", "AAPL": "Apple", "MSFT": "Microsoft", "TSM": "Taiwan Semiconductor",
@@ -63,79 +63,140 @@ def news_headline_for(ticker):
         pass
     return None
 
-# ------------------ Ticker chooser ------------------
+# ------------------ Ticker chooser (keep simple/deterministic by day) ------------------
 def choose_tickers_somehow():
     """
     Deterministic daily pick of 6 tickers from the pool.
-    (Seeded by DATESTR so Mon/Wed/Fri differ.)
+    Seeded by DATESTR so Mon/Wed/Fri differ.
     """
     pool = list(COMPANY_QUERY.keys())
     rnd = random.Random(DATESTR)
     k = min(6, len(pool))
     return rnd.sample(pool, k)
 
-# ------------------ Data fetcher (daily → weekly) ------------------
-def _coerce_close_series(df: pd.DataFrame) -> pd.Series:
+# ------------------ Robust OHLC helpers (fixes MultiIndex + missing cols) ------------------
+def _find_col(df, name):
+    """
+    Return a 1D numeric Series for 'Open'/'High'/'Low'/'Close'/'Adj Close'
+    from either single-level or MultiIndex yfinance frames. Returns None if not found.
+    """
     if df is None or df.empty:
-        return pd.Series(dtype=float)
-    for name in ("Close", "Adj Close", "close"):
-        if name in df.columns:
-            close = df[name]
-            break
-    else:
-        close = None
-        # MultiIndex fallback
-        if isinstance(df.columns, pd.MultiIndex):
-            for name in ("Close", "Adj Close"):
-                if name in df.columns.get_level_values(-1):
-                    sub = df.xs(name, axis=1, level=-1, drop_level=False)
-                    if isinstance(sub, pd.DataFrame) and sub.shape[1] >= 1:
-                        close = sub.iloc[:, 0]
-                        break
-    if close is None:
-        return pd.Series(dtype=float)
-    if isinstance(close, pd.DataFrame):
-        close = close.iloc[:, 0]
-    return pd.to_numeric(close, errors="coerce").dropna()
+        return None
 
+    # 1) Direct single-level match
+    if name in df.columns:
+        ser = df[name]
+        if isinstance(ser, pd.DataFrame):
+            ser = ser.iloc[:, 0]
+        return pd.to_numeric(ser, errors="coerce")
+
+    # 2) Normalized-name match (lowercase, no spaces)
+    norm = {str(c).lower().replace(" ", ""): c for c in df.columns}
+    key = name.lower().replace(" ", "")
+    if key in norm:
+        ser = df[norm[key]]
+        if isinstance(ser, pd.DataFrame):
+            ser = ser.iloc[:, 0]
+        return pd.to_numeric(ser, errors="coerce")
+
+    # 3) MultiIndex match (yfinance often uses level0=field, level1=ticker)
+    if isinstance(df.columns, pd.MultiIndex):
+        lvl0 = df.columns.get_level_values(0)
+        lvlN = df.columns.get_level_values(-1)
+        # Try level 0 (field name)
+        if name in set(lvl0):
+            sub = df[name]
+            if isinstance(sub, pd.DataFrame):
+                ser = sub.iloc[:, 0]
+            else:
+                ser = sub
+            return pd.to_numeric(ser, errors="coerce")
+        # Try last level (in case someone swapped levels)
+        if name in set(lvlN):
+            sub = df.xs(name, axis=1, level=-1)
+            if isinstance(sub, pd.DataFrame):
+                ser = sub.iloc[:, 0]
+            else:
+                ser = sub
+            return pd.to_numeric(ser, errors="coerce")
+
+    return None
+
+def _get_ohlc_df(df):
+    """
+    Build a clean OHLC DataFrame with simple columns ['Open','High','Low','Close'].
+    If some fields are missing, fill from Close as best-effort.
+    """
+    if df is None or df.empty:
+        return None
+
+    o = _find_col(df, "Open")
+    h = _find_col(df, "High")
+    l = _find_col(df, "Low")
+    c = _find_col(df, "Close") or _find_col(df, "Adj Close")
+    if c is None or c.dropna().empty:
+        return None
+
+    # Align to Close index
+    idx = c.index
+
+    def _align(x):
+        return pd.to_numeric(x, errors="coerce").reindex(idx) if x is not None else None
+
+    o = _align(o)
+    h = _align(h)
+    l = _align(l)
+    c = _align(c).astype(float)
+
+    # Fill missing OHLC from Close (best effort)
+    if o is None: o = c.copy()
+    if h is None: h = c.copy()
+    if l is None: l = c.copy()
+
+    out = pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": c}).dropna()
+    if out.empty:
+        return None
+    return out
+
+# ------------------ Data fetcher (daily → weekly) ------------------
 def fetch_one(ticker):
     """
-    Load 1y of daily (auto_adjust), compute 30d % change,
-    resample to weekly (W-FRI) OHLC for plotting last ~52 weeks.
+    Load 1y of daily (auto_adjust), compute 30d % change, resample to weekly (W-FRI).
     Returns payload:
       (df_weekly, last, chg30, sup_low, sup_high, res_low, res_high,
        'Support','Resistance', bos_dir, bos_level, bos_idx, 'W')
     """
-    df_d = yf.download(ticker, period="1y", interval="1d", auto_adjust=True)
+    # Try history() first (cleaner), fallback to download()
+    try:
+        df_d = yf.Ticker(ticker).history(period="1y", interval="1d", auto_adjust=True)
+    except Exception:
+        df_d = None
     if df_d is None or df_d.empty:
+        df_d = yf.download(ticker, period="1y", interval="1d", auto_adjust=True)
+
+    ohlc_d = _get_ohlc_df(df_d)
+    if ohlc_d is None or ohlc_d.empty:
         return None
 
-    close_d = _coerce_close_series(df_d)
-    if close_d.empty:
+    close_d = ohlc_d["Close"]
+    if close_d.dropna().shape[0] < 2:
         return None
 
-    # 30-day change on daily series
+    # 30d change on daily series
     last_date = close_d.index[-1]
     base_date = last_date - pd.Timedelta(days=30)
     base_series = close_d.loc[:base_date]
     if base_series.empty:
-        chg30 = 0.0
         base_val = float(close_d.iloc[0])
+        chg30 = 0.0
     else:
         base_val = float(base_series.iloc[-1])
         chg30 = float(100.0 * (float(close_d.iloc[-1]) - base_val) / base_val) if base_val != 0 else 0.0
     last = float(close_d.iloc[-1])
 
-    # Ensure OHLC exists; if not, build from close (best effort)
-    if not set(["Open", "High", "Low", "Close"]).issubset(df_d.columns):
-        df_d = df_d.assign(Open=close_d, High=close_d, Low=close_d, Close=close_d)
-
-    # Weekly resample
-    df_w = df_d[["Open", "High", "Low", "Close"]].resample("W-FRI").agg(
-        {"Open":"first", "High":"max", "Low":"min", "Close":"last"}
-    ).dropna()
-    df_w = df_w.tail(60).dropna()  # ~last 52-60 weeks for safety
-
+    # Weekly resample (flat OHLC guaranteed)
+    df_w = ohlc_d.resample("W-FRI").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last"}).dropna()
+    df_w = df_w.tail(60).dropna()  # last ~52-60 weeks
     if df_w.empty:
         return None
 
@@ -381,14 +442,12 @@ def plain_english_line(ticker, headline, payload, seed=None):
         seed = f"{ticker}-{DATESTR}"
     rnd = random.Random(str(seed))
 
-    # headline lead-in
     if headline and len(headline) > 160:
         headline = headline[:157] + "…"
     lead = headline or rnd.choice([
         "No major headlines today.", "Quiet on the news front.", "News flow is light."
     ])
 
-    # cues (non-jargony)
     cues = []
     if chg30 >= 8: cues.append("momentum looks strong 🔥")
     elif chg30 <= -8: cues.append("recent pullback showing ⚠️")
