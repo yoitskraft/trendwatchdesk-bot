@@ -13,7 +13,6 @@ NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "").strip()
 
 # brand assets
 BRAND_LOGO_PATH = os.getenv("BRAND_LOGO_PATH", "assets/brand_logo.png")  # optional
-
 # ------------------ Utilities you already had ------------------
 # atr(df, n=14), swing_points(df, w=2), fetch_one(ticker) -> payload
 # render_single_post(out_path, ticker, payload) -> saves 1080x1080 chart PNG
@@ -37,16 +36,18 @@ def news_headline_for(ticker):
     # NewsAPI
     if NEWSAPI_KEY:
         try:
-            r = SESS.get("https://newsapi.org/v2/everything",
-                         params={"q": f'"{name}" OR {ticker}',
-                                 "language":"en","sortBy":"publishedAt","pageSize":1},
-                         headers={"X-Api-Key": NEWSAPI_KEY}, timeout=8)
-            # ---- FIX: no walrus operator; do in two steps
+            r = SESS.get(
+                "https://newsapi.org/v2/everything",
+                params={"q": f'"{name}" OR {ticker}', "language":"en", "sortBy":"publishedAt", "pageSize":1},
+                headers={"X-Api-Key": NEWSAPI_KEY},
+                timeout=8
+            )
+            # ---- FIX: avoid walrus operator; two-step parse
             if r.ok:
                 d = r.json().get("articles")
                 if d:
                     title = d[0].get("title") or ""
-                    src = d[0].get("source",{}).get("name","")
+                    src = d[0].get("source", {}).get("name", "")
                     if title:
                         return f"{title} ({src})" if src else title
         except Exception:
@@ -158,67 +159,110 @@ CTA_POOL = [
     "Bookmark 📌 · What did we miss? 💬 · More charts inside ➡️"
 ]
 
-# ------------------ FIX 1: define your missing picker ------------------
+# ------------------ FIX: define your missing picker ------------------
 def choose_tickers_somehow():
     """
     Minimal deterministic picker from your defined pool.
-    (If you have a weighted picker elsewhere, replace internals later.)
+    Keeps your existing structure; swap internals later if you have weighting elsewhere.
     """
     pool = list(COMPANY_QUERY.keys())
     rnd = random.Random(DATESTR)
     k = 6 if len(pool) >= 6 else len(pool)
     return rnd.sample(pool, k)
 
-# ------------------ FIX 2: ensure fetch/render exist (import shim) ------------------
-# If your real versions live in another file, import them here.
-# If import fails, provide a minimal fallback so the workflow doesn't crash.
+# ------------------ Ensure fetch/render exist (import shim, unchanged behavior if your real ones are present) ------------------
 _FETCH_RENDER_IMPORTED = False
 try:
-    # Try common module names you might be using; adjust as needed.
-    from charting import fetch_one, render_single_post  # noqa: F401
+    from charting import fetch_one, render_single_post  # if you have them
     _FETCH_RENDER_IMPORTED = True
 except Exception:
     try:
-        from utils import fetch_one, render_single_post  # noqa: F401
+        from utils import fetch_one, render_single_post
         _FETCH_RENDER_IMPORTED = True
     except Exception:
         try:
-            from renderer import fetch_one, render_single_post  # noqa: F401
+            from renderer import fetch_one, render_single_post
             _FETCH_RENDER_IMPORTED = True
         except Exception:
             _FETCH_RENDER_IMPORTED = False
 
+# ---- Fallbacks ONLY if your real implementations aren’t importable ----
 if not _FETCH_RENDER_IMPORTED:
-    # Minimal safe fallbacks so the pipeline runs even if imports are missing.
-    # These do NOT override your real implementations if imports succeeded.
+    def _coerce_close_series(df: pd.DataFrame) -> pd.Series:
+        """
+        Robustly get a 1D Close series from yfinance DataFrame, even if columns are MultiIndex.
+        """
+        if df is None or df.empty:
+            return pd.Series(dtype=float)
+
+        # Prefer the 'Close' column
+        close = df.get("Close", None)
+        if close is None:
+            # some environments: lowercase or 'Adj Close' only
+            if "Adj Close" in df.columns:
+                close = df["Adj Close"]
+            elif "close" in df.columns:
+                close = df["close"]
+            else:
+                # last resort: try first numeric column
+                numeric_cols = [c for c in df.columns if np.issubdtype(df[c].dtype, np.number)]
+                if not numeric_cols:
+                    return pd.Series(dtype=float)
+                close = df[numeric_cols[0]]
+
+        # If this is a DataFrame (MultiIndex case), take the first column
+        if isinstance(close, pd.DataFrame):
+            if close.shape[1] == 0:
+                return pd.Series(dtype=float)
+            close = close.iloc[:, 0]
+
+        # ensure float dtype
+        close = pd.to_numeric(close, errors="coerce").dropna()
+        return close
+
     def fetch_one(ticker):
         """
-        Basic yfinance fetch and trivial levels.
+        Basic yfinance fetch and trivial levels (stable scalar math).
         Returns tuple shaped exactly as your code expects.
         """
-        df = yf.download(ticker, period="3mo", interval="1d")
-        if df is None or df.empty or "Close" not in df:
+        # Make auto_adjust explicit to avoid FutureWarning variance
+        df = yf.download(ticker, period="3mo", interval="1d", auto_adjust=True)
+        if df is None or df.empty:
             return None
-        df = df.dropna()
-        last = float(df["Close"].iloc[-1])
-        if len(df) >= 30:
-            chg30 = 100.0 * (last - df["Close"].iloc[-30]) / df["Close"].iloc[-30]
+
+        close = _coerce_close_series(df)
+        if close.empty:
+            return None
+
+        last = float(close.iloc[-1])
+
+        if len(close) >= 30:
+            base = float(close.iloc[-30])
+            chg30 = float(100.0 * (last - base) / base) if base != 0 else 0.0
         else:
             chg30 = 0.0
-        sup_low = float(df["Close"].min())
-        sup_high = sup_low * 1.05
-        res_high = float(df["Close"].max())
-        res_low = res_high * 0.95
-        bos_dir = "up" if chg30 > 5 else ("down" if chg30 < -5 else None)
+
+        sup_low = float(close.min())
+        sup_high = float(sup_low * 1.05)
+        res_high = float(close.max())
+        res_low = float(res_high * 0.95)
+
+        # Ensure chg30 is scalar float before comparisons
+        bos_dir = "up" if float(chg30) > 5 else ("down" if float(chg30) < -5 else None)
         bos_level = last
-        bos_idx = len(df) - 1
+        bos_idx = int(len(close) - 1)
         bos_tf = "D"
-        return (df, last, chg30, sup_low, sup_high, res_low, res_high,
+
+        # Build a df aligned with close for downstream functions that expect df
+        # (keep original df columns so your existing render code still works)
+        df = df.loc[close.index]
+
+        return (df, last, float(chg30), sup_low, sup_high, res_low, res_high,
                 "Support", "Resistance", bos_dir, bos_level, bos_idx, bos_tf)
 
     def render_single_post(out_path, ticker, payload):
         """
-        Minimal 1080x1080 card (placeholder). Your real renderer will override this if imported.
+        Minimal, safe 1080x1080 render so pipeline always completes if your real renderer isn't imported.
         """
         (df, last, chg30, sup_low, sup_high, res_low, res_high,
          sup_label, res_label, bos_dir, bos_level, bos_idx, bos_tf) = payload
@@ -229,16 +273,14 @@ if not _FETCH_RENDER_IMPORTED:
             font = ImageFont.truetype("arial.ttf", 36)
         except Exception:
             font = ImageFont.load_default()
-        draw.text((40, 40), f"{ticker}  {last:.2f}", fill=(0, 0, 0), font=font)
 
-        # Simple frame to avoid empty-looking image
+        draw.text((40, 40), f"{ticker}  {last:.2f}", fill=(0, 0, 0), font=font)
         draw.rectangle([30, 30, 1050, 1050], outline=(200,200,200), width=3)
 
         # Optional brand logo
         if BRAND_LOGO_PATH and os.path.exists(BRAND_LOGO_PATH):
             try:
-                logo = Image.open(BRAND_LOGO_PATH).convert("RGBA")
-                logo = logo.resize((120, 120))
+                logo = Image.open(BRAND_LOGO_PATH).convert("RGBA").resize((120, 120))
                 img.paste(logo, (930, 930), logo)
             except Exception:
                 pass
@@ -250,7 +292,6 @@ if not _FETCH_RENDER_IMPORTED:
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # You already choose your 6 tickers by weighted pools; keep that logic.
     tickers = choose_tickers_somehow()  # <- now defined
     print("[info] selected tickers:", tickers)
 
