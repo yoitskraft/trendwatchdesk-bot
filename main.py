@@ -329,18 +329,17 @@ def render_single_post(out_path, ticker, payload):
     draw.text((title_x, price_y + sp(50)), f"{chg30:+.2f}% past 30d", fill=delta_col, font=f_delta)
     draw.text((title_x, price_y + sp(98)), "Weekly chart • last 52 weeks", fill=TEXT_LT, font=f_sub)
 
-    # ticker logo (optional, scaled with S_LOGO independently)
-    tlogo_path = os.path.join("assets", "logos", f"{ticker}.png")
-    if os.path.exists(tlogo_path):
-        try:
-            tlogo = Image.open(tlogo_path).convert("RGBA")
-            hmax = int(sp(92) * S_LOGO)  # independent logo scale
-            hmax = max(1, hmax)
-            scl = min(1.0, hmax / max(1, tlogo.height))
-            tlogo = tlogo.resize((int(tlogo.width * scl), int(tlogo.height * scl)))
-            base.alpha_composite(tlogo, (card[2] - sp(28) - tlogo.width, title_y + sp(2)))
-        except Exception:
-            pass
+    # ticker logo (optional, scaled with S_LOGO)
+tlogo_path = os.path.join("assets", "logos", f"{ticker}.png")
+if os.path.exists(tlogo_path):
+    try:
+        tlogo = Image.open(tlogo_path).convert("RGBA")
+        hmax = int(sp(92) * S_LOGO)   # apply logo-specific scale
+        scl = min(1.0, hmax / max(1, tlogo.height))
+        tlogo = tlogo.resize((int(tlogo.width * scl), int(tlogo.height * scl)))
+        base.alpha_composite(tlogo, (card[2] - sp(28) - tlogo.width, title_y + sp(2)))
+    except Exception:
+        pass
 
     # ---------- grid ----------
     grid = Image.new("RGBA", (W, H), (0, 0, 0, 0))
