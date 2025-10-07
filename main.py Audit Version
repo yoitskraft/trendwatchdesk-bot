@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+import os, sys, random, datetime, traceback
+import yfinance as yf
+from PIL import Image, ImageDraw, ImageFont
+import requests
+
+# --- Config ---
+OUTPUT_DIR = os.path.abspath("output")
+TODAY = datetime.date.today()
+DATESTR = TODAY.strftime("%Y%m%d")
+NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "").strip()
+BRAND_LOGO_PATH = os.getenv("BRAND_LOGO_PATH", "assets/brand_logo.png")
+
+COMPANY_QUERY = {
+    "META":"Meta Platforms", "AMD":"Advanced Micro Devices", "GOOG":"Google Alphabet", "GOOGL":"Alphabet",
+    "AAPL":"Apple", "MSFT":"Microsoft", "TSM":"Taiwan Semiconductor", "TSLA":"Tesla",
+    "JNJ":"Johnson & Johnson", "MA":"Mastercard", "V":"Visa", "NVDA":"NVIDIA",
+    "AMZN":"Amazon", "SNOW":"Snowflake", "SQ":"Block Inc", "PYPL":"PayPal", "UNH":"UnitedHealth"
+}
+
+def choose_tickers_somehow():
+    tech = ["AAPL","MSFT","TSLA","NVDA","META","AMD","GOOG","GOOGL","AMZN","SNOW"]
+    fintech = ["MA","V","PYPL","SQ"]
+    health = ["JNJ","UNH"]
+    wildcard = ["TSM"]
+    rnd = random.Random(DATESTR)
+    pick = []
+    pick.append(rnd.choice(tech)); tech.remove(pick[-1])
+    pick.append(rnd.choice(tech)); tech.remove(pick[-1])
+    pick.append(rnd.choice(fintech))
+    pick.append(rnd.choice(health))
+    pick.append(rnd.choice(tech + fintech + health))
+    pick.append(rnd.choice(tech + fintech + health + wildcard))
+    return pick
+
+SESS = requests.Session()
+SESS.headers.update({"User-Agent":"TWD/1.0"})
+
+def news_headline_for(ticker):
+    name = COMPANY_QUERY.get(ticker, ticker)
+    if NEWSAPI_KEY:
+        try:
+            r = SESS.get("https://newsapi.org/v2/everything",
+                         params={"q": f'"{name}" OR {ticker}', "language":"en", "sortBy":"publishedAt", "pageSize":1},
+                         headers={"X-Api-Key": NEWSAPI_KEY}, timeout=8)
+            if r.ok:
+                d = r.json().get("articles")
+                if d:
+                    title = d[0].get("title") or ""
+                    src = d[0].get("source",{}).get("name","")
+                    return f"{title} ({src})" if title else None
+        except Exception as e:
+            print(f"[warn] news fetch failed for {ticker}: {e}")
+    try:
+        items = getattr(yf.Ticker(ticker), "news", []) or []
+        if items:
+            t = items[0].get("title") or ""
+            p = items[0].get("publisher") or ""
+            return f"{t} ({p})" if t else None
+    except Exception as e:
+        print(f"[warn] yfinance.news failed for {ticker}: {e}")
+    return None
+
+def fetch_one(ticker):
+    print(f"[debug] fetch_one: ticker = {ticker}")
+    df = yf.download(ticker, period="3mo", interval="1d")
+    if df is None or df.empty:
+        print(f"[error] fetch_one: no data for {ticker}")
+        return None
+    df = df.dropna()
+    last = float(df["Close"].iloc[-1])
+    if len(df) >= 30:
+        chg30 = 100 * (last - df["Close"].iloc[-30]) / df["Close"].iloc[-30]
+    else:
+        chg30 = 0.0
+    sup_low = df["Close"].min()
+    sup_high = sup_low * 1.05
+    res_high = df["Close"].max()
+    res_low = res_high * 0.95
+    bos_dir = "up" if chg30 > 5 else "down" if chg30 < -5 else None
+    bos_level = last
+    bos_idx = len(df) - 1
+    bos_tf = "1D"
+    return (df, last, chg30, sup_low, sup_high, res_low, res_high,
+            "Support", "Resistance", bos_dir, bos_level, bos_idx, bos_tf)
+
+def render_single_post(out_path, ticker, payload):
+    print(f"[debug] render_single_post: {ticker} → {out_path}")
+    (df, last, chg30, sup_low, sup_high, res_low, res_high,
+     _, _, bos_dir, bos_level, _, _) = payload
+
+    if not os.path.isdir(os.path.dirname(out_path)):
+        print(f"[error] Directory does not exist: {os.path.dirname(out_path)}")
+
+    img = Image.new("RGB", (1080, 1080), color=(20, 20, 20))
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("arial.ttf", 40)
+    except:
+        font = ImageFont.load_default()
+
+    draw.text((40, 40), f"{ticker} {last:.2f}", fill=(255,255,255), font=font)
+
+    # Simple line price
+    closes = df["Close"].tolist()
+    if len(closes) > 1:
+        min_p = min(closes); max_p = max(closes)
+        def scale_y(p): return 800 - (p - min_p)/(max_p - min_p + 1e-8)*600 + 200
+        def scale_x(i): return 100 + i / len(closes) * 880
+        for i in range(1, len(closes)):
+            draw.line([(scale_x(i-1), scale_y(closes[i-1])), (scale_x(i), scale_y(closes[i]))],
+                      fill=(0,200,255), width=2)
+
+    # S/R zones
+    def y_of(p):
+        return 800 - (p - min_p)/(max_p - min_p + 1e-8)*600 + 200
+    draw.rectangle([100, y_of(sup_high), 980, y_of(sup_low)], outline=(0,255,0), width=2)
+    draw.rectangle([100, y_of(res_high), 980, y_of(res_low)], outline=(255,0,0), width=2)
+
+    if bos_dir:
+        yb = y_of(bos_level)
+        draw.line([(100, yb), (980, yb)], fill=(255,255,0), width=2)
+
+    if os.path.exists(BRAND_LOGO_PATH):
+        try:
+            logo = Image.open(BRAND_LOGO_PATH).convert("RGBA")
+            logo = logo.resize((100, 100))
+            img.paste(logo, (960, 30), logo)
+        except Exception as e:
+            print(f"[warn] logo paste failed: {e}")
+
+    img.save(out_path)
+    print(f"[info] saved PNG: {out_path}")
+
+def plain_english_line(ticker, headline, payload, seed=None):
+    # (same content as earlier)
+    # ...
+    return "dummy line"  # placeholder for now or your full logic
+
+CTA_POOL = [
+    "Save for later 📌 · Comment your levels 💬 · See charts in carousel ➡️",
+    "Tap save 📌 · Drop your take below 💬 · Full charts in carousel ➡️",
+    "Save this post 📌 · Share your view 💬 · Swipe for charts ➡️",
+    "Bookmark 📌 · What did we miss? 💬 · More charts inside ➡️"
+]
+
+def main():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    tickers = choose_tickers_somehow()
+    print("[info] selected tickers:", tickers)
+
+    saved = 0
+    captions = []
+    for t in tickers:
+        try:
+            payload = fetch_one(t)
+            if payload is None:
+                print(f"[warn] skipping {t}, no payload")
+                continue
+            out_path = os.path.join(OUTPUT_DIR, f"twd_{t}_{DATESTR}.png")
+            render_single_post(out_path, t, payload)
+            if not os.path.exists(out_path):
+                print(f"[error] PNG not found after render: {out_path}")
+            headlines = news_headline_for(t)
+            line = plain_english_line(t, headlines, payload, seed=DATESTR)
+            captions.append(line)
+            saved += 1
+        except Exception as e:
+            print(f"[error] for {t}: {e}")
+            traceback.print_exc()
+
+    print(f"[info] total saved = {saved}")
+    if saved > 0:
+        caption_path = os.path.join(OUTPUT_DIR, f"caption_{DATESTR}.txt")
+        now_str = TODAY.strftime("%d %b %Y")
+        header = f"Ones to Watch – {now_str}\n\n"
+        footer = f"\n\n{random.choice(CTA_POOL)}\n\nIdeas only — not financial advice"
+        with open(caption_path, "w", encoding="utf-8") as f:
+            f.write(header)
+            f.write("\n\n".join(captions))
+            f.write(footer)
+        print(f"[info] wrote caption file: {caption_path}")
+
+if __name__ == "__main__":
+    main()
