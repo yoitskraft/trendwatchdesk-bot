@@ -187,106 +187,213 @@ except Exception:
             _FETCH_RENDER_IMPORTED = False
 
 # ---- Fallbacks ONLY if your real implementations aren’t importable ----
-if not _FETCH_RENDER_IMPORTED:
-    def _coerce_close_series(df: pd.DataFrame) -> pd.Series:
-        """
-        Robustly get a 1D Close series from yfinance DataFrame, even if columns are MultiIndex.
-        """
-        if df is None or df.empty:
-            return pd.Series(dtype=float)
-
-        # Prefer the 'Close' column
-        close = df.get("Close", None)
-        if close is None:
-            # some environments: lowercase or 'Adj Close' only
-            if "Adj Close" in df.columns:
-                close = df["Adj Close"]
-            elif "close" in df.columns:
-                close = df["close"]
-            else:
-                # last resort: try first numeric column
-                numeric_cols = [c for c in df.columns if np.issubdtype(df[c].dtype, np.number)]
-                if not numeric_cols:
-                    return pd.Series(dtype=float)
-                close = df[numeric_cols[0]]
-
-        # If this is a DataFrame (MultiIndex case), take the first column
-        if isinstance(close, pd.DataFrame):
-            if close.shape[1] == 0:
-                return pd.Series(dtype=float)
-            close = close.iloc[:, 0]
-
-        # ensure float dtype
-        close = pd.to_numeric(close, errors="coerce").dropna()
-        return close
-
-    def fetch_one(ticker):
-        """
-        Basic yfinance fetch and trivial levels (stable scalar math).
-        Returns tuple shaped exactly as your code expects.
-        """
-        # Make auto_adjust explicit to avoid FutureWarning variance
-        df = yf.download(ticker, period="3mo", interval="1d", auto_adjust=True)
-        if df is None or df.empty:
-            return None
-
-        close = _coerce_close_series(df)
-        if close.empty:
-            return None
-
-        last = float(close.iloc[-1])
-
-        if len(close) >= 30:
-            base = float(close.iloc[-30])
-            chg30 = float(100.0 * (last - base) / base) if base != 0 else 0.0
-        else:
-            chg30 = 0.0
-
-        sup_low = float(close.min())
-        sup_high = float(sup_low * 1.05)
-        res_high = float(close.max())
-        res_low = float(res_high * 0.95)
-
-        # Ensure chg30 is scalar float before comparisons
-        bos_dir = "up" if float(chg30) > 5 else ("down" if float(chg30) < -5 else None)
-        bos_level = last
-        bos_idx = int(len(close) - 1)
-        bos_tf = "D"
-
-        # Build a df aligned with close for downstream functions that expect df
-        # (keep original df columns so your existing render code still works)
-        df = df.loc[close.index]
-
-        return (df, last, float(chg30), sup_low, sup_high, res_low, res_high,
-                "Support", "Resistance", bos_dir, bos_level, bos_idx, bos_tf)
-
     def render_single_post(out_path, ticker, payload):
         """
-        Minimal, safe 1080x1080 render so pipeline always completes if your real renderer isn't imported.
+        Fallback renderer styled like your reference:
+        - White card, rounded corners
+        - Light grid
+        - Candlesticks (green up / red down)
+        - Shaded Support (blue) / Resistance (red) zones
+        - Header: TICKER, last price, 30d change (colored), subtitle
+        - Ticker logo (assets/logos/{ticker}.png) top-right (optional)
+        - Brand logo bottom-right (optional)
+        - Footer left: 'Resistance ~', 'Support ~', 'Not financial advice'
         """
         (df, last, chg30, sup_low, sup_high, res_low, res_high,
          sup_label, res_label, bos_dir, bos_level, bos_idx, bos_tf) = payload
 
-        img = Image.new("RGB", (1080, 1080), (250, 250, 250))
-        draw = ImageDraw.Draw(img)
-        try:
-            font = ImageFont.truetype("arial.ttf", 36)
-        except Exception:
-            font = ImageFont.load_default()
+        # ---------- canvas ----------
+        W, H = 1080, 1080
+        BG = (245, 245, 245, 255)
+        canvas = Image.new("RGBA", (W, H), BG)
+        draw = ImageDraw.Draw(canvas)
 
-        draw.text((40, 40), f"{ticker}  {last:.2f}", fill=(0, 0, 0), font=font)
-        draw.rectangle([30, 30, 1050, 1050], outline=(200,200,200), width=3)
-
-        # Optional brand logo
-        if BRAND_LOGO_PATH and os.path.exists(BRAND_LOGO_PATH):
+        # ---------- fonts ----------
+        def _font(size):
             try:
-                logo = Image.open(BRAND_LOGO_PATH).convert("RGBA").resize((120, 120))
-                img.paste(logo, (930, 930), logo)
+                return ImageFont.truetype("arial.ttf", size)
+            except Exception:
+                return ImageFont.load_default()
+        f_title = _font(80)
+        f_price = _font(44)
+        f_delta = _font(40)
+        f_sub   = _font(28)
+        f_sm    = _font(24)
+
+        # ---------- card ----------
+        margin = 40
+        card = [margin, margin, W - margin, H - margin]
+        draw.rounded_rectangle(card, radius=28, fill=(255, 255, 255, 255), outline=(230, 230, 230, 255), width=2)
+
+        # areas
+        header_h = 160
+        footer_h = 110
+        pad_l, pad_r = 60, 50
+        chart = [
+            card[0] + pad_l,
+            card[1] + header_h,
+            card[2] - pad_r,
+            card[3] - footer_h
+        ]
+        cx1, cy1, cx2, cy2 = chart
+
+        # ---------- header ----------
+        title_y = card[1] + 28
+        title_x = card[0] + 28
+        # TICKER
+        draw.text((title_x, title_y), ticker, fill=(20, 20, 20, 255), font=f_title)
+        # Price + delta
+        price_txt = f"{last:,.2f} USD"
+        dy = title_y + 84  # under big ticker
+        draw.text((title_x, dy), price_txt, fill=(32, 32, 32, 255), font=f_price)
+        # 30d change (green/red)
+        sign_col = (18, 161, 74, 255) if chg30 >= 0 else (200, 60, 60, 255)
+        change_txt = f"{chg30:+.2f}% past 30d"
+        draw.text((title_x, dy + 46), change_txt, fill=sign_col, font=f_delta)
+        # subtitle
+        sub_txt = "Daily chart • confluence S/R zones"
+        draw.text((title_x, dy + 86), sub_txt, fill=(150, 150, 150, 255), font=f_sub)
+
+        # ticker logo top-right (optional)
+        tlogo_path = os.path.join("assets", "logos", f"{ticker}.png")
+        if os.path.exists(tlogo_path):
+            try:
+                tlogo = Image.open(tlogo_path).convert("RGBA")
+                hmax = 80
+                scale = min(1.0, hmax / max(1, tlogo.height))
+                tlogo = tlogo.resize((int(tlogo.width * scale), int(tlogo.height * scale)))
+                lx = card[2] - 28 - tlogo.width
+                ly = title_y + 4
+                canvas.alpha_composite(tlogo, (lx, ly))
             except Exception:
                 pass
 
+        # ---------- grid ----------
+        grid = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        g = ImageDraw.Draw(grid)
+        # horizontal (4 light lines)
+        for i in range(1, 5):
+            y = cy1 + i * (cy2 - cy1) / 5.0
+            g.line([(cx1, y), (cx2, y)], fill=(238, 238, 238, 255), width=1)
+        # vertical (5 lines)
+        for i in range(1, 6):
+            x = cx1 + i * (cx2 - cx1) / 6.0
+            g.line([(x, cy1), (x, cy2)], fill=(238, 238, 238, 255), width=1)
+        canvas = Image.alpha_composite(canvas, grid)
+        draw = ImageDraw.Draw(canvas)
+
+        # ---------- prepare OHLC ----------
+        # prefer yfinance columns if present
+        def _col(name):
+            if name in df.columns: return df[name]
+            if isinstance(df.columns, pd.MultiIndex) and name in df.columns.get_level_values(-1):
+                # handle MultiIndex (('Close','TICKER')) → select all, then first
+                sub = df.xs(name, axis=1, level=-1, drop_level=False)
+                if isinstance(sub, pd.DataFrame) and sub.shape[1] >= 1:
+                    return sub.iloc[:, 0]
+            return None
+
+        o = _col("Open"); h_ = _col("High"); l_ = _col("Low"); c = _col("Close")
+        if c is None:
+            c = _col("Adj Close")
+        # coerce to numeric Series
+        def _num(x):
+            if x is None: return None
+            if isinstance(x, pd.DataFrame): x = x.iloc[:, 0]
+            return pd.to_numeric(x, errors="coerce")
+        o, h_, l_, c = (_num(o), _num(h_), _num(l_), _num(c))
+
+        # fallback if data missing
+        if c is None or c.dropna().shape[0] < 2:
+            out = canvas.convert("RGB")
+            out.save(out_path, quality=95)
+            return
+
+        # align lengths
+        df2 = pd.DataFrame({"O": o, "H": h_, "L": l_, "C": c}).dropna()
+        if df2.empty:
+            out = canvas.convert("RGB")
+            out.save(out_path, quality=95)
+            return
+
+        # y-range (use high/low)
+        ymin = float(np.nanmin(df2["L"]))
+        ymax = float(np.nanmax(df2["H"]))
+        if not np.isfinite(ymin) or not np.isfinite(ymax) or abs(ymax - ymin) < 1e-9:
+            ymin, ymax = (ymin - 0.5, ymax + 0.5) if np.isfinite(ymin) else (0, 1)
+
+        def sx(i):
+            return cx1 + (i / max(1, len(df2) - 1)) * (cx2 - cx1)
+        def sy(v):
+            return cy2 - ((float(v) - ymin) / (ymax - ymin)) * (cy2 - cy1)
+
+        # ---------- shaded S/R zones ----------
+        # support (blue)
+        sup_y1, sup_y2 = sy(sup_high), sy(sup_low)
+        sup_rect = [cx1, min(sup_y1, sup_y2), cx2, max(sup_y1, sup_y2)]
+        sup_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ImageDraw.Draw(sup_layer).rectangle(sup_rect, fill=(120, 160, 255, 60), outline=(120, 160, 255, 120), width=2)
+        canvas = Image.alpha_composite(canvas, sup_layer)
+
+        # resistance (red)
+        res_y1, res_y2 = sy(res_high), sy(res_low)
+        res_rect = [cx1, min(res_y1, res_y2), cx2, max(res_y1, res_y2)]
+        res_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ImageDraw.Draw(res_layer).rectangle(res_rect, fill=(255, 150, 150, 60), outline=(255, 150, 150, 120), width=2)
+        canvas = Image.alpha_composite(canvas, res_layer)
+        draw = ImageDraw.Draw(canvas)
+
+        # ---------- candlesticks ----------
+        up_col = (26, 172, 93, 255)     # green
+        dn_col = (214, 76, 76, 255)     # red
+        wick_col = (150, 150, 150, 255)
+
+        n = len(df2)
+        body_px = max(3, int((cx2 - cx1) / max(60, n * 1.4)))  # adapt body width
+        half = body_px // 2
+
+        for i, row in enumerate(df2.itertuples(index=False)):
+            O, Hh, Ll, C = row  # O,H,L,C
+            x = sx(i)
+            # wick
+            draw.line([(x, sy(Hh)), (x, sy(Ll))], fill=wick_col, width=1)
+            # body
+            col = up_col if C >= O else dn_col
+            y1 = sy(max(O, C))
+            y2 = sy(min(O, C))
+            if abs(y2 - y1) < 1:  # flat body → draw at least 1px
+                y2 = y1 + 1
+            draw.rectangle([x - half, y1, x + half, y2], fill=col, outline=col)
+
+        # ---------- BOS (optional) ----------
+        if bos_dir is not None and np.isfinite(bos_level):
+            by = sy(bos_level)
+            draw.line([(cx1, by), (cx2, by)], fill=(255, 210, 0, 255), width=3)
+
+        # ---------- footer left ----------
+        footer_x = card[0] + 20
+        footer_y = card[3] - 72
+        draw.text((footer_x, footer_y), f"Resistance ~{res_high:.2f}", fill=(120, 120, 120, 255), font=f_sm)
+        draw.text((footer_x, footer_y + 28), f"Support ~{sup_low:.2f}",  fill=(120, 120, 120, 255), font=f_sm)
+        draw.text((footer_x, footer_y + 56), "Not financial advice",     fill=(160, 160, 160, 255), font=f_sm)
+
+        # ---------- brand logo bottom-right ----------
+        if BRAND_LOGO_PATH and os.path.exists(BRAND_LOGO_PATH):
+            try:
+                blogo = Image.open(BRAND_LOGO_PATH).convert("RGBA")
+                maxh = 120
+                scale = min(1.0, maxh / max(1, blogo.height))
+                blogo = blogo.resize((int(blogo.width * scale), int(blogo.height * scale)))
+                bx = card[2] - 24 - blogo.width
+                by = card[3] - 24 - blogo.height
+                canvas.alpha_composite(blogo, (bx, by))
+            except Exception:
+                pass
+
+        # ---------- save ----------
+        out = canvas.convert("RGB")
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        img.save(out_path)
+        out.save(out_path, quality=95)
 
 # ------------------ Main ------------------
 def main():
