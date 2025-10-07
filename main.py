@@ -473,12 +473,23 @@ def render_single_post(path, ticker, payload, brand_logo_path):
 # Main
 # =========================
 if __name__ == "__main__":
-    # Ensure output dir exists for CI
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)   # <-- ensures output/ always exists
     print("[debug] OUTPUT_DIR:", os.path.abspath(OUTPUT_DIR))
 
-    now = datetime.datetime.now(pytz.timezone(TIMEZONE))
-    datestr = now.strftime("%Y%m%d")
+    results = []
+    for t in selected:
+        try:
+            payload = fetch_one(t)
+            if payload:
+                out_path = os.path.join(OUTPUT_DIR, f"twd_{t}_{datestr}.png")
+                print(f"[debug] saving {out_path}")   # <-- look for this line in run.log
+                render_single_post(out_path, t, payload, None)
+                print("done:", out_path)             # <-- look for this line in run.log
+                results.append(out_path)
+            else:
+                print(f"[warn] no data for {t}, skipping")
+        except Exception as e:
+            print("Error: ", " failed for", t, ":", e)
 
     # Select tickers using quotas + wildcards (deterministic per day)
     tickers = sample_with_quotas_and_wildcards(QUOTAS, WILDCARDS, POOLS, seed=datestr)
