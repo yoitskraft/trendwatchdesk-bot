@@ -1,82 +1,47 @@
-name: TrendWatchDesk Generate
+name: TrendWatchDesk Daily
 
 on:
   schedule:
-    # Mon/Wed/Fri at 07:10 UTC (adjust if you want)
-    - cron: "10 7 * * 1,3,5"
+    - cron: "0 9 * * 1-5"  # every weekday at 09:00 UTC
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
     steps:
       - name: Checkout repo
-      - uses: actions/checkout@v4
+        uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-
-      - name: Show Python & pip
-        run: |
-          python --version
-          pip --version
+          python-version: "3.10"
 
       - name: Install dependencies
         run: |
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install pillow pandas numpy requests yfinance pytz urllib3
-          fi
-
-      # Helpful: list assets so we know logos/brand files exist
-      - name: Debug assets (logos/brand)
+          python -m pip install --upgrade pip
+          pip install pandas pillow yfinance requests urllib3 pytz
+      - name: Run generator
         run: |
-          echo "== assets =="
-          ls -la assets || true
-          echo "== assets/logos =="
-          ls -la assets/logos || true
-          echo "== brand logo candidates =="
-          ls -la assets/brand_logo.png assets/logo.png || true
-
-      - name: Run bot
-        run: |
+          echo "Running main.py..."
           python main.py
-        env:
-          PYTHONUNBUFFERED: "1"
-
-      # Show what (if anything) was written
-      - name: Debug output folder
-        if: always()
-        run: |
-          echo "== output listing =="
+          echo "---- output ----"
           ls -la output || true
-          echo "== find any pngs =="
-          find output -maxdepth 1 -type f -name "*.png" -printf "%f\n" 2>/dev/null || true
-
-      - name: Upload charts
+      - name: Upload images as artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: charts-${{ github.run_id }}
+          name: twd-output
           path: output/*.png
           if-no-files-found: warn
 
-      # Commit the generated images back to the repo (optional)
-      - name: Commit images
-        if: success() && hashFiles('output/*.png') != ''
+      - name: Commit & push results
         run: |
-          datestr=$(date +'%Y%m%d')
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          mkdir -p posts
-          cp output/*.png posts/ || true
-          git add posts || true
-          git commit -m "Ones to Watch charts ${datestr}" || echo "Nothing to commit"
-          git pull --rebase --autostash
+          git add output/*.png || true
+          git commit -m "Daily images $(date +'%Y%m%d')" || echo "No new images to commit"
           git push
