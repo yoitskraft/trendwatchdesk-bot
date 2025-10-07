@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, math, json, random, datetime, traceback
+import os, random, datetime, traceback
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -13,12 +13,17 @@ DATESTR = TODAY.strftime("%Y%m%d")
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "").strip()
 BRAND_LOGO_PATH = os.getenv("BRAND_LOGO_PATH", "assets/brand_logo.png")
 
-# Controls
-DEFAULT_TF = (os.getenv("TWD_TF", "D") or "D").upper()  # 'D' (daily render) or 'W' (weekly render)
+# Render frame: 'D' daily (last ~1y) or 'W' weekly (last ~60 bars)
+DEFAULT_TF = (os.getenv("TWD_TF", "D") or "D").upper()
+
+# 4H S/R + BOS detection settings
 FOURH_LOOKBACK_DAYS = int(os.getenv("TWD_4H_LOOKBACK_DAYS", "120"))
-SWING_WINDOW = int(os.getenv("TWD_SWING_WINDOW", "3"))
-ZONE_PCT_TOL = float(os.getenv("TWD_ZONE_PCT_TOL", "0.004"))  # 0.4% width fallback
+SWING_WINDOW = int(os.getenv("TWD_SWING_WINDOW", "3"))           # 3–5 typical
 ATR_LEN = int(os.getenv("TWD_ATR_LEN", "14"))
+ZONE_PCT_TOL = float(os.getenv("TWD_ZONE_PCT_TOL", "0.004"))     # 0.4% band thickness
+
+# BOS toggle (1 on, 0 off)
+SHOW_BOS = os.getenv("TWD_SHOW_BOS", "1") == "1"
 
 # ------------------ Company names (pool) ------------------
 COMPANY_QUERY = {
@@ -39,9 +44,9 @@ def news_headline_for(ticker):
         try:
             r = SESS.get(
                 "https://newsapi.org/v2/everything",
-                params={"q": f'"{name}" OR {ticker}', "language": "en", "sortBy": "publishedAt", "pageSize": 1},
-                headers={"X-Api-Key": NEWSAPI_KEY},
-                timeout=8
+                params={"q": f'"{name}" OR {ticker}', "language": "en",
+                        "sortBy": "publishedAt", "pageSize": 1},
+                headers={"X-Api-Key": NEWSAPI_KEY}, timeout=8
             )
             if r.ok:
                 d = r.json()
@@ -74,13 +79,11 @@ def choose_tickers_somehow():
 def _find_col(df: pd.DataFrame, name: str):
     if df is None or df.empty:
         return None
-    # single-index
     if name in df.columns:
         ser = df[name]
         if isinstance(ser, pd.DataFrame):
             ser = ser.iloc[:, 0]
         return pd.to_numeric(ser, errors="coerce")
-    # normalized names
     try:
         norm = {str(c).lower().replace(" ", ""): c for c in df.columns}
         key = name.lower().replace(" ", "")
@@ -91,7 +94,6 @@ def _find_col(df: pd.DataFrame, name: str):
             return pd.to_numeric(ser, errors="coerce")
     except Exception:
         pass
-    # MultiIndex
     if isinstance(df.columns, pd.MultiIndex):
         lvl0 = df.columns.get_level_values(0)
         lvlN = df.columns.get_level_values(-1)
@@ -149,47 +151,69 @@ def swing_points(df: pd.DataFrame, w: int = 3):
     lows  = [(i, float(l.iloc[i])) for i in lows_idx]
     return highs, lows
 
+# ----- Support selection per your rule -----
 def pick_support_level_from_4h(df4h: pd.DataFrame, trend_bullish: bool, w: int, pct_tol: float, atr_len: int):
     """
-    If trend is bullish: pick the previous swing HIGH (below current price) closest to last.
-    If trend is bearish: pick the last swing LOW (most recent low prior to last bar).
-    Returns (sup_low, sup_high) by expanding the chosen level with a tolerance band.
+    If bullish: support = previous swing HIGH below current price, closest to price.
+    If bearish: support = last swing LOW (most recent low before last bar).
+    Returns (sup_low, sup_high) using a tolerance band (max(ATR, pct)).
     """
     if df4h is None or df4h.empty:
         return (None, None)
 
     highs, lows = swing_points(df4h, w=w)
     last_px = float(df4h["Close"].iloc[-1])
-
-    # tolerance for band width
     atrv = float(atr(df4h, n=atr_len).iloc[-1]) if len(df4h) > 1 else 0.0
     tol_abs = max(atrv, last_px * pct_tol)
 
     if trend_bullish:
-        # previous swing high BELOW price, closest to current price
         candidates = [(i, v) for (i, v) in highs if v <= last_px]
         if not candidates:
             return (None, None)
-        # prioritize closeness in price, then recency (larger i)
         i_sel, v_sel = sorted(candidates, key=lambda t: (abs(last_px - t[1]), -t[0]))[0]
         level = float(v_sel)
     else:
-        # last swing low (most recent by index) before last bar
         prior_lows = [(i, v) for (i, v) in lows if i < len(df4h) - 1]
         if not prior_lows:
             return (None, None)
-        i_sel, v_sel = max(prior_lows, key=lambda t: t[0])  # most recent by index
+        i_sel, v_sel = max(prior_lows, key=lambda t: t[0])
         level = float(v_sel)
 
     return (float(level - tol_abs), float(level + tol_abs))
+
+# ----- BOS detection per your definition on 4H -----
+def detect_bos_from_4h(df4h: pd.DataFrame, chg30: float, w: int):
+    """
+    Bullish BOS (in uptrend): last close > most recent swing high.
+    Bearish BOS (in downtrend): last close < most recent swing low.
+    Returns (bos_dir, bos_level) where bos_level is the broken swing price.
+    """
+    if df4h is None or df4h.empty:
+        return (None, np.nan)
+    highs, lows = swing_points(df4h, w=w)
+    if not highs and not lows:
+        return (None, np.nan)
+
+    last_c = float(df4h["Close"].iloc[-1])
+
+    if chg30 > 0 and highs:
+        # most recent swing high before last bar
+        i_h, v_h = max(highs, key=lambda t: t[0])
+        if last_c > v_h:
+            return ("up", float(v_h))
+    elif chg30 < 0 and lows:
+        i_l, v_l = max(lows, key=lambda t: t[0])
+        if last_c < v_l:
+            return ("down", float(v_l))
+
+    return (None, np.nan)
 
 # ------------------ Data fetcher ------------------
 def fetch_one(ticker):
     """
     - Render on Daily/Weekly (env TWD_TF)
-    - Detect SUPPORT on 4H using rule:
-        * bullish → previous swing HIGH below price (closest)
-        * bearish → last swing LOW (most recent)
+    - Support from 4H per rule (bullish: prior swing high; bearish: last swing low)
+    - BOS from 4H per rule
     - 30d % change from daily closes for trend decision
     """
     tf = (os.getenv("TWD_TF", DEFAULT_TF) or DEFAULT_TF).upper().strip()  # 'D' or 'W'
@@ -220,7 +244,7 @@ def fetch_one(ticker):
         base_val = float(base_series.iloc[-1])
         chg30 = float(100.0 * (float(close_d.iloc[-1]) - base_val) / base_val) if base_val != 0 else 0.0
 
-    # 60m → 4H for support selection
+    # 60m → 4H for support selection and BOS detection
     try:
         df_60 = yf.Ticker(ticker).history(period="6mo", interval="60m", auto_adjust=True)
     except Exception:
@@ -229,6 +253,8 @@ def fetch_one(ticker):
         df_60 = yf.download(ticker, period="6mo", interval="60m", auto_adjust=True)
 
     sup_low, sup_high = (None, None)
+    bos_dir, bos_level = (None, np.nan)
+
     if df_60 is not None and not df_60.empty:
         ohlc_60 = _get_ohlc_df(df_60)
         if ohlc_60 is not None and not ohlc_60.empty:
@@ -244,10 +270,13 @@ def fetch_one(ticker):
                         df_4h, trend_bullish=trend_bullish, w=SWING_WINDOW,
                         pct_tol=ZONE_PCT_TOL, atr_len=ATR_LEN
                     )
+                    bos_dir, bos_level = detect_bos_from_4h(df_4h, chg30=chg30, w=SWING_WINDOW)
 
     # choose render frame
     if tf == "W":
-        df_render = ohlc_d.resample("W-FRI").agg({"Open":"first","High":"max","Low":"min","Close":"last"}).dropna().tail(60)
+        df_render = ohlc_d.resample("W-FRI").agg(
+            {"Open":"first","High":"max","Low":"min","Close":"last"}
+        ).dropna().tail(60)
         if df_render.empty: return None
         tf_tag = "W"
     else:
@@ -255,9 +284,6 @@ def fetch_one(ticker):
         if df_render.empty: return None
         tf_tag = "D"
 
-    # Orientation for BOS (visual only)
-    bos_dir = "up" if chg30 > 0 else ("down" if chg30 < 0 else None)
-    bos_level = last
     bos_idx = int(len(df_render) - 1)
 
     # Only support values used in renderer; resistance omitted per your rule
@@ -265,7 +291,7 @@ def fetch_one(ticker):
             sup_low, sup_high, None, None,
             "Support", "", bos_dir, bos_level, bos_idx, tf_tag)
 
-# ------------------ Renderer (white, single support zone, no labels) ------------------
+# ------------------ Renderer (white, single support zone, BOS line optional) ------------------
 def render_single_post(out_path, ticker, payload):
     (df, last, chg30, sup_low, sup_high, _res_low, _res_high,
      _sup_label, _res_label, bos_dir, bos_level, bos_idx, bos_tf) = payload
@@ -293,7 +319,8 @@ def render_single_post(out_path, ticker, payload):
     WICK     = (140, 140, 140, 255)
     SR_BLUE  = (120, 162, 255, 50)   # support fill
     SR_BLUE_ST = (120, 162, 255, 120)
-    ACCENT   = (255, 210, 0, 255)
+    BOS_UP   = (22, 163, 74, 255)    # green
+    BOS_DN   = (239, 68, 68, 255)    # red
 
     base = Image.new("RGBA", (W, H), BG)
     draw = ImageDraw.Draw(base)
@@ -318,7 +345,7 @@ def render_single_post(out_path, ticker, payload):
     f_sm     = _font(26)
     f_axis   = _font(24)
 
-    # Layout (whitespace; smaller chart box)
+    # Layout (breathing room + smaller chart box)
     outer_top = sp(60); outer_lr = sp(64); outer_bot = sp(60)
     header_h = sp(200); footer_h = sp(140)
     chart = [outer_lr, outer_top + header_h, W - outer_lr, H - outer_bot - footer_h]
@@ -339,7 +366,7 @@ def render_single_post(out_path, ticker, payload):
     sub_label = "Daily chart • last ~1 year" if bos_tf == "D" else "Weekly chart • last 52 weeks"
     y_cursor = draw_line(title_x, y_cursor, sub_label, f_sub, TEXT_LT)
 
-    # Ticker logo
+    # Ticker logo (top-right)
     tlogo_path = os.path.join("assets", "logos", f"{ticker}.png")
     if os.path.exists(tlogo_path):
         try:
@@ -375,7 +402,7 @@ def render_single_post(out_path, ticker, payload):
         x = cx1 + i * (cx2 - cx1) / 9.0; g.line([(x, cy1), (x, cy2)], fill=GRID_MIN, width=sp(1))
     base = Image.alpha_composite(base, grid); draw = ImageDraw.Draw(base)
 
-    # ----- Support zone ONLY (blue), per your rule; NO text label -----
+    # ----- Support zone ONLY (blue), NO text label -----
     if sup_low is not None and sup_high is not None and np.isfinite(sup_low) and np.isfinite(sup_high):
         sup_y1, sup_y2 = sy(sup_high), sy(sup_low)
         sup_rect = [cx1, min(sup_y1, sup_y2), cx2, max(sup_y1, sup_y2)]
@@ -399,9 +426,10 @@ def render_single_post(out_path, ticker, payload):
         if abs(y2 - y1) < 1: y2 = y1 + 1
         draw.rectangle([xx - half, y1, xx + half, y2], fill=col, outline=None)
 
-    # BOS line (optional visual)
-    if bos_dir is not None and np.isfinite(bos_level):
-        by = sy(bos_level); draw.line([(cx1, by), (cx2, by)], fill=ACCENT, width=sp(3))
+    # ----- BOS line (true BOS per your definition; toggle via env) -----
+    if SHOW_BOS and bos_dir is not None and np.isfinite(bos_level):
+        by = sy(bos_level)
+        draw.line([(cx1, by), (cx2, by)], fill=(BOS_UP if bos_dir == "up" else BOS_DN), width=sp(3))
 
     # Right axis ticks
     ticks = np.linspace(ymin, ymax, 5)
@@ -444,13 +472,20 @@ def plain_english_line(ticker, headline, payload, seed=None):
     lead = headline or rnd.choice(["No major headlines today.","Quiet on the news front.","News flow is light."])
 
     if chg30 > 0:
-        cue = "trend looks constructive — support mapped to prior swing high 🔎"
+        cue = "trend constructive — prior swing high mapped as support 🔎"
     elif chg30 < 0:
-        cue = "tone is cautious — watching the last swing low for a bounce 👀"
+        cue = "tone cautious — last swing low in focus for a bounce 👀"
     else:
-        cue = "neutral tone — key support in focus 🎯"
+        cue = "neutral tone — watching key support 🎯"
 
-    return f"📈 {ticker} — {lead} — {cue}"[:280]
+    if bos_dir == "up":
+        bos_txt = " (bullish BOS confirmed)"
+    elif bos_dir == "down":
+        bos_txt = " (bearish BOS confirmed)"
+    else:
+        bos_txt = ""
+
+    return f"📈 {ticker} — {lead} — {cue}{bos_txt}"[:280]
 
 CTA_POOL = [
     "Save for later 📌 · Comment your levels 💬 · See charts in carousel ➡️",
