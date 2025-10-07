@@ -75,6 +75,39 @@ jobs:
             exit 1
           fi
 
+          
+      - name: Commit charts back to repo
+        if: success()     # only try if charts exist and job didn't fail
+        run: |
+          set -e
+          # Ensure output exists and there are PNGs
+          test -d output
+          ls output/*.png >/dev/null 2>&1
+
+          # Configure git identity for the bot
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Make sure we’re on the same branch and up-to-date
+          CURRENT_BRANCH="${GITHUB_REF_NAME:-main}"
+          git fetch origin "$CURRENT_BRANCH"
+          # Rebase to avoid non-fast-forward errors
+          git pull --rebase origin "$CURRENT_BRANCH" || true
+
+          # Stage and commit only if there are changes
+          git add -A output
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          COMMIT_MSG="Add generated charts $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+          git commit -m "$COMMIT_MSG"
+
+          # Push back to the same branch
+          git push origin "HEAD:$CURRENT_BRANCH"
+
+        
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
