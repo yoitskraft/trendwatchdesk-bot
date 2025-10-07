@@ -14,8 +14,8 @@ jobs:
     env:
       # ---- Rendering scale knobs ----
       TWD_UI_SCALE: "0.90"       # chart/card/brand size
-      TWD_TEXT_SCALE: "0.70"     # shrink all text/badges
-      TWD_TLOGO_SCALE: "0.55"    # shrink ticker logo only
+      TWD_TEXT_SCALE: "0.40"     # shrink all text/badges
+      TWD_TLOGO_SCALE: "0.35"    # shrink ticker logo only
 
       # ---- Brand/logo + news (optional) ----
       BRAND_LOGO_PATH: "assets/brand_logo.png"
