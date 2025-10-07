@@ -165,12 +165,21 @@ def exp_recency_weights(n, decay=0.02):
     w = np.exp(-(n-1 - idx) * decay)
     return w / w.sum()
 
+def last_left_swing_low(df, w=2, lookback=300):
+    """Return the last confirmed pivot low (index, price) to the left of the last bar."""
+    sub = df.tail(lookback)
+    L = sub["Low"]; idx = list(sub.index)
+    n = len(sub)
+    for i in range(n-1-w, w-1, -1):  # scan from right -> left
+        window = L.iloc[i-w:i+w+1]
+        if L.iloc[i] == window.min():
+            return (idx[i], float(L.iloc[i]))
+    return (None, None)
+
 def confluence_support_resistance(df):
     """
-    More accurate S/R via confluence and stricter confirmation.
-    - Support from swing LOWS; Resistance from swing HIGHS.
-    - Score = wick touches + close rejections + volume confirmation + proximity + recency + cluster hits.
-    - Zone half-width = max(0.35*ATR, 0.0015*last).
+    Support = last confirmed swing-low to the left (pivot low).
+    Resistance = confluence (swings + fibs + MAs + pivots) with stricter confirmation.
     """
     if df is None or df.empty:
         return None, None, None, None, None, None, ([], [])
@@ -187,17 +196,34 @@ def confluence_support_resistance(df):
     # Baselines
     atr_series = atr(df, n=14)
     atr_val = float(atr_series.iloc[-1]) if not atr_series.dropna().empty else max(last*0.005, 0.5)
-    vol_bar = V.tail(180).quantile(0.70)   # stricter volume confirmation
+    vol_bar = V.tail(180).quantile(0.70)
     weights = exp_recency_weights(n, decay=0.02)
 
-    # MAs (endpoints)
-    df["SMA50"]  = sma(C, 50)
-    df["SMA200"] = sma(C, 200)
-
-    # Swings
+    # Swings for reference
     lows, highs = swing_points(df.tail(240), w=2)
     swing_low_lvls  = [p[2] for p in lows]
     swing_high_lvls = [p[2] for p in highs]
+
+    # ===== SUPPORT: last swing-low to the left =====
+    s_idx, s_val = last_left_swing_low(df, w=2, lookback=240)
+    sup_low = sup_high = None
+    sup_label = None
+    half = max(0.35*atr_val, 0.0015*last)  # dynamic zone half-width
+
+    if s_val is not None and s_val <= last:
+        sup_low, sup_high = s_val - half, s_val + half
+        sup_label = f"Support (last swing low) ~{s_val:.2f}"
+    else:
+        if swing_low_lvls:
+            s_fallback = max([lv for lv in swing_low_lvls if lv <= last], default=None)
+            if s_fallback:
+                sup_low, sup_high = s_fallback - half, s_fallback + half
+                sup_label = f"Support (swing) ~{s_fallback:.2f}"
+
+    # ===== RESISTANCE: confluence scoring (as before) =====
+    # MAs (endpoints)
+    df["SMA50"]  = sma(C, 50)
+    df["SMA200"] = sma(C, 200)
 
     # Major fibs from last ~8 months
     def recent_major_swings_local(data, lookback=180):
@@ -216,24 +242,20 @@ def confluence_support_resistance(df):
     P = (H1 + L1 + C1)/3.0
     piv_levels = [P, 2*P - H1, 2*P - L1, P + (H1 - L1), P - (H1 - L1)]
 
-    # Candidates: swings + nearby fibs + nearby MAs + nearby pivots
-    cand_support = swing_low_lvls + [x for x in fibs if x <= last]
+    # Candidate resistance levels (near last for relevance)
     cand_resist  = swing_high_lvls + [x for x in fibs if x >= last]
     for col in ["SMA50","SMA200"]:
         if not df[col].dropna().empty:
             val = float(df[col].iloc[-1])
-            if abs(val - last) / last < 0.08:  # within 8%
-                (cand_support if val <= last else cand_resist).append(val)
+            if abs(val - last) / last < 0.08 and val >= last:
+                cand_resist.append(val)
     for pv in piv_levels:
-        if math.isfinite(pv) and abs(pv - last) / last < 0.08:
-            (cand_support if pv <= last else cand_resist).append(pv)
+        if math.isfinite(pv) and abs(pv - last) / last < 0.08 and pv >= last:
+            cand_resist.append(pv)
 
-    cand_support = [float(x) for x in cand_support if x and math.isfinite(x)]
-    cand_resist  = [float(x) for x in cand_resist  if x and math.isfinite(x)]
-    if not cand_support and not cand_resist:
-        return None, None, None, None, None, None, (lows, highs)
+    cand_resist = [float(x) for x in cand_resist if x and math.isfinite(x)]
 
-    # Clustering, volatility-aware tolerance
+    # Clustering with volatility-aware tolerance
     tol_abs = max(0.0020*last, 0.25, 0.25*atr_val)
     def cluster(levels):
         if not levels: return []
@@ -245,13 +267,12 @@ def confluence_support_resistance(df):
         cl.append(cur)
         return [sum(c)/len(c) for c in cl]
 
-    sup_clusters = cluster(cand_support)
     res_clusters = cluster(cand_resist)
 
-    # Scoring
-    def score_level(level, is_support=True):
-        touch = (L <= level) & (H >= level)     # wick crossed
-        close_reject = (touch & (C > level)) if is_support else (touch & (C < level))
+    # Scoring for resistance
+    def score_res(level):
+        touch = (L <= level) & (H >= level)        # wick cross
+        close_reject = (touch & (C < level))       # reject below
         vol_conf = (touch & (V >= vol_bar))
         prox = max(0.0, 1.0 - abs(level - last) / max(2.5*atr_val, 0.006*last))
 
@@ -262,34 +283,16 @@ def confluence_support_resistance(df):
         wsum_r = float((r_idx * weights).sum())
         wsum_v = float((v_idx * weights).sum())
 
-        raw_hits = sum(1 for src in (cand_support if is_support else cand_resist) if abs(src - level) <= tol_abs)
-
+        raw_hits = sum(1 for src in cand_resist if abs(src - level) <= tol_abs)
         score = (2.2*wsum_r) + (1.6*wsum_t) + (1.4*wsum_v) + (0.8*raw_hits) + (0.6*prox)
         valid = (wsum_t > 0) and (wsum_r > 0)
         return score if valid else -1e9
 
-    sup_scored = [(lv, score_level(lv, True))  for lv in sup_clusters if lv <= last]
-    res_scored = [(lv, score_level(lv, False)) for lv in res_clusters if lv >= last]
-    sup_scored = [x for x in sup_scored if x[1] > -1e5]
+    res_scored = [(lv, score_res(lv)) for lv in res_clusters if lv >= last]
     res_scored = [x for x in res_scored if x[1] > -1e5]
 
-    # Pick nearest best; dynamic zone width
-    sup_low = sup_high = res_low = res_high = None
-    sup_label = res_label = None
-    half = max(0.35*atr_val, 0.0015*last)
-
-    if sup_scored:
-        sup_scored.sort(key=lambda x: (-x[1], last - x[0]))
-        s = sup_scored[0][0]
-        sup_low, sup_high = s - half, s + half
-        sup_label = f"Support ~{s:.2f}"
-    else:
-        if swing_low_lvls:
-            s = max([lv for lv in swing_low_lvls if lv <= last], default=None)
-            if s:
-                sup_low, sup_high = s - half, s + half
-                sup_label = f"Support (swing) ~{s:.2f}"
-
+    res_low = res_high = None
+    res_label = None
     if res_scored:
         res_scored.sort(key=lambda x: (-x[1], x[0] - last))
         r = res_scored[0][0]
@@ -420,14 +423,9 @@ def draw_bos_line_with_chip(d, left, x_end, top, bot, y, color, font_lbl, font_t
     x0 = left + 2
     xe = max(x0 + 20, int(x_end) - 6)  # small inset
 
-    # Draw on an overlay for crisp opacity
     overlay = Image.new("RGBA", (base_img.width, base_img.height), (0,0,0,0))
     od = ImageDraw.Draw(overlay)
-
-    # 1) white underlay
-    od.line([(x0, y), (xe, y)], fill=(255,255,255,255), width=6)
-
-    # 2) opaque colored dotted overlay
+    od.line([(x0, y), (xe, y)], fill=(255,255,255,255), width=6)  # underlay
     dot_len, gap = 14, 6
     xx = x0
     colored = (color[0], color[1], color[2], 255)
@@ -435,10 +433,8 @@ def draw_bos_line_with_chip(d, left, x_end, top, bot, y, color, font_lbl, font_t
         x2 = min(xx + dot_len, xe)
         od.line([(xx, y), (x2, y)], fill=colored, width=4)
         xx += dot_len + gap
-
     base_img.alpha_composite(overlay)
 
-    # 3) compact chip anchored near right end
     lbl = "BOS"
     d = ImageDraw.Draw(base_img)
     tw, th   = d.textbbox((0,0), lbl, font=font_lbl)[2:]
@@ -467,7 +463,7 @@ def render_single_post(path, ticker, payload, brand_logo_path):
     d.text((MARGIN, MARGIN+72), f"{last:,.2f} USD", fill=TEXT_MAIN, font=F_PRICE)
     chg_col = UP_COL if chg30>=0 else DOWN_COL
     d.text((MARGIN, MARGIN+122), f"{chg30:+.2f}% past {SUMMARY_LOOKBACK}d", fill=chg_col, font=F_CHG)
-    d.text((MARGIN, MARGIN+122+38), "Daily chart • confluence S/R zones", fill=TEXT_MUT, font=F_SUB)
+    d.text((MARGIN, MARGIN+122+38), "Daily chart • last swing-low support + confluence resistance", fill=TEXT_MUT, font=F_SUB)
 
     # Ticker logo top-right
     t_logo = find_ticker_logo_path(ticker)
