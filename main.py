@@ -271,15 +271,15 @@ def clean_and_summarize(df, ticker):
     half = max(0.35*atr_val, 0.0015*last)
 
     # --- Support/Resistance from 4H pivots (last confirmed to the left) ---
-    s_val, r_val = last_left_swing_low_high_4h(ticker, w=2, period="60d", interval="4h")
-    sup_low = sup_high = res_low = res_high = None
-    sup_label = res_label = None
-    if s_val and s_val <= last:
-        sup_low, sup_high = s_val - half, s_val + half
-        sup_label = f"Support (4H swing low) ~{s_val:.2f}"
-    if r_val and r_val >= last:
-        res_low, res_high = r_val - half, r_val + half
-        res_label = f"Resistance (4H swing high) ~{r_val:.2f}"
+    if s_val is not None and not pd.isna(s_val) and float(s_val) <= last:
+    s_val = float(s_val)
+    sup_low, sup_high = s_val - half, s_val + half
+    sup_label = f"Support (4H swing low) ~{s_val:.2f}"
+
+if r_val is not None and not pd.isna(r_val) and float(r_val) >= last:
+    r_val = float(r_val)
+    res_low, res_high = r_val - half, r_val + half
+    res_label = f"Resistance (4H swing high) ~{r_val:.2f}"
 
     # --- BoS (weekly first, daily fallback) ---
     bos_dir, bos_level, bos_idx = detect_bos_weekly(dfc, buffer_pct=0.0005, vol_threshold_pct=0.4, w_fractal=2)
