@@ -150,14 +150,38 @@ def atr(df, n=14):
 def sma(series, n): return series.rolling(n).mean()
 
 def swing_points(df, w=2):
-    """Return lists of pivot lows and highs as (i, timestamp, price)."""
+    """
+    Return lists of pivot lows and highs as (i, timestamp, price).
+    Uses scalar comparisons to avoid pandas' 'truth value of a Series' errors.
+    """
+    highs, lows = []
+    L = []
+    try:
+        H = df["High"]
+        Ls = df["Low"]
+    except KeyError:
+        return [], []
+
+    n = len(df)
+    if n < 2*w + 1:
+        return [], []
+
     highs, lows = [], []
-    H, L = df["High"], df["Low"]
-    for i in range(w, len(df)-w):
-        if H.iloc[i] == H.iloc[i-w:i+w+1].max():
-            highs.append((i, df.index[i], float(H.iloc[i])))
-        if L.iloc[i] == L.iloc[i-w:i+w+1].min():
-            lows.append((i, df.index[i], float(L.iloc[i])))
+    for i in range(w, n - w):
+        # work with scalars to avoid ambiguous truth values
+        cur_h = float(H.iloc[i])
+        win_h = H.iloc[i - w:i + w + 1]
+        max_h = float(win_h.max())
+
+        cur_l = float(Ls.iloc[i])
+        win_l = Ls.iloc[i - w:i + w + 1]
+        min_l = float(win_l.min())
+
+        if cur_h == max_h:
+            highs.append((i, df.index[i], cur_h))
+        if cur_l == min_l:
+            lows.append((i, df.index[i], cur_l))
+
     return lows, highs
 
 # ---- 4H pivot fetchers ----
