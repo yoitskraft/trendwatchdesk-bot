@@ -17,8 +17,7 @@ BRAND_LOGO_PATH = os.getenv("BRAND_LOGO_PATH", "assets/brand_logo.png")
 DEFAULT_TF = (os.getenv("TWD_TF", "D") or "D").upper()  # 'D' (daily render) or 'W' (weekly render)
 FOURH_LOOKBACK_DAYS = int(os.getenv("TWD_4H_LOOKBACK_DAYS", "120"))
 SWING_WINDOW = int(os.getenv("TWD_SWING_WINDOW", "3"))
-MIN_TOUCHES = int(os.getenv("TWD_MIN_TOUCHES", "3"))
-ZONE_PCT_TOL = float(os.getenv("TWD_ZONE_PCT_TOL", "0.004"))  # 0.4%
+ZONE_PCT_TOL = float(os.getenv("TWD_ZONE_PCT_TOL", "0.004"))  # 0.4% width fallback
 ATR_LEN = int(os.getenv("TWD_ATR_LEN", "14"))
 
 # ------------------ Company names (pool) ------------------
@@ -75,11 +74,13 @@ def choose_tickers_somehow():
 def _find_col(df: pd.DataFrame, name: str):
     if df is None or df.empty:
         return None
+    # single-index
     if name in df.columns:
         ser = df[name]
         if isinstance(ser, pd.DataFrame):
             ser = ser.iloc[:, 0]
         return pd.to_numeric(ser, errors="coerce")
+    # normalized names
     try:
         norm = {str(c).lower().replace(" ", ""): c for c in df.columns}
         key = name.lower().replace(" ", "")
@@ -90,6 +91,7 @@ def _find_col(df: pd.DataFrame, name: str):
             return pd.to_numeric(ser, errors="coerce")
     except Exception:
         pass
+    # MultiIndex
     if isinstance(df.columns, pd.MultiIndex):
         lvl0 = df.columns.get_level_values(0)
         lvlN = df.columns.get_level_values(-1)
@@ -124,7 +126,7 @@ def _get_ohlc_df(df: pd.DataFrame):
     out = pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": c}).dropna()
     return out if not out.empty else None
 
-# ------------------ Technical helpers (ATR, swings, clustering) ------------------
+# ------------------ Technical helpers ------------------
 def atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
     h = df["High"]; l = df["Low"]; c = df["Close"]
     prev_c = c.shift(1)
@@ -132,81 +134,67 @@ def atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
     return tr.rolling(n, min_periods=1).mean()
 
 def swing_points(df: pd.DataFrame, w: int = 3):
+    """Return swing highs and lows as lists of tuples (index_position, value)."""
     highs_idx, lows_idx = [], []
     h, l = df["High"], df["Low"]
     for i in range(w, len(df) - w):
         left_h = h.iloc[i - w:i].max(); right_h = h.iloc[i + 1:i + 1 + w].max()
         left_l = l.iloc[i - w:i].min(); right_l = l.iloc[i + 1:i + 1 + w].min()
         hi = h.iloc[i]; lo = l.iloc[i]
-        if hi >= left_h and hi >= right_h: highs_idx.append(i)
-        if lo <= left_l and lo <= right_l: lows_idx.append(i)
+        if hi >= left_h and hi >= right_h:
+            highs_idx.append(i)
+        if lo <= left_l and lo <= right_l:
+            lows_idx.append(i)
     highs = [(i, float(h.iloc[i])) for i in highs_idx]
     lows  = [(i, float(l.iloc[i])) for i in lows_idx]
     return highs, lows
 
-def cluster_levels(levels, tol_abs):
-    if not levels: return []
-    levels = sorted(levels)
-    clusters = [[levels[0]]]
-    for lv in levels[1:]:
-        if abs(lv - np.mean(clusters[-1])) <= tol_abs:
-            clusters[-1].append(lv)
-        else:
-            clusters.append([lv])
-    bands = []
-    for cl in clusters:
-        center = float(np.mean(cl))
-        lo = float(min(cl)); hi = float(max(cl))
-        bands.append({"center": center, "low": lo, "high": hi, "touches": len(cl)})
-    return bands
-
-def pick_support_zone_from_4h(df4h: pd.DataFrame, min_touches=3, w=3, pct_tol=0.004, atr_len=14):
+def pick_support_level_from_4h(df4h: pd.DataFrame, trend_bullish: bool, w: int, pct_tol: float, atr_len: int):
     """
-    Build a single SUPPORT zone from 4H swings:
-    - Find swing lows
-    - Cluster by tolerance (ATR-anchored with percent fallback)
-    - Keep clusters with >= min_touches
-    - Pick the nearest cluster whose center is <= last (support below price)
-    Return (sup_low, sup_high) or (None, None)
+    If trend is bullish: pick the previous swing HIGH (below current price) closest to last.
+    If trend is bearish: pick the last swing LOW (most recent low prior to last bar).
+    Returns (sup_low, sup_high) by expanding the chosen level with a tolerance band.
     """
     if df4h is None or df4h.empty:
         return (None, None)
 
-    lows = swing_points(df4h, w=w)[1]  # (idx, value)
-    lo_vals = [v for _, v in lows]
-    if not lo_vals:
-        return (None, None)
+    highs, lows = swing_points(df4h, w=w)
+    last_px = float(df4h["Close"].iloc[-1])
 
-    atrv = float(atr(df4h, n=atr_len).iloc[-1])
-    last = float(df4h["Close"].iloc[-1])
-    tol_abs = float(max(atrv, last * pct_tol))
+    # tolerance for band width
+    atrv = float(atr(df4h, n=atr_len).iloc[-1]) if len(df4h) > 1 else 0.0
+    tol_abs = max(atrv, last_px * pct_tol)
 
-    lo_bands = cluster_levels(lo_vals, tol_abs)
-    lo_bands = [b for b in lo_bands if b["touches"] >= min_touches]
-    if not lo_bands:
-        return (None, None)
+    if trend_bullish:
+        # previous swing high BELOW price, closest to current price
+        candidates = [(i, v) for (i, v) in highs if v <= last_px]
+        if not candidates:
+            return (None, None)
+        # prioritize closeness in price, then recency (larger i)
+        i_sel, v_sel = sorted(candidates, key=lambda t: (abs(last_px - t[1]), -t[0]))[0]
+        level = float(v_sel)
+    else:
+        # last swing low (most recent by index) before last bar
+        prior_lows = [(i, v) for (i, v) in lows if i < len(df4h) - 1]
+        if not prior_lows:
+            return (None, None)
+        i_sel, v_sel = max(prior_lows, key=lambda t: t[0])  # most recent by index
+        level = float(v_sel)
 
-    # nearest support below price
-    candidates_s = sorted([b for b in lo_bands if b["center"] <= last], key=lambda x: x["center"], reverse=True)
-    if not candidates_s:
-        return (None, None)
-
-    b = candidates_s[0]
-    # widen slightly by tolerance for visualization
-    sup_low = max(b["low"], b["center"] - tol_abs)
-    sup_high = min(b["high"], b["center"] + tol_abs)
-    return (float(sup_low), float(sup_high))
+    return (float(level - tol_abs), float(level + tol_abs))
 
 # ------------------ Data fetcher ------------------
 def fetch_one(ticker):
     """
-    - Daily/Weekly render frame (env TWD_TF)
-    - 4H support zone detection via resampled 60m bars
-    - 30d % change from daily closes
+    - Render on Daily/Weekly (env TWD_TF)
+    - Detect SUPPORT on 4H using rule:
+        * bullish → previous swing HIGH below price (closest)
+        * bearish → last swing LOW (most recent)
+    - 30d % change from daily closes for trend decision
     """
     tf = (os.getenv("TWD_TF", DEFAULT_TF) or DEFAULT_TF).upper().strip()  # 'D' or 'W'
 
-    # Daily 1y for change calc (and possibly render)
+    # Daily 1y for change calc (and maybe render)
     try:
         df_d = yf.Ticker(ticker).history(period="1y", interval="1d", auto_adjust=True)
     except Exception:
@@ -232,7 +220,7 @@ def fetch_one(ticker):
         base_val = float(base_series.iloc[-1])
         chg30 = float(100.0 * (float(close_d.iloc[-1]) - base_val) / base_val) if base_val != 0 else 0.0
 
-    # 60m → 4H for support zone
+    # 60m → 4H for support selection
     try:
         df_60 = yf.Ticker(ticker).history(period="6mo", interval="60m", auto_adjust=True)
     except Exception:
@@ -251,8 +239,10 @@ def fetch_one(ticker):
                     {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
                 ).dropna()
                 if not df_4h.empty:
-                    sup_low, sup_high = pick_support_zone_from_4h(
-                        df_4h, min_touches=MIN_TOUCHES, w=SWING_WINDOW, pct_tol=ZONE_PCT_TOL, atr_len=ATR_LEN
+                    trend_bullish = (chg30 > 0)
+                    sup_low, sup_high = pick_support_level_from_4h(
+                        df_4h, trend_bullish=trend_bullish, w=SWING_WINDOW,
+                        pct_tol=ZONE_PCT_TOL, atr_len=ATR_LEN
                     )
 
     # choose render frame
@@ -265,13 +255,14 @@ def fetch_one(ticker):
         if df_render.empty: return None
         tf_tag = "D"
 
-    # BOS orientation (for copy; zone selection already uses nearest support)
+    # Orientation for BOS (visual only)
     bos_dir = "up" if chg30 > 0 else ("down" if chg30 < 0 else None)
     bos_level = last
     bos_idx = int(len(df_render) - 1)
 
+    # Only support values used in renderer; resistance omitted per your rule
     return (df_render, last, float(chg30),
-            sup_low, sup_high, None, None,      # only support values; no resistance
+            sup_low, sup_high, None, None,
             "Support", "", bos_dir, bos_level, bos_idx, tf_tag)
 
 # ------------------ Renderer (white, single support zone, no labels) ------------------
@@ -384,8 +375,8 @@ def render_single_post(out_path, ticker, payload):
         x = cx1 + i * (cx2 - cx1) / 9.0; g.line([(x, cy1), (x, cy2)], fill=GRID_MIN, width=sp(1))
     base = Image.alpha_composite(base, grid); draw = ImageDraw.Draw(base)
 
-    # ----- Support zone ONLY (blue), closest below last price; NO text label -----
-    if sup_low is not None and sup_high is not None:
+    # ----- Support zone ONLY (blue), per your rule; NO text label -----
+    if sup_low is not None and sup_high is not None and np.isfinite(sup_low) and np.isfinite(sup_high):
         sup_y1, sup_y2 = sy(sup_high), sy(sup_low)
         sup_rect = [cx1, min(sup_y1, sup_y2), cx2, max(sup_y1, sup_y2)]
         sup_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
@@ -452,12 +443,14 @@ def plain_english_line(ticker, headline, payload, seed=None):
     if headline and len(headline) > 160: headline = headline[:157] + "…"
     lead = headline or rnd.choice(["No major headlines today.","Quiet on the news front.","News flow is light."])
 
-    cues = []
-    if chg30 >= 8: cues.append("trend tone is bullish 🔥 — support marked for potential pullbacks")
-    elif chg30 <= -8: cues.append("tone is cautious ⚠️ — watching support for possible bounce")
-    else: cues.append("neutral tone — key support in focus")
+    if chg30 > 0:
+        cue = "trend looks constructive — support mapped to prior swing high 🔎"
+    elif chg30 < 0:
+        cue = "tone is cautious — watching the last swing low for a bounce 👀"
+    else:
+        cue = "neutral tone — key support in focus 🎯"
 
-    return f"📈 {ticker} — {lead} — {'; '.join(cues)}"[:280]
+    return f"📈 {ticker} — {lead} — {cue}"[:280]
 
 CTA_POOL = [
     "Save for later 📌 · Comment your levels 💬 · See charts in carousel ➡️",
