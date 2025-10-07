@@ -133,7 +133,11 @@ def _get_ohlc_df(df):
     o = _find_col(df, "Open")
     h = _find_col(df, "High")
     l = _find_col(df, "Low")
-    c = _find_col(df, "Close") or _find_col(df, "Adj Close")
+
+    # DO NOT use Python `or` on Series — it’s ambiguous.
+    c = _find_col(df, "Close")
+    if c is None or c.dropna().empty:
+        c = _find_col(df, "Adj Close")
     if c is None or c.dropna().empty:
         return None
 
@@ -157,7 +161,6 @@ def _get_ohlc_df(df):
     if out.empty:
         return None
     return out
-
 # ------------------ Data fetcher (daily → weekly) ------------------
 def fetch_one(ticker):
     """
