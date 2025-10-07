@@ -12,7 +12,6 @@ jobs:
       contents: write
 
     steps:
-      # ✅ Correct: "uses" belongs to the SAME step as "name"
       - name: Checkout repo
         uses: actions/checkout@v4
 
@@ -26,25 +25,23 @@ jobs:
           python --version
           pip --version
 
-      # Always install baseline deps (even if requirements.txt exists)
+      # Always install baseline deps (keeps yfinance available)
       - name: Install baseline deps
         run: |
           python -m pip install --upgrade pip
           pip install --upgrade yfinance pillow pandas numpy requests pytz urllib3
 
-      # Optionally install your project's requirements (if present)
+      # Optionally install your requirements.txt (won't fail the job if it's missing)
       - name: Install project requirements (optional)
         if: hashFiles('requirements.txt') != ''
         run: |
           pip install -r requirements.txt || true
 
-      # Ensure output dir exists BEFORE running the script
       - name: Ensure output folder
         run: |
           mkdir -p output
           echo "Output dir:" && pwd && ls -la output || true
 
-      # Run your bot and capture logs
       - name: Run bot (tee log)
         run: |
           set -x
@@ -52,7 +49,6 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
 
-      # Print the tail of the run log for quick visibility
       - name: Print run.log to console
         if: always()
         run: |
@@ -60,7 +56,6 @@ jobs:
           (test -f run.log && tail -n 300 run.log) || echo "run.log missing"
           echo "===== END run.log ====="
 
-      # Show what ended up in output/
       - name: Debug output folder
         if: always()
         run: |
@@ -69,7 +64,6 @@ jobs:
           echo "== any pngs =="
           find output -maxdepth 1 -type f -name "*.png" -printf "%f\n" 2>/dev/null || true
 
-      # Hard fail if nothing was generated
       - name: Require charts
         if: always()
         run: |
@@ -81,7 +75,6 @@ jobs:
             exit 1
           fi
 
-      # Upload results + logs as artifact
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
