@@ -1,27 +1,51 @@
 #!/usr/bin/env python3
-# TrendWatchDesk – charts + posters (stable minimal)
+# TrendWatchDesk – CHARTS + BREAKING-NEWS POSTERS (stable)
 
-import os, random, datetime, traceback, re
+import os, random, datetime, traceback, re, json, hashlib
 import numpy as np
 import pandas as pd
 import yfinance as yf
 from PIL import Image, ImageDraw, ImageFont
 
-# ============ Paths & Dates ============
+# =========================
+# Paths & Dates
+# =========================
 OUTPUT_DIR  = os.path.abspath("output")
 POSTER_DIR  = os.path.join(OUTPUT_DIR, "posters")
 TODAY       = datetime.date.today()
 DATESTR     = TODAY.strftime("%Y%m%d")
-DATESTR_HM  = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M")  # unique per run (for 3-hour cadence)
+DATESTR_HM  = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M")  # unique per run
 
-# ============ Env knobs ============
-TWD_MODE = (os.getenv("TWD_MODE", "all") or "all").lower()   # all | charts | posters
-BRAND_LOGO_PATH = os.getenv("BRAND_LOGO_PATH", "assets/brand_logo.png")
+# =========================
+# Env knobs
+# =========================
+# What to run this invocation: "all" | "charts" | "posters"
+TWD_MODE = (os.getenv("TWD_MODE", "all") or "all").lower()
+
+# UI scaling
 TWD_UI_SCALE    = float(os.getenv("TWD_UI_SCALE", "0.90"))
 TWD_TEXT_SCALE  = float(os.getenv("TWD_TEXT_SCALE", "0.78"))
 TWD_TLOGO_SCALE = float(os.getenv("TWD_TLOGO_SCALE","0.55"))
 
-# ============ Pools / Tickers ============
+# Brand logo (bottom-right)
+BRAND_LOGO_PATH = os.getenv("BRAND_LOGO_PATH", "assets/brand_logo.png")
+
+# Chart timeframe: "D" or "W"
+TWD_TF = (os.getenv("TWD_TF", "D") or "D").upper().strip()
+
+# Breaking posters (event-driven)
+BREAKING_ON = (os.getenv("TWD_BREAKING_ON", "on").lower() in ("on","1","true","yes"))
+BREAKING_RECENCY_MIN   = int(os.getenv("TWD_BREAKING_RECENCY_MIN", "90"))   # lookback window (minutes)
+BREAKING_MIN_SOURCES   = int(os.getenv("TWD_BREAKING_MIN_SOURCES", "3"))    # require N+ publishers
+BREAKING_MIN_INTERVAL  = int(os.getenv("TWD_BREAKING_MIN_INTERVAL_MIN", "30"))  # cooldown between posters
+
+# State for dedupe
+STATE_DIR   = os.path.abspath("state")
+SEEN_STORIES_PATH = os.path.join(STATE_DIR, "seen_stories.json")
+
+# =========================
+# Pools / Tickers
+# =========================
 COMPANY_QUERY = {
     "META":"Meta Platforms","AMD":"Advanced Micro Devices","GOOG":"Google Alphabet","GOOGL":"Alphabet",
     "AAPL":"Apple","MSFT":"Microsoft","TSM":"Taiwan Semiconductor","TSLA":"Tesla",
@@ -30,12 +54,15 @@ COMPANY_QUERY = {
 }
 
 def choose_tickers_somehow():
+    """Stable, date-seeded variety — replace with your weighted logic if needed."""
     rnd = random.Random(DATESTR)
     pool = list(COMPANY_QUERY.keys())
     k = min(6, len(pool))
     return rnd.sample(pool, k)
 
-# ============ Data helpers ============
+# =========================
+# Data helpers
+# =========================
 def _find_col(df: pd.DataFrame, name: str):
     if df is None or df.empty: return None
     if name in df.columns:
@@ -91,11 +118,16 @@ def swing_points(df: pd.DataFrame, w=3):
     return highs, lows
 
 def pick_support_level_from_4h(df4h, trend_bullish, w=3, pct_tol=0.004, atr_len=14):
+    """One blue support zone:
+       - Bullish: nearest prior swing HIGH ≤ last price (potential pullback level)
+       - Bearish: last swing LOW (possible bounce)
+    """
     if df4h is None or df4h.empty: return (None, None)
     highs, lows = swing_points(df4h, w)
     last_px = float(df4h["Close"].iloc[-1])
     atrv = float(atr(df4h, atr_len).iloc[-1]) if len(df4h) > 1 else 0.0
     tol_abs = max(atrv, last_px * pct_tol)
+
     if trend_bullish:
         candidates = [(i, v) for (i, v) in highs if v <= last_px]
         if not candidates: return (None, None)
@@ -105,13 +137,15 @@ def pick_support_level_from_4h(df4h, trend_bullish, w=3, pct_tol=0.004, atr_len=
         if not lows: return (None, None)
         i_sel, v_sel = max(lows, key=lambda t: t[0])
         level = float(v_sel)
+
     return (level - tol_abs, level + tol_abs)
 
-# ============ Fetcher ============
+# =========================
+# Fetcher (chart payload)
+# =========================
 def fetch_one(ticker):
     """Return payload: (df_render, last, chg30, sup_low, sup_high, tf_tag, chg1d)"""
-    tf = (os.getenv("TWD_TF", "D") or "D").upper().strip()
-
+    # Daily 1y for render
     try:
         df_d = yf.Ticker(ticker).history(period="1y", interval="1d", auto_adjust=True)
     except Exception:
@@ -132,7 +166,7 @@ def fetch_one(ticker):
     prev = float(close_d.iloc[-2])
     chg1d = 100.0 * (last - prev) / prev if prev != 0 else 0.0
 
-    # build a 4H from 60m bars for support zone
+    # Build 4H from 60m for support
     try:
         df_60 = yf.Ticker(ticker).history(period="6mo", interval="60m", auto_adjust=True)
     except Exception:
@@ -156,7 +190,7 @@ def fetch_one(ticker):
                         df_4h, trend_bullish, w=3, pct_tol=0.004, atr_len=14
                     )
 
-    if tf == "W":
+    if TWD_TF == "W":
         df_render = ohlc_d.resample("W-FRI").agg(
             {"Open":"first","High":"max","Low":"min","Close":"last"}
         ).dropna().tail(60)
@@ -168,7 +202,9 @@ def fetch_one(ticker):
     if df_render is None or df_render.empty: return None
     return (df_render, last, float(chg30), sup_low, sup_high, tf_tag, float(chg1d))
 
-# ============ Renderer (charts) ============
+# =========================
+# Chart Renderer (clean white, no card)
+# =========================
 def render_single_post(out_path, ticker, payload):
     (df, last, chg30, sup_low, sup_high, tf_tag, _chg1d) = payload
 
@@ -189,6 +225,7 @@ def render_single_post(out_path, ticker, payload):
     base = Image.new("RGBA", (W, H), BG)
     draw = ImageDraw.Draw(base)
 
+    # fonts
     def _try_font(path, size):
         try: return ImageFont.truetype(path, size)
         except: return None
@@ -207,6 +244,7 @@ def render_single_post(out_path, ticker, payload):
     f_sub    = _font(22)
     f_axis   = _font(18)
 
+    # layout
     outer_top = sp(50); outer_lr = sp(60); outer_bot = sp(50)
     header_h = sp(150); footer_h = sp(100)
     cx1, cy1, cx2, cy2 = (
@@ -216,10 +254,9 @@ def render_single_post(out_path, ticker, payload):
         H - outer_bot - footer_h
     )
 
-    # header left block
+    # header (left aligned, equal spacing)
     title_x, title_y = outer_lr, outer_top
     GAP = st(8)
-
     def draw_line(x, y, text, font, fill):
         draw.text((x, y), text, fill=fill, font=font)
         bbox = draw.textbbox((x, y), text, font=font)
@@ -232,7 +269,7 @@ def render_single_post(out_path, ticker, payload):
     sub_label = "Daily chart • last ~1 year" if tf_tag == "D" else "Weekly chart • last 52 weeks"
     _ = draw_line(title_x, y_cur, sub_label, f_sub, TEXT_LT)
 
-    # ticker logo (top-right)
+    # ticker logo top-right (smaller)
     tlogo_path = os.path.join("assets", "logos", f"{ticker}.png")
     if os.path.exists(tlogo_path):
         try:
@@ -245,12 +282,12 @@ def render_single_post(out_path, ticker, payload):
         except Exception:
             pass
 
-    # data prep
+    # data
     df2 = df[["Open","High","Low","Close"]].dropna()
     if df2.shape[0] < 2:
         base.convert("RGB").save(out_path, quality=95); return
-    if len(df2) > 190:
-        df2 = df2.tail(190)
+    # show ~160–190 candles max
+    if len(df2) > 190: df2 = df2.tail(190)
 
     ymin = float(np.nanmin(df2["Low"])); ymax = float(np.nanmax(df2["High"]))
     if not np.isfinite(ymin) or not np.isfinite(ymax) or abs(ymax - ymin) < 1e-6:
@@ -260,7 +297,7 @@ def render_single_post(out_path, ticker, payload):
     def sx(i): return cx1 + (i / max(1, len(df2)-1)) * (cx2 - cx1)
     def sy(v): return cy2 - ((float(v) - ymin) / (ymax - ymin)) * (cy2 - cy1)
 
-    # grid (light)
+    # grid (soft)
     grid = Image.new("RGBA", (W, H), (0,0,0,0)); g = ImageDraw.Draw(grid)
     for i in range(1, 7):
         y = cy1 + i * (cy2 - cy1) / 7.0
@@ -273,7 +310,7 @@ def render_single_post(out_path, ticker, payload):
         g.line([(x, cy1), (x, cy2)], fill=GRID_MIN, width=sp(1))
     base = Image.alpha_composite(base, grid); draw = ImageDraw.Draw(base)
 
-    # support zone: single blue box if present
+    # support zone (one blue box)
     if sup_low is not None and sup_high is not None and np.isfinite(sup_low) and np.isfinite(sup_high):
         sup_layer = Image.new("RGBA", (W, H), (0,0,0,0))
         y1, y2 = sy(sup_high), sy(sup_low)
@@ -303,7 +340,7 @@ def render_single_post(out_path, ticker, payload):
         bbox = draw.textbbox((0,0), label, font=f_axis)
         draw.text((cx2 + sp(8), y - (bbox[3]-bbox[1])/2), label, fill=(140,145,150,255), font=f_axis)
 
-    # footer left
+    # footer
     foot_x = outer_lr; foot_y = 1080 - 56 - 70
     draw.text((foot_x, foot_y), "Support zone highlighted", fill=(120,120,120,255), font=f_sub)
     draw.text((foot_x, foot_y + st(20)), "Not financial advice", fill=(160,160,160,255), font=f_sub)
@@ -325,20 +362,9 @@ def render_single_post(out_path, ticker, payload):
 
     base.convert("RGB").save(out_path, quality=95)
 
-# ============ Captions (concise, natural) ============
-def _emoji_for(ticker, rnd):
-    if ticker in ["AAPL","MSFT","META","GOOG","GOOGL","AMZN","TSLA"]:
-        pool = ["🖥️","🔎","🧠","💻","📡"]
-    elif ticker in ["JNJ","UNH"]:
-        pool = ["💊","🧬","⚕️","🩺"]
-    elif ticker in ["MA","V","PYPL","SQ"]:
-        pool = ["💳","🏦","📈","💸"]
-    elif ticker in ["AMD","NVDA","TSM","ASML","QCOM","INTC","MU"]:
-        pool = ["🔌","⚡","🔧","🧮"]
-    else:
-        pool = ["📈","🔎","⚡","🚀"]
-    return rnd.choice(pool)
-
+# =========================
+# Captions (for charts)
+# =========================
 def _compute_recent_changes(df_render: pd.DataFrame, tf_tag: str):
     try:
         c = df_render["Close"].dropna()
@@ -357,15 +383,11 @@ def _compute_recent_changes(df_render: pd.DataFrame, tf_tag: str):
 def caption_line(ticker, payload, seed=None):
     (df_render, last, chg30, sup_low, sup_high, tf_tag, _chg1d_payload) = payload
     rnd = random.Random((seed or DATESTR) + ticker)
-    emoji = _emoji_for(ticker, rnd)
-    joiner = rnd.choice([" · ", " — "])
-
     chg1d, chg5d = _compute_recent_changes(df_render, tf_tag)
     if abs(chg1d) >= 2:
         lead = f"{'Up' if chg1d>0 else 'Down'} ~{abs(chg1d):.0f}% {('today' if tf_tag=='D' else 'this week')}"
     else:
         lead = rnd.choice(["steady tape","watchlist update","levels in focus"])
-
     cues = []
     if chg30 >= 12:
         cues.append(rnd.choice(["momentum looks strong 🔥","breakout pressure building 🚀","uptrend intact ✅"]))
@@ -378,9 +400,12 @@ def caption_line(ticker, payload, seed=None):
     if (sup_low is not None) and (sup_high is not None):
         cues.append(rnd.choice(["support zone in play 📍","buyers defended support 🛡️","watch reactions near support 👀"]))
     random.shuffle(cues); cues = cues[:2]
-    return f"• {_emoji_for(ticker, rnd)} {ticker} — {lead}{joiner}{'; '.join(cues)}"
+    joiner = rnd.choice([" · ", " — "])
+    return f"• {ticker} — {lead}{joiner}{'; '.join(cues)}"
 
-# ============ News for Posters ============
+# =========================
+# Breaking News (posters)
+# =========================
 GLOBAL_NEWS_SYMBOLS = [
     "^GSPC","^NDX","^DJI","SPY","QQQ","DIA","^TNX","DX-Y.NYB",
     "GLD","SI=F","GC=F","CL=F","USO","UNG","DBC",
@@ -388,31 +413,86 @@ GLOBAL_NEWS_SYMBOLS = [
     "XLF","XLE","XLK","XLI"
 ]
 
-def _collect_yf_news_for_symbols(symbols):
-    news = []
+def _normalize_title_key(t: str) -> str:
+    t = (t or "").lower().strip()
+    t = re.split(r"[-–—:]\s+", t, maxsplit=1)[0]
+    t = re.sub(r"[^a-z0-9\s]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return " ".join(t.split()[:10])
+
+def _collect_global_news(symbols):
+    items = []
     for sym in symbols:
         try:
-            items = getattr(yf.Ticker(sym), "news", []) or []
-            for it in items:
-                news.append({
+            for it in getattr(yf.Ticker(sym), "news", []) or []:
+                items.append({
                     "symbol": sym,
                     "title": it.get("title") or "",
-                    "publisher": it.get("publisher") or "",
-                    "published_ts": it.get("providerPublishTime"),
+                    "publisher": (it.get("publisher") or "").strip(),
                     "url": it.get("link") or "",
-                    "desc": it.get("summary","") if isinstance(it, dict) else ""
+                    "published_ts": it.get("providerPublishTime"),
+                    "desc": it.get("summary",""),
                 })
         except Exception:
             continue
-    # clean + dedupe
-    cleaned, seen = [], set()
-    for it in news:
-        t = (it.get("title") or "").strip()
-        if not t or t in seen:
+    # de-dup by full title
+    out, seen = [], set()
+    for it in items:
+        t = (it["title"] or "").strip()
+        if not t or t in seen: 
             continue
-        seen.add(t); cleaned.append(it)
-    cleaned.sort(key=lambda x: (x.get("published_ts") or 0), reverse=True)
-    return cleaned
+        seen.add(t); out.append(it)
+    out.sort(key=lambda x: x.get("published_ts") or 0, reverse=True)
+    return out
+
+def _cluster_and_pick_breaking(items, recency_min=90, min_sources=3):
+    """Group by normalized title; require >=min_sources pubs and recency."""
+    if not items: return None
+    now = datetime.datetime.utcnow().timestamp()
+    groups = {}
+    for it in items:
+        key = _normalize_title_key(it["title"])
+        if not key: continue
+        groups.setdefault(key, []).append(it)
+
+    cands = []
+    for key, lst in groups.items():
+        pubs = { (x.get("publisher") or "").lower() for x in lst if x.get("publisher") }
+        newest = max((x.get("published_ts") or 0) for x in lst)
+        age_min = (now - newest) / 60.0
+        if len(pubs) >= min_sources and age_min <= recency_min:
+            cands.append((len(pubs), newest, key, lst))
+    if not cands: return None
+    cands.sort(key=lambda t: (t[0], t[1]), reverse=True)  # most pubs, then freshest
+    _, _, key, lst = cands[0]
+
+    # prefer high-cred publishers, then newest
+    pref = ["reuters","financial times","wall street journal","wsj","bloomberg",
+            "cnbc","marketwatch","yahoo finance","barron's"]
+    def score(it):
+        p = (it.get("publisher") or "").lower()
+        for i, name in enumerate(pref[::-1]):
+            if name in p: return 100 + i
+        return 0
+    best = sorted(lst, key=lambda x: (score(x), x.get("published_ts") or 0), reverse=True)[0]
+    best["cluster_key"] = key
+    return best
+
+def _hash_story_key(title: str) -> str:
+    return hashlib.sha1((title or "").strip().lower().encode("utf-8")).hexdigest()
+
+def _load_seen(path: str):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return set(data.get("seen", [])), float(data.get("last_ts", 0))
+    except Exception:
+        return set(), 0.0
+
+def _save_seen(path: str, seen: set, last_ts: float):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"seen": sorted(list(seen)), "last_ts": float(last_ts)}, f, ensure_ascii=False, indent=2)
 
 def _headline_caps_short(title: str) -> str:
     t = (title or "").strip()
@@ -433,13 +513,10 @@ def _pick_story_background_path(symbol_or_theme: str, story: dict) -> str | None
     theme = None
     if any(k in title for k in ["gold","bullion","xau","gld","gc=f"]): theme = "GOLD"
     elif any(k in title for k in ["oil","crude","wti","brent","cl=f","uso"]): theme = "OIL"
-    elif any(k in title for k in ["fed","rate","yields","cpi","inflation"]): theme = "FED"
-    elif any(k in title for k in ["earnings","guidance","revenue","profit","results"]): theme = "EARNINGS"
     elif any(k in title for k in ["ai","gpu","chip","semi","nvidia","amd","tsm"]): theme = "CHIPS"
     elif any(k in title for k in ["iphone","android","cloud","google","microsoft","meta"]): theme = "TECH"
     elif any(k in title for k in ["tesla","ev","auto","factory"]): theme = "AUTO"
     elif any(k in title for k in ["drug","vaccine","health","pharma"]): theme = "HEALTH"
-    elif any(k in title for k in ["visa","mastercard","payment","fintech"]): theme = "PAYMENTS"
     if theme:
         tdir = os.path.join("assets", "backgrounds", theme)
         if os.path.isdir(tdir):
@@ -541,12 +618,11 @@ def render_news_poster(out_path, symbol_for_visual, story):
         draw.text((x1, head_y + st(8)), meta_txt, fill=TEXT_LT, font=f_meta)
         head_y += st(46)
 
-    # paragraph (title + desc)
+    # paragraph
     desc = (story.get("desc") or "").strip()
     if not desc:
-        desc = "Traders are watching key levels and follow-through after the headline move."
-    body = f"{raw_title.rstrip('.')}. {desc}"
-    body = re.sub(r"\s+", " ", body).strip()
+        desc = "Markets react as traders watch key levels and look for follow-through."
+    body = re.sub(r"\s+", " ", f"{raw_title.rstrip('.')}. {desc}").strip()
     if len(body) > 480: body = body[:477] + "…"
 
     body_y = head_y + st(16); max_w = x2 - x1
@@ -574,39 +650,25 @@ def render_news_poster(out_path, symbol_for_visual, story):
             blogo = Image.open(BRAND_LOGO_PATH).convert("RGBA")
             brand_maxh = 220
             scale = min(1.0, brand_maxh / max(1, blogo.height))
-            new_w = max(1, int(round(blogo.width * scale)))
-            new_h = max(1, int(round(blogo.height * scale)))
-            blogo = blogo.resize((new_w, new_h), Image.LANCZOS)
-            x = W - 56 - new_w
-            y = H - 56 - new_h
-            base.alpha_composite(blogo, (x, y))
+            blogo = blogo.resize((int(blogo.width*scale), int(blogo.height*scale)), Image.LANCZOS)
+            base.alpha_composite(blogo, (W - 56 - blogo.width, H - 56 - blogo.height))
         except Exception:
             pass
 
     base.convert("RGB").save(out_path, quality=95)
 
-def pick_latest_yahoo_story():
-    """Pick the most recent Yahoo Finance story across global symbols; fallback to most recent overall."""
-    all_news = _collect_yf_news_for_symbols(GLOBAL_NEWS_SYMBOLS)
-    if not all_news: return None
-    for it in all_news:
-        if (it.get("publisher") or "").strip().lower() == "yahoo finance":
-            return it
-    return all_news[0]
-
-# ============ Main ============
+# =========================
+# Main
+# =========================
 def main():
     print("[info] TWD starting…")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(POSTER_DIR, exist_ok=True)
 
-    do_charts  = (TWD_MODE in ("all","charts"))
-    do_posters = (TWD_MODE in ("all","posters"))
-
-    # ---- Charts ----
-    saved = 0
-    captions = []
-    if do_charts:
+    # ------------- Charts -------------
+    if TWD_MODE in ("all","charts"):
+        saved = 0
+        captions = []
         tickers = choose_tickers_somehow()
         print("[info] selected tickers:", tickers)
         for t in tickers:
@@ -625,7 +687,6 @@ def main():
                 traceback.print_exc()
 
         print(f"[info] saved chart images: {saved}")
-
         if saved > 0:
             caption_path = os.path.join(OUTPUT_DIR, f"caption_{DATESTR}.txt")
             now_str = TODAY.strftime("%d %b %Y")
@@ -644,23 +705,41 @@ def main():
                 f.write(footer)
             print("[info] wrote caption:", caption_path)
 
-    # ---- Poster (ONE per run) ----
-    if do_posters:
+    # ------------- Breaking Posters -------------
+    if TWD_MODE in ("all","posters") and BREAKING_ON:
         try:
-            story = pick_latest_yahoo_story()
+            os.makedirs(STATE_DIR, exist_ok=True)
+            seen, last_ts = _load_seen(SEEN_STORIES_PATH)
+
+            items = _collect_global_news(GLOBAL_NEWS_SYMBOLS)
+            story = _cluster_and_pick_breaking(items,
+                                               recency_min=BREAKING_RECENCY_MIN,
+                                               min_sources=BREAKING_MIN_SOURCES)
+
+            should_emit = False
             if story:
+                keyhash   = _hash_story_key(story["title"])
+                newest_ts = float(story.get("published_ts") or 0)
+                now_ts    = datetime.datetime.utcnow().timestamp()
+                cooldown_ok = (now_ts - last_ts) / 60.0 >= BREAKING_MIN_INTERVAL
+                if keyhash not in seen and cooldown_ok:
+                    should_emit = True
+
+            if story and should_emit:
                 symbol_for_visual = story.get("symbol") or "NEWS"
                 poster_path = os.path.join(POSTER_DIR, f"news_{DATESTR_HM}.png")
                 render_news_poster(poster_path, symbol_for_visual, story)
-                print(f"[info] poster created: {poster_path} ({story.get('publisher')})")
+                print(f"[info] BREAKING poster created: {poster_path} — {story.get('publisher')} — {story.get('title')}")
+                seen.add(_hash_story_key(story["title"]))
+                _save_seen(SEEN_STORIES_PATH, seen, story.get("published_ts") or datetime.datetime.utcnow().timestamp())
             else:
-                # Failsafe poster so branch still updates
-                poster_path = os.path.join(POSTER_DIR, f"news_{DATESTR_HM}.png")
-                dummy = {"title":"MARKETS UPDATE","publisher":"—","published_ts":None,"desc":"No fresh headlines right now. Watch key levels and upcoming catalysts."}
-                render_news_poster(poster_path, "NEWS", dummy)
-                print(f"[warn] no news found; posted fallback: {poster_path}")
+                if not story:
+                    print("[info] No cross-confirmed breaking news in window.")
+                else:
+                    print("[info] Story skipped (already seen or within cooldown).")
+
         except Exception as e:
-            print(f"[warn] poster generation failed: {e}")
+            print(f"[warn] breaking-poster generation failed: {e}")
             traceback.print_exc()
 
 if __name__ == "__main__":
