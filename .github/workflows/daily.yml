@@ -1,8 +1,8 @@
-name: TrendWatchDesk Generate
+name: TrendWatchDesk Generate (Charts)
 
 on:
   schedule:
-    - cron: "10 7 * * 1,3,5"       # Mon/Wed/Fri 07:10 UTC
+    - cron: "10 7 * * 1,3,5"   # Mon/Wed/Fri 07:10 UTC
   workflow_dispatch:
 
 jobs:
@@ -20,48 +20,29 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Show Python & pip
-        run: |
-          python --version
-          pip --version
-
-      - name: Install baseline deps
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install --upgrade yfinance pillow pandas numpy requests pytz urllib3
 
-      - name: Ensure output folder
+      - name: Ensure output
         run: |
-          mkdir -p output/posters
-          echo "Output dir:" && pwd && ls -la output || true
+          mkdir -p output
 
-      - name: Run bot (tee log)
+      - name: Run charts mode
         env:
           PYTHONUNBUFFERED: "1"
-          # --- optional envs you already use ---
-          # TWD_TF: "D"
-          # TWD_BREAKING_ON: "on"
-          # NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+          TWD_MODE: "charts"
         run: |
           set -x
           python -u main.py 2>&1 | tee run.log
 
-      - name: Print run.log to console
+      - name: Print run.log
         if: always()
         run: |
           echo "===== BEGIN run.log ====="
           (test -f run.log && tail -n 400 run.log) || echo "run.log missing"
           echo "===== END run.log ====="
-
-      - name: Debug output folder
-        if: always()
-        run: |
-          echo "== output listing =="
-          ls -la output || true
-          echo "== charts =="
-          find output -maxdepth 1 -type f -name "*.png" -printf "%f\n" 2>/dev/null || true
-          echo "== posters =="
-          find output/posters -maxdepth 1 -type f -name "*.png" -printf "%f\n" 2>/dev/null || true
 
       - name: Require charts
         if: always()
@@ -74,7 +55,6 @@ jobs:
             exit 1
           fi
 
-      # ---- Publish ONLY generated charts to a 'charts' branch (single-commit) ----
       - name: Publish charts to 'charts' branch
         if: success()
         env:
@@ -82,11 +62,8 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -e
-          ls output/*.png >/dev/null 2>&1
-
-          rm -rf publish && mkdir -p publish
+          rm -rf publish && mkdir publish
           cp -r output/*.png publish/ 2>/dev/null || true
-          # If you also want the daily caption on charts branch:
           cp -r output/caption_*.txt publish/ 2>/dev/null || true
 
           cd publish
@@ -100,44 +77,11 @@ jobs:
           git commit -m "Publish charts $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
           git push -f origin charts
 
-      # ---- NEW: Publish ONLY poster PNGs (and optional feed.xml) to a separate 'posters' branch ----
-      - name: Publish posters to 'posters' branch
-        if: success()
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -e
-          # If there are no posters today, just skip this step gracefully
-          if ! ls output/posters/*.png >/dev/null 2>&1; then
-            echo "No posters to publish today. Skipping posters push."
-            exit 0
-          fi
-
-          rm -rf publish_posters && mkdir -p publish_posters
-          cp -r output/posters/*.png publish_posters/
-          # If you enable Atom feed in main.py, copy it too:
-          if [ -f output/feed.xml ]; then
-            cp output/feed.xml publish_posters/
-          fi
-
-          cd publish_posters
-          git init
-          git checkout -b posters
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
-
-          git add -A
-          git commit -m "Publish posters $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
-          git push -f origin posters
-
-      # ---- Keep artifacts for download/debug ----
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-${{ github.run_id }}
+          name: charts-${{ github.run_id }}
           path: |
             run.log
             output/**
