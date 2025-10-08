@@ -35,6 +35,11 @@ TWD_UI_SCALE    = float(os.getenv("TWD_UI_SCALE", "0.90"))   # layout (chart box
 TWD_TEXT_SCALE  = float(os.getenv("TWD_TEXT_SCALE", "0.70")) # text scale
 TWD_TLOGO_SCALE = float(os.getenv("TWD_TLOGO_SCALE","0.55")) # ticker-logo scale
 
+# Caption chatter knobs
+# Master switch and chance denominator (1 in N when no headline)
+TWD_PT_CHATTER_ON   = os.getenv("TWD_PT_CHATTER", "on").lower() in ("on","1","true","yes")
+TWD_PT_CHANCE_DENOM = int(os.getenv("TWD_PT_CHANCE", "8") or 8)
+
 # ================== Pools ==================
 COMPANY_QUERY = {
     "META":"Meta Platforms","AMD":"Advanced Micro Devices","GOOG":"Google Alphabet","GOOGL":"Alphabet",
@@ -44,7 +49,7 @@ COMPANY_QUERY = {
 }
 
 def choose_tickers_somehow():
-    # Deterministic by date for reproducibility (you can swap back your weighted logic)
+    # Deterministic by date for reproducibility (swap back your weighted picker if you like)
     rnd = random.Random(DATESTR)
     pool = list(COMPANY_QUERY.keys())
     k = min(6, len(pool))
@@ -258,7 +263,7 @@ def render_single_post(out_path, ticker, payload):
         except: return None
     def _font(size, bold=False):
         sz = st(size)
-        # Prefer Grift if present; fallback to Roboto
+        # Prefer Grift if present; fallback to Roboto; else default
         grift_b = _try_font("assets/fonts/Grift-Bold.ttf", sz)
         grift_r = _try_font("assets/fonts/Grift-Regular.ttf", sz)
         robo_b  = _try_font("assets/fonts/Roboto-Bold.ttf", sz) or _try_font("Roboto-Bold.ttf", sz)
@@ -314,7 +319,10 @@ def render_single_post(out_path, ticker, payload):
     # ---- data ----
     df2 = df[["Open","High","Low","Close"]].dropna()
     if df2.shape[0] < 2:
-        out = base.convert("RGB"); os.makedirs(os.path.dirname(out_path), exist_ok=True); out.save(out_path, quality=95); return
+        out = base.convert("RGB")
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        out.save(out_path, quality=95)
+        return
 
     ymin = float(np.nanmin(df2["Low"])); ymax = float(np.nanmax(df2["High"]))
     if not np.isfinite(ymin) or not np.isfinite(ymax) or abs(ymax - ymin) < 1e-6:
@@ -356,7 +364,7 @@ def render_single_post(out_path, ticker, payload):
         O, Hh, Ll, C = row
         xx = sx(i)
         draw.line([(xx, sy(Hh)), (xx, sy(Ll))], fill=WICK, width=wick_w)
-        col = GREEN if C >= O else RED
+        col = (22,163,74,255) if C >= O else (239,68,68,255)
         y1 = sy(max(O, C)); y2 = sy(min(O, C))
         if abs(y2 - y1) < 1: y2 = y1 + 1
         draw.rectangle([xx - half, y1, xx + half, y2], fill=col, outline=None)
@@ -392,17 +400,20 @@ def render_single_post(out_path, ticker, payload):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     out.save(out_path, quality=95)
 
-# ================== Captions (natural, emoji-led, bank PT-aware) ==================
-_MS_PAT = re.compile(r"(Morgan Stanley|Barclays|Goldman(?: Sachs)?|Citi|JPMorgan|Bank of America|BofA|Deutsche(?: Bank)?)", re.I)
-_PT_PAT = re.compile(r"\$?\s*(\d{2,4})(?:\s*(?:target|pt))?", re.I)
+# ================== Captions (emoji-led, example-style) ==================
+# Detect common banks in headlines; try to surface a $PT if present
+_BANK_PAT = re.compile(r"(Morgan Stanley|Barclays|Goldman(?: Sachs)?|Citi|JPMorgan|Bank of America|BofA|Deutsche(?: Bank)?)", re.I)
+_PT_PAT   = re.compile(r"\$?\s*(\d{2,4})(?:\s*(?:target|pt))?", re.I)
 
+# Sector emojis
 _SECTOR_EMOJIS = {
     "TECH":    ["🖥️","🔎","🧠","💻","📡"],
     "HEALTH":  ["💊","🧬","⚕️","🩺"],
     "FINANCE": ["💳","🏦","📈","💸"],
-    "SEMIS":   ["🔌","⚡","🔧","📊"],
+    "SEMIS":   ["🔌","⚡","🔧","🧮"],
     "GENERIC": ["📈","🔎","⚡","🚀"],
 }
+
 def _emoji_for(ticker, rnd):
     if ticker in ["AAPL","MSFT","META","GOOG","GOOGL"]:
         pool = _SECTOR_EMOJIS["TECH"]
@@ -418,29 +429,33 @@ def _emoji_for(ticker, rnd):
 
 def caption_line(ticker, headline, payload, seed=None):
     """
-    If headline exists -> weave it (and mention bank PT if present).
-    If no headline -> no filler; chart-only, with a 1/8 chance
-    to inject generic sell-side PT chatter (Morgan Stanley, Barclays, etc.).
+    Output style e.g.:
+      • 🧠 META — Latest: “Meta to deepen AI chip push …”. · breakout pressure building 🚀; momentum looks strong 🔥; could have more room if momentum sticks ✅
     """
     (_, last, chg30, sup_low, sup_high, tf_tag) = payload
     rnd = random.Random((seed or DATESTR) + ticker)
 
     emoji = _emoji_for(ticker, rnd)
+    sep_between = rnd.choice([" · ", " — "])  # small variety like your sample
 
-    # --- News phrase (optional) ---
+    # --- Build news phrase ---
     news_part = ""
     if headline:
         h = headline.strip()
-        if len(h) > 80: h = h[:77] + "…"
+        if len(h) > 90: h = h[:87] + "…"
+
         lead_opts = [
-            "Latest: “{h}”", "Fresh headlines: “{h}”",
-            "In the news: “{h}”", "With {h}", "Headline: “{h}”"
+            "Latest: “{h}”.",
+            "Fresh headlines: “{h}”.",
+            "In the news: “{h}”.",
+            "With {h}.",
+            "Headline: “{h}”.",
         ]
         news_phrase = rnd.choice(lead_opts).format(h=h)
 
         # If a bank is mentioned, try to surface a PT near $xxx
         bank_phrase = ""
-        bank_match = _MS_PAT.search(h)
+        bank_match = _BANK_PAT.search(h)
         if bank_match:
             m = _PT_PAT.search(h)
             if m:
@@ -450,47 +465,111 @@ def caption_line(ticker, headline, payload, seed=None):
                     f"{bank_match.group(1)} PT around ${pt_val} noted 🔎",
                     f"Street chatter: {bank_match.group(1)} eyeing ${pt_val} 📌",
                 ]
-                bank_phrase = " — " + rnd.choice(hooks)
+                bank_phrase = " " + rnd.choice(hooks)
+
         news_part = news_phrase + bank_phrase
+
     else:
-        # Optional variety: 1 in 8 captions mention general sell-side PT chatter
-        if rnd.randint(1, 8) == 1:
-            bank = rnd.choice(["Morgan Stanley","Barclays","Goldman Sachs","Citi","JPMorgan","BofA","Deutsche Bank"])
-            target = rnd.choice([120,150,180,250,300,350,400,500,650,1000])
-            news_part = f"{bank} commentary: PT near ${target} 🎯"
+        # When no headline:
+        # 50/50: either chart-only, or a simple "News flow is light." lead (like your example)
+        if rnd.random() < 0.5:
+            news_part = ""  # chart-only
+        else:
+            news_part = "News flow is light."
+
+        # Optional synthetic PT chatter controlled by env
+        if not news_part and TWD_PT_CHATTER_ON and TWD_PT_CHANCE_DENOM > 0:
+            if rnd.randint(1, TWD_PT_CHANCE_DENOM) == 1:
+                bank = rnd.choice(["Morgan Stanley","Barclays","Goldman Sachs","Citi","JPMorgan","BofA","Deutsche Bank"])
+                target = rnd.choice([120,150,180,250,300,350,400,500,650,1000])
+                news_part = f"{bank} commentary: PT near ${target} 🎯"
 
     # --- Chart cues (natural, non-repetitive) ---
     cues = []
-    if chg30 >= 8:
-        cues.append(rnd.choice(["momentum looks strong 🔥","breakout pressure building 🚀","uptrend intact ✅"]))
-    elif chg30 >= 2:
-        cues.append(rnd.choice(["constructive tone 📈","buyers stepping in 🛒","gradual strength ✅"]))
-    elif chg30 <= -8:
-        cues.append(rnd.choice(["recent pullback showing ⚠️","bearish lean 🐻","sellers pressing 🧱"]))
-    else:
-        cues.append(rnd.choice(["price action is steady","range-bound but coiling","neutral bias—let price confirm 🎯"]))
 
+    if chg30 >= 12:
+        cues.append(rnd.choice([
+            "momentum looks strong 🔥",
+            "breakout pressure building 🚀",
+            "uptrend intact ✅",
+            "could have more room if momentum sticks ✅",
+        ]))
+    elif chg30 >= 4:
+        cues.append(rnd.choice([
+            "constructive tone 📈",
+            "buyers stepping in 🛒",
+            "gradual strength ✅",
+            "watch for follow-through on strength 🔎",
+        ]))
+    elif chg30 <= -10:
+        cues.append(rnd.choice([
+            "recent pullback showing ⚠️",
+            "bearish lean 🐻",
+            "sellers pressing 🧱",
+            "relief bounces possible, trend still mixed ⚖️",
+        ]))
+    else:
+        cues.append(rnd.choice([
+            "price action is steady",
+            "range-bound but coiling",
+            "neutral bias—let price confirm next leg 🎯",
+            "waiting on a clean trigger ⚙️",
+        ]))
+
+    if chg30 >= 4:
+        cues.append(rnd.choice([
+            "testing overhead supply 🧱",
+            "setups lean constructive here 📈",
+        ]))
     if (sup_low is not None) and (sup_high is not None):
-        cues.append(rnd.choice(["buyers defended support 🛡️","support zone in play 📍","watch reactions near support 👀"]))
+        cues.append(rnd.choice([
+            "buyers defended support 🛡️",
+            "support zone in play 📍",
+            "watch reactions near support 👀",
+        ]))
 
     rnd.shuffle(cues)
-    cues = cues[: rnd.choice([2,2,3])]
+    cues = cues[: rnd.choice([2,3])]
     cue_part = "; ".join(cues)
 
-    # Compose
+    # --- Compose
     if news_part:
-        return f"• {emoji} {ticker} — {news_part} · {cue_part}"
-    return f"• {emoji} {ticker} — {cue_part}"
+        return f"• {emoji} {ticker} — {news_part}{sep_between}{cue_part}"
+    else:
+        return f"• {emoji} {ticker} — {cue_part}"
 
-# Keep the old name wired into main()
+# Legacy adapter kept for your main()
 def plain_english_line(ticker, headline, payload, seed=None):
     return caption_line(ticker, headline, payload, seed=seed)
 
-CTA_POOL = [
+# ================== CTA rotation (Mon/Wed/Fri) ==================
+CTA_MONDAY = [
     "Save for later 📌 · Comment your levels 💬 · See charts in carousel ➡️",
-    "Tap save 📌 · Drop your take below 💬 · Full charts in carousel ➡️",
-    "Save this post 📌 · Share your view 💬 · Swipe for charts ➡️",
+    "Tap save 📌 · What’s your take? 💬 · Swipe for charts ➡️",
+    "Bookmark this 📌 · Which ticker next? 💬 · More inside ➡️",
 ]
+CTA_WEDNESDAY = [
+    "Midweek check-in ✅ · Drop your view 💬 · Swipe for setups ➡️",
+    "Save 📌 · Agree or disagree? 💬 · See full charts ➡️",
+    "Add to watchlist 📌 · Share your levels 💬 · Carousel inside ➡️",
+]
+CTA_FRIDAY = [
+    "Wrap the week 🎯 · Comment your plan 💬 · Swipe for charts ➡️",
+    "Bookmark for the weekend 📌 · Your levels below 💬 · More charts ➡️",
+    "Save 📌 · What stood out this week? 💬 · Full set inside ➡️",
+]
+
+def pick_cta_for_today(day_idx: int) -> str:
+    rnd = random.Random(DATESTR + "-cta")
+    if day_idx == 0:  # Monday
+        return rnd.choice(CTA_MONDAY)
+    if day_idx == 2:  # Wednesday
+        return rnd.choice(CTA_WEDNESDAY)
+    if day_idx == 4:  # Friday
+        return rnd.choice(CTA_FRIDAY)
+    # Fallback for other days if manually triggered
+    fallback = CTA_MONDAY + CTA_WEDNESDAY + CTA_FRIDAY
+    return rnd.choice(fallback)
 
 # ================== Main ==================
 def main():
@@ -504,7 +583,8 @@ def main():
         try:
             payload = fetch_one(t)
             if not payload:
-                print(f"[warn] no data for {t}, skipping"); continue
+                print(f"[warn] no data for {t}, skipping")
+                continue
 
             out_path = os.path.join(OUTPUT_DIR, f"twd_{t}_{DATESTR}.png")
             render_single_post(out_path, t, payload)
@@ -524,7 +604,8 @@ def main():
         caption_path = os.path.join(OUTPUT_DIR, f"caption_{DATESTR}.txt")
         now_str = TODAY.strftime("%d %b %Y")
         header = f"Ones to Watch – {now_str}\n\n"
-        footer = f"\n\n{random.choice(CTA_POOL)}\n\nIdeas only — not financial advice"
+        footer_cta = pick_cta_for_today(TODAY.weekday())
+        footer = f"\n\n{footer_cta}\n\nIdeas only — not financial advice"
         with open(caption_path, "w", encoding="utf-8") as f:
             f.write(header)
             f.write("\n\n".join(captions))
