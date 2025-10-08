@@ -1,19 +1,30 @@
-name: TWD Posters (3-hourly)
+name: TWD Breaking Posters (event-driven)
 
 on:
   schedule:
-    - cron: "0 */3 * * *"      # every 3 hours UTC
+    - cron: "*/10 * * * *"   # every 10 minutes UTC
   workflow_dispatch:
 
 jobs:
-  posters:
+  breaking_posters:
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - name: Checkout
+      - name: Checkout default branch
         uses: actions/checkout@v4
+
+      # Restore prior seen state from 'posters' branch (for dedupe & cooldown)
+      - name: Restore state from posters branch
+        run: |
+          git fetch origin posters || true
+          mkdir -p state
+          if git show origin/posters:seen_stories.json > state/seen_stories.json 2>/dev/null; then
+            echo "Restored state/seen_stories.json"
+          else
+            echo "No prior state found."
+          fi
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -29,10 +40,14 @@ jobs:
         run: |
           mkdir -p output/posters
 
-      - name: Run posters mode
+      - name: Run breaking-poster mode
         env:
           PYTHONUNBUFFERED: "1"
           TWD_MODE: "posters"
+          TWD_BREAKING_ON: "on"
+          TWD_BREAKING_RECENCY_MIN: "90"        # look back 90 min for fresh news
+          TWD_BREAKING_MIN_SOURCES: "3"         # require 3+ distinct publishers
+          TWD_BREAKING_MIN_INTERVAL_MIN: "30"   # cooldown to avoid spam
         run: |
           set -x
           python -u main.py 2>&1 | tee run.log
@@ -44,23 +59,21 @@ jobs:
           (test -f run.log && tail -n 400 run.log) || echo "run.log missing"
           echo "===== END run.log ====="
 
-      - name: Publish posters to 'posters' branch
+      - name: Publish posters & state to 'posters' branch
         if: success()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
           set -e
-          rm -rf publish_posters && mkdir -p publish_posters
-
-          # copy poster PNGs if any; add placeholder otherwise to keep branch alive
-          cp -r output/posters/*.png publish_posters/ 2>/dev/null || true
-          if [ -z "$(ls -A publish_posters 2>/dev/null)" ]; then
-            echo "No posters this run, adding placeholder."
-            echo "keep" > publish_posters/.keep
+          rm -rf publish && mkdir -p publish
+          cp -r output/posters/*.png publish/ 2>/dev/null || true
+          cp -r state/seen_stories.json publish/ 2>/dev/null || true
+          if [ -z "$(ls -A publish 2>/dev/null)" ]; then
+            echo "keep" > publish/.keep
           fi
 
-          cd publish_posters
+          cd publish
           git init
           git checkout -b posters
           git config user.name  "github-actions[bot]"
@@ -68,14 +81,15 @@ jobs:
           git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
 
           git add -A
-          git commit -m "Posters $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+          git commit -m "Breaking posters $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
           git push -f origin posters
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: posters-${{ github.run_id }}
+          name: breaking-posters-${{ github.run_id }}
           path: |
             run.log
             output/**
+            state/seen_stories.json
