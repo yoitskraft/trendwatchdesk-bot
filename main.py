@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, random, datetime, traceback, re
+import os, random, datetime, traceback, re, time
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -10,6 +10,9 @@ import requests
 OUTPUT_DIR = os.path.abspath("output")
 TODAY = datetime.date.today()
 DATESTR = TODAY.strftime("%Y%m%d")
+
+# ---- Version banner ----
+TWD_VERSION = "2025-10-08b"
 
 # News (optional)
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "").strip()
@@ -36,7 +39,6 @@ TWD_TEXT_SCALE  = float(os.getenv("TWD_TEXT_SCALE", "0.70")) # text scale
 TWD_TLOGO_SCALE = float(os.getenv("TWD_TLOGO_SCALE","0.55")) # ticker-logo scale
 
 # Caption chatter knobs
-# Master switch and chance denominator (1 in N when no headline)
 TWD_PT_CHATTER_ON   = os.getenv("TWD_PT_CHATTER", "on").lower() in ("on","1","true","yes")
 TWD_PT_CHANCE_DENOM = int(os.getenv("TWD_PT_CHANCE", "8") or 8)
 
@@ -49,44 +51,109 @@ COMPANY_QUERY = {
 }
 
 def choose_tickers_somehow():
-    # Deterministic by date for reproducibility (swap back your weighted picker if you like)
     rnd = random.Random(DATESTR)
     pool = list(COMPANY_QUERY.keys())
     k = min(6, len(pool))
     return rnd.sample(pool, k)
 
-# ================== News ==================
-def news_headline_for(ticker):
+# ================== News helpers ==================
+PREF_PUBLISHERS = {
+    "The Wall Street Journal": 9, "Wall Street Journal": 9, "WSJ": 9,
+    "Financial Times": 9, "FT": 9,
+    "Reuters": 9,
+    "Bloomberg": 8,  # NewsAPI often excludes Bloomberg; yfinance sometimes has it
+    "Yahoo Finance": 8, "Yahoo": 7,
+    "CNBC": 7, "MarketWatch": 7, "Barron's": 7,
+    "The Verge": 5, "TechCrunch": 5, "Seeking Alpha": 5,
+}
+NEWS_KEYWORDS_BOOST = re.compile(r"(upgrade|downgrade|price target|PT|earnings|guidance|beats|misses|surge|plunge|deal|acquisition|chip|GPU|AI)", re.I)
+
+def _best_news_from_items(items, max_age_days=5):
+    """Pick best headline from a list of dicts with keys: title, publisher, published_ts."""
+    if not items:
+        return None
+    now = time.time()
+    scored = []
+    for it in items:
+        t = (it.get("title") or "").strip()
+        if not t:
+            continue
+        pub = (it.get("publisher") or it.get("source") or "").strip()
+        ts  = it.get("published_ts")
+        if ts is None:
+            # accept if unknown (yfinance sometimes misses), but give less weight
+            age_ok = True
+            recency_score = 0
+        else:
+            age_days = max(0.0, (now - float(ts)) / 86400.0)
+            if age_days > max_age_days:
+                continue
+            recency_score = max(0, int(5 - age_days))  # 0..5
+            age_ok = True
+
+        pub_score = PREF_PUBLISHERS.get(pub, 3)
+        kw_score = 3 if NEWS_KEYWORDS_BOOST.search(t) else 0
+        score = pub_score*2 + recency_score + kw_score
+        scored.append((score, pub, t))
+    if not scored:
+        return None
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = scored[0]
+    # Return "title (Publisher)" if we have publisher
+    return f"{top[2]} ({top[1]})" if top[1] else top[2]
+
+def news_fetch_all(ticker):
+    """Aggregate NewsAPI + yfinance; return list of {title,publisher,published_ts}."""
+    out = []
     name = COMPANY_QUERY.get(ticker, ticker)
-    # Try NewsAPI
+
+    # yfinance
+    try:
+        items = getattr(yf.Ticker(ticker), "news", []) or []
+        for it in items:
+            title = it.get("title") or ""
+            pub = it.get("publisher") or ""
+            ts  = it.get("providerPublishTime")  # epoch seconds
+            out.append({"title": title, "publisher": pub, "published_ts": ts})
+    except Exception:
+        pass
+
+    # NewsAPI (if available)
     if NEWSAPI_KEY:
         try:
             r = SESS.get(
                 "https://newsapi.org/v2/everything",
-                params={"q": f'"{name}" OR {ticker}', "language":"en", "sortBy":"publishedAt", "pageSize":1},
-                headers={"X-Api-Key": NEWSAPI_KEY}, timeout=8
+                params={
+                    "q": f'"{name}" OR {ticker}',
+                    "language": "en",
+                    "sortBy": "publishedAt",
+                    "pageSize": 10,
+                    # Note: NewsAPI domain filter can be unreliable for premium pubs
+                },
+                headers={"X-Api-Key": NEWSAPI_KEY},
+                timeout=10
             )
             if r.ok:
                 d = r.json()
-                if d.get("articles"):
-                    a = d["articles"][0]
+                for a in d.get("articles", []):
                     title = a.get("title") or ""
-                    src = a.get("source", {}).get("name","")
-                    if title:
-                        return f"{title} ({src})" if src else title
+                    src = a.get("source", {}).get("name", "")
+                    published_at = a.get("publishedAt")  # ISO8601
+                    # Convert to epoch seconds if possible
+                    ts = None
+                    try:
+                        ts = pd.to_datetime(published_at).timestamp() if published_at else None
+                    except Exception:
+                        ts = None
+                    out.append({"title": title, "publisher": src, "published_ts": ts})
         except Exception:
             pass
-    # yfinance fallback
-    try:
-        items = getattr(yf.Ticker(ticker), "news", []) or []
-        if items:
-            t = items[0].get("title") or ""
-            p = items[0].get("publisher") or ""
-            if t:
-                return f"{t} ({p})" if p else t
-    except Exception:
-        pass
-    return None
+
+    return out
+
+def news_headline_for(ticker):
+    items = news_fetch_all(ticker)
+    return _best_news_from_items(items, max_age_days=5)
 
 # ================== Data helpers ==================
 def _find_col(df: pd.DataFrame, name: str):
@@ -100,7 +167,6 @@ def _find_col(df: pd.DataFrame, name: str):
             sub = df.xs(name, axis=1, level=-1)
             ser = sub.iloc[:, 0] if isinstance(sub, pd.DataFrame) else sub
             return pd.to_numeric(ser, errors="coerce")
-    # simple normalization pass
     try:
         norm = {str(c).lower().replace(" ",""): c for c in df.columns}
         key = name.lower().replace(" ","")
@@ -135,28 +201,21 @@ def atr(df: pd.DataFrame, n=14):
     return tr.rolling(n, min_periods=1).mean()
 
 def swing_points(df: pd.DataFrame, w=3):
-    """Return swing highs/lows as [(i, price), ...]"""
     highs, lows = [], []
     h, l = df["High"], df["Low"]
     for i in range(w, len(df)-w):
-        left_h = h.iloc[i-w:i].max(); right_h = h.iloc[i+1:i+1+w].max()
-        left_l = l.iloc[i-w:i].min(); right_l = l.iloc[i+1:i+1+w].min()
-        if h.iloc[i] >= left_h and h.iloc[i] >= right_h: highs.append((i, float(h.iloc[i])))
-        if l.iloc[i] <= left_l and l.iloc[i] <= right_l: lows.append((i, float(l.iloc[i])))
+        if h.iloc[i] >= h.iloc[i-w:i].max() and h.iloc[i] >= h.iloc[i+1:i+1+w].max():
+            highs.append((i, float(h.iloc[i])))
+        if l.iloc[i] <= l.iloc[i-w:i].min() and l.iloc[i] <= l.iloc[i+1:i+1+w].min():
+            lows.append((i, float(l.iloc[i])))
     return highs, lows
 
 def pick_support_level_from_4h(df4h, trend_bullish, w, pct_tol, atr_len):
-    """
-    If bullish: support = previous swing HIGH below current price (closest).
-    If bearish: support = last swing LOW (most recent).
-    Returns (sup_low, sup_high) using band width = max(ATR, pct_tol*price).
-    """
     if df4h is None or df4h.empty: return (None, None)
     highs, lows = swing_points(df4h, w)
     last_px = float(df4h["Close"].iloc[-1])
     atrv = float(atr(df4h, atr_len).iloc[-1]) if len(df4h) > 1 else 0.0
     tol_abs = max(atrv, last_px * pct_tol)
-
     if trend_bullish:
         candidates = [(i, v) for (i, v) in highs if v <= last_px]
         if not candidates: return (None, None)
@@ -164,14 +223,13 @@ def pick_support_level_from_4h(df4h, trend_bullish, w, pct_tol, atr_len):
         level = float(v_sel)
     else:
         if not lows: return (None, None)
-        i_sel, v_sel = max(lows, key=lambda t: t[0])  # most recent low
+        i_sel, v_sel = max(lows, key=lambda t: t[0])
         level = float(v_sel)
-
     return (level - tol_abs, level + tol_abs)
 
 # ================== Fetcher ==================
 def fetch_one(ticker):
-    """Build payload: (df_render, last, chg30, sup_low, sup_high, tf_tag)"""
+    """Return payload: (df_render, last, chg30, sup_low, sup_high, tf_tag, chg1d)"""
     tf = (os.getenv("TWD_TF", DEFAULT_TF) or DEFAULT_TF).upper().strip()
 
     # Daily 1y
@@ -189,11 +247,11 @@ def fetch_one(ticker):
     if close_d.shape[0] < 2: return None
 
     last = float(close_d.iloc[-1])
-    if close_d.shape[0] > 30:
-        base_val = float(close_d.iloc[-31])  # ~30 sessions ago
-    else:
-        base_val = float(close_d.iloc[0])
+    base_val = float(close_d.iloc[-31]) if close_d.shape[0] > 30 else float(close_d.iloc[0])
     chg30 = 100.0 * (last - base_val) / base_val if base_val != 0 else 0.0
+
+    prev = float(close_d.iloc[-2])
+    chg1d = 100.0 * (last - prev) / prev if prev != 0 else 0.0
 
     # Build 4H from 60m for support
     try:
@@ -230,11 +288,11 @@ def fetch_one(ticker):
         tf_tag = "D"
     if df_render is None or df_render.empty: return None
 
-    return (df_render, last, float(chg30), sup_low, sup_high, tf_tag)
+    return (df_render, last, float(chg30), sup_low, sup_high, tf_tag, float(chg1d))
 
 # ================== Renderer ==================
 def render_single_post(out_path, ticker, payload):
-    (df, last, chg30, sup_low, sup_high, tf_tag) = payload
+    (df, last, chg30, sup_low, sup_high, tf_tag, chg1d) = payload  # chg1d unused in render
 
     # ---- scales ----
     def sp(x: float) -> int: return int(round(x * TWD_UI_SCALE))
@@ -263,7 +321,6 @@ def render_single_post(out_path, ticker, payload):
         except: return None
     def _font(size, bold=False):
         sz = st(size)
-        # Prefer Grift if present; fallback to Roboto; else default
         grift_b = _try_font("assets/fonts/Grift-Bold.ttf", sz)
         grift_r = _try_font("assets/fonts/Grift-Regular.ttf", sz)
         robo_b  = _try_font("assets/fonts/Roboto-Bold.ttf", sz) or _try_font("Roboto-Bold.ttf", sz)
@@ -287,15 +344,13 @@ def render_single_post(out_path, ticker, payload):
         H - outer_bot - footer_h
     )
 
-    # ---- header (equal spacing) ----
+    # ---- header ----
     title_x, title_y = outer_lr, outer_top
     GAP = st(16)
-
     def draw_line(x, y, text, font, fill):
         draw.text((x, y), text, fill=fill, font=font)
         bbox = draw.textbbox((x, y), text, font=font)
         return y + (bbox[3] - bbox[1]) + GAP
-
     y_cur = draw_line(title_x, title_y, ticker, f_ticker, TEXT_DK)
     y_cur = draw_line(title_x, y_cur, f"{last:,.2f} USD", f_price, TEXT_MD)
     delta_col = GREEN if chg30 >= 0 else RED
@@ -319,10 +374,7 @@ def render_single_post(out_path, ticker, payload):
     # ---- data ----
     df2 = df[["Open","High","Low","Close"]].dropna()
     if df2.shape[0] < 2:
-        out = base.convert("RGB")
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        out.save(out_path, quality=95)
-        return
+        out = base.convert("RGB"); os.makedirs(os.path.dirname(out_path), exist_ok=True); out.save(out_path, quality=95); return
 
     ymin = float(np.nanmin(df2["Low"])); ymax = float(np.nanmax(df2["High"]))
     if not np.isfinite(ymin) or not np.isfinite(ymax) or abs(ymax - ymin) < 1e-6:
@@ -332,7 +384,7 @@ def render_single_post(out_path, ticker, payload):
     def sx(i): return cx1 + (i / max(1, len(df2)-1)) * (cx2 - cx1)
     def sy(v): return cy2 - ((float(v) - ymin) / (ymax - ymin)) * (cy2 - cy1)
 
-    # ---- grid (light) ----
+    # ---- grid ----
     grid = Image.new("RGBA", (W, H), (0,0,0,0)); g = ImageDraw.Draw(grid)
     for i in range(1, 7):
         y = cy1 + i * (cy2 - cy1) / 7.0
@@ -345,7 +397,7 @@ def render_single_post(out_path, ticker, payload):
         g.line([(x, cy1), (x, cy2)], fill=GRID_MIN, width=sp(1))
     base = Image.alpha_composite(base, grid); draw = ImageDraw.Draw(base)
 
-    # ---- support zone (one blue box, no label) ----
+    # ---- support zone (one blue box) ----
     if sup_low is not None and sup_high is not None and np.isfinite(sup_low) and np.isfinite(sup_high):
         sup_y1, sup_y2 = sy(sup_high), sy(sup_low)
         sup_rect = [cx1, min(sup_y1, sup_y2), cx2, max(sup_y1, sup_y2)]
@@ -354,12 +406,11 @@ def render_single_post(out_path, ticker, payload):
         base = Image.alpha_composite(base, sup_layer)
         draw = ImageDraw.Draw(base)
 
-    # ---- candles (slim, tidy) ----
+    # ---- candles ----
     n = len(df2)
     body_px = max(1, int(((cx2 - cx1) / max(260, n * 1.05)) * TWD_UI_SCALE))
     half = max(1, body_px // 2)
     wick_w = max(1, sp(1))
-
     for i, row in enumerate(df2.itertuples(index=False)):
         O, Hh, Ll, C = row
         xx = sx(i)
@@ -382,7 +433,7 @@ def render_single_post(out_path, ticker, payload):
     draw.text((foot_x, foot_y), "Support zone highlighted", fill=TEXT_LT, font=f_sub)
     draw.text((foot_x, foot_y + st(24)), "Not financial advice", fill=(160,160,160,255), font=f_sub)
 
-    # ---- brand logo (bottom-right, scalable, keeps aspect ratio) ----
+    # ---- brand logo ----
     if BRAND_LOGO_PATH and os.path.exists(BRAND_LOGO_PATH):
         try:
             blogo = Image.open(BRAND_LOGO_PATH).convert("RGBA")
@@ -400,12 +451,10 @@ def render_single_post(out_path, ticker, payload):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     out.save(out_path, quality=95)
 
-# ================== Captions (emoji-led, example-style) ==================
-# Detect common banks in headlines; try to surface a $PT if present
+# ================== Captions (emoji-led, news-aware, big-move aware) ==================
 _BANK_PAT = re.compile(r"(Morgan Stanley|Barclays|Goldman(?: Sachs)?|Citi|JPMorgan|Bank of America|BofA|Deutsche(?: Bank)?)", re.I)
 _PT_PAT   = re.compile(r"\$?\s*(\d{2,4})(?:\s*(?:target|pt))?", re.I)
 
-# Sector emojis
 _SECTOR_EMOJIS = {
     "TECH":    ["🖥️","🔎","🧠","💻","📡"],
     "HEALTH":  ["💊","🧬","⚕️","🩺"],
@@ -413,7 +462,6 @@ _SECTOR_EMOJIS = {
     "SEMIS":   ["🔌","⚡","🔧","🧮"],
     "GENERIC": ["📈","🔎","⚡","🚀"],
 }
-
 def _emoji_for(ticker, rnd):
     if ticker in ["AAPL","MSFT","META","GOOG","GOOGL"]:
         pool = _SECTOR_EMOJIS["TECH"]
@@ -429,31 +477,27 @@ def _emoji_for(ticker, rnd):
 
 def caption_line(ticker, headline, payload, seed=None):
     """
-    Output style e.g.:
-      • 🧠 META — Latest: “Meta to deepen AI chip push …”. · breakout pressure building 🚀; momentum looks strong 🔥; could have more room if momentum sticks ✅
+    Emoji → TICKER → news phrase (if any) OR big-move phrase → cues (2–3)
+    - Never says "News flow is light." if |chg1d| >= 5%
+    - Prioritizes reputable/very recent headlines
     """
-    (_, last, chg30, sup_low, sup_high, tf_tag) = payload
+    (_, last, chg30, sup_low, sup_high, tf_tag, chg1d) = payload
     rnd = random.Random((seed or DATESTR) + ticker)
 
     emoji = _emoji_for(ticker, rnd)
-    sep_between = rnd.choice([" · ", " — "])  # small variety like your sample
+    sep_between = rnd.choice([" · ", " — "])
 
-    # --- Build news phrase ---
+    # --- Build news/big-move lead ---
     news_part = ""
     if headline:
         h = headline.strip()
         if len(h) > 90: h = h[:87] + "…"
-
         lead_opts = [
-            "Latest: “{h}”.",
-            "Fresh headlines: “{h}”.",
-            "In the news: “{h}”.",
-            "With {h}.",
-            "Headline: “{h}”.",
+            "Latest: “{h}”.", "Fresh headlines: “{h}”.",
+            "In the news: “{h}”.", "With {h}.", "Headline: “{h}”.",
         ]
         news_phrase = rnd.choice(lead_opts).format(h=h)
 
-        # If a bank is mentioned, try to surface a PT near $xxx
         bank_phrase = ""
         bank_match = _BANK_PAT.search(h)
         if bank_match:
@@ -465,80 +509,64 @@ def caption_line(ticker, headline, payload, seed=None):
                     f"{bank_match.group(1)} PT around ${pt_val} noted 🔎",
                     f"Street chatter: {bank_match.group(1)} eyeing ${pt_val} 📌",
                 ]
+                    # leading space for readability
                 bank_phrase = " " + rnd.choice(hooks)
-
         news_part = news_phrase + bank_phrase
 
     else:
-        # When no headline:
-        # 50/50: either chart-only, or a simple "News flow is light." lead (like your example)
-        if rnd.random() < 0.5:
-            news_part = ""  # chart-only
+        big_move = abs(chg1d) >= 5.0
+        if big_move:
+            dir_word = "Up" if chg1d > 0 else "Down"
+            news_part = f"{dir_word} ~{abs(chg1d):.0f}% today."
         else:
-            news_part = "News flow is light."
+            # 50/50: chart-only or a simple low-news lead
+            if rnd.random() < 0.5:
+                news_part = ""
+            else:
+                news_part = "News flow is light."
+            if not news_part and TWD_PT_CHATTER_ON and TWD_PT_CHANCE_DENOM > 0:
+                if rnd.randint(1, TWD_PT_CHANCE_DENOM) == 1:
+                    bank = rnd.choice(["Morgan Stanley","Barclays","Goldman Sachs","Citi","JPMorgan","BofA","Deutsche Bank"])
+                    target = rnd.choice([120,150,180,250,300,350,400,500,650,1000])
+                    news_part = f"{bank} commentary: PT near ${target} 🎯"
 
-        # Optional synthetic PT chatter controlled by env
-        if not news_part and TWD_PT_CHATTER_ON and TWD_PT_CHANCE_DENOM > 0:
-            if rnd.randint(1, TWD_PT_CHANCE_DENOM) == 1:
-                bank = rnd.choice(["Morgan Stanley","Barclays","Goldman Sachs","Citi","JPMorgan","BofA","Deutsche Bank"])
-                target = rnd.choice([120,150,180,250,300,350,400,500,650,1000])
-                news_part = f"{bank} commentary: PT near ${target} 🎯"
-
-    # --- Chart cues (natural, non-repetitive) ---
+    # --- Chart cues ---
     cues = []
-
     if chg30 >= 12:
         cues.append(rnd.choice([
-            "momentum looks strong 🔥",
-            "breakout pressure building 🚀",
-            "uptrend intact ✅",
-            "could have more room if momentum sticks ✅",
+            "momentum looks strong 🔥","breakout pressure building 🚀",
+            "uptrend intact ✅","could have more room if momentum sticks ✅",
         ]))
     elif chg30 >= 4:
         cues.append(rnd.choice([
-            "constructive tone 📈",
-            "buyers stepping in 🛒",
-            "gradual strength ✅",
-            "watch for follow-through on strength 🔎",
+            "constructive tone 📈","buyers stepping in 🛒",
+            "gradual strength ✅","watch for follow-through on strength 🔎",
         ]))
     elif chg30 <= -10:
         cues.append(rnd.choice([
-            "recent pullback showing ⚠️",
-            "bearish lean 🐻",
-            "sellers pressing 🧱",
-            "relief bounces possible, trend still mixed ⚖️",
+            "recent pullback showing ⚠️","bearish lean 🐻",
+            "sellers pressing 🧱","relief bounces possible, trend still mixed ⚖️",
         ]))
     else:
         cues.append(rnd.choice([
-            "price action is steady",
-            "range-bound but coiling",
-            "neutral bias—let price confirm next leg 🎯",
-            "waiting on a clean trigger ⚙️",
+            "price action is steady","range-bound but coiling",
+            "neutral bias—let price confirm next leg 🎯","waiting on a clean trigger ⚙️",
         ]))
 
     if chg30 >= 4:
-        cues.append(rnd.choice([
-            "testing overhead supply 🧱",
-            "setups lean constructive here 📈",
-        ]))
+        cues.append(rnd.choice(["testing overhead supply 🧱","setups lean constructive here 📈"]))
     if (sup_low is not None) and (sup_high is not None):
-        cues.append(rnd.choice([
-            "buyers defended support 🛡️",
-            "support zone in play 📍",
-            "watch reactions near support 👀",
-        ]))
+        cues.append(rnd.choice(["buyers defended support 🛡️","support zone in play 📍","watch reactions near support 👀"]))
 
     rnd.shuffle(cues)
     cues = cues[: rnd.choice([2,3])]
     cue_part = "; ".join(cues)
 
-    # --- Compose
     if news_part:
         return f"• {emoji} {ticker} — {news_part}{sep_between}{cue_part}"
     else:
         return f"• {emoji} {ticker} — {cue_part}"
 
-# Legacy adapter kept for your main()
 def plain_english_line(ticker, headline, payload, seed=None):
     return caption_line(ticker, headline, payload, seed=seed)
 
@@ -558,21 +586,16 @@ CTA_FRIDAY = [
     "Bookmark for the weekend 📌 · Your levels below 💬 · More charts ➡️",
     "Save 📌 · What stood out this week? 💬 · Full set inside ➡️",
 ]
-
 def pick_cta_for_today(day_idx: int) -> str:
     rnd = random.Random(DATESTR + "-cta")
-    if day_idx == 0:  # Monday
-        return rnd.choice(CTA_MONDAY)
-    if day_idx == 2:  # Wednesday
-        return rnd.choice(CTA_WEDNESDAY)
-    if day_idx == 4:  # Friday
-        return rnd.choice(CTA_FRIDAY)
-    # Fallback for other days if manually triggered
-    fallback = CTA_MONDAY + CTA_WEDNESDAY + CTA_FRIDAY
-    return rnd.choice(fallback)
+    if day_idx == 0: return rnd.choice(CTA_MONDAY)
+    if day_idx == 2: return rnd.choice(CTA_WEDNESDAY)
+    if day_idx == 4: return rnd.choice(CTA_FRIDAY)
+    return rnd.choice(CTA_MONDAY + CTA_WEDNESDAY + CTA_FRIDAY)
 
 # ================== Main ==================
 def main():
+    print(f"[info] TrendWatchDesk {TWD_VERSION} starting…")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     tickers = choose_tickers_somehow()
     print("[info] selected tickers:", tickers)
@@ -590,7 +613,7 @@ def main():
             render_single_post(out_path, t, payload)
             saved += 1
 
-            headline = news_headline_for(t)
+            headline = news_headline_for(t)  # now recent + reputable-aware
             line = plain_english_line(t, headline, payload, seed=DATESTR)
             captions.append(line)
 
