@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 
 """
-TrendWatchDesk - main.py (stable, IG-ready)
-Default: daily chart run (for daily.yml)
+TrendWatchDesk - main.py (stable, IG-ready, CI back-compat)
+Default: daily chart run
 Optional: --posters to generate news-driven posters
+Back-compat: --ci (charts), --ci-posters (posters)
 
 Charts
 - 1080x720, 1y weekly candlesticks
@@ -16,14 +17,13 @@ Charts
 Daily Captions
 - Casual tone, sector emojis, ONLY 30d percent (no price)
 - High variety, not repetitive
-- ONE contextual CTA at the very end (summary line, mood + sectors)
+- ONE contextual summary CTA at the very end (mood + sectors)
 
 Posters (optional, isolated for stability)
 - 1080x1080, blue gradient + beams
 - Headline (Grift-Bold) + subtext (Grift-Regular)
 - Company logo (color) top-right, TWD (white) bottom-right
 - Caption tied to headline intent + recent price action (30d/5d)
-
 """
 
 import os, re, math, random, hashlib, datetime, traceback
@@ -227,7 +227,6 @@ def blue_gradient_bg(W: int, H: int) -> Image.Image:
     return Image.alpha_composite(bg, beams)
 
 def draw_support_zone(d: ImageDraw.ImageDraw, x1,y1,x2,y2, opacity=34, outline=88):
-    # translucent rectangle (zone)
     d.rectangle([x1,y1,x2,y2], fill=(240,248,255,opacity), outline=(240,248,255,outline), width=2)
 
 # -----------------------
@@ -385,21 +384,16 @@ def chart_caption_line_for(ticker: str, daily_close: pd.Series, weekly_close: pd
 
 def build_summary_cta(mood_counts: Dict[str,int], tickers: List[str]) -> str:
     """One-line summary CTA at the end: sector overview + a context question."""
-    # Dominant mood (fallback to 'trend')
     mood = "trend"
     if mood_counts:
         mood = max(mood_counts.items(), key=lambda kv: kv[1])[0] or "trend"
 
-    # Which sectors showed up today?
-    sectors = []
-    seen = set()
+    sectors, seen = [], set()
     for t in tickers:
         s = SECTOR_OF.get(t)
         if s and s not in seen:
-            seen.add(s)
-            sectors.append(s)
+            seen.add(s); sectors.append(s)
 
-    # Short sector phrase (1–2 sectors)
     if not sectors:
         sector_phrase = "the tape"
     elif len(sectors) == 1:
@@ -429,9 +423,7 @@ def build_summary_cta(mood_counts: Dict[str,int], tickers: List[str]) -> str:
             f"{sector_phrase} steady today — what’s your plan into next week?",
         ],
     }
-
-    pool = prompts.get(mood, prompts["trend"])
-    return random.choice(pool)
+    return random.choice(prompts.get(mood, prompts["trend"]))
 
 # -----------------------
 # Posters (opt-in)
@@ -601,7 +593,6 @@ def run_daily_charts():
     print("==============================\n")
 
 def run_posters():
-    # broad watchlist
     wl = sorted({t for arr in POOLS.values() for t in arr})
     items = []
     sess = requests.Session()
@@ -618,7 +609,6 @@ def run_posters():
         except Exception as e:
             log(f"[warn] yahoo fetch failed for {t}: {e}")
 
-    # de-dupe by normalized title
     seen, uniq = set(), []
     for it in items:
         k = re.sub(r"[^a-z0-9 ]+","", it["title"].lower()).strip()
@@ -634,7 +624,6 @@ def run_posters():
     made = 0
     for it in picks:
         t = it["ticker"]; title = it["title"].strip()
-        # subtext for poster image body (not the caption file)
         sub = (f"{t} stays in focus as the story evolves across the sector. "
                "Traders are watching guidance tone, margins, and follow-through.")
         out = generate_poster_image(t, title, sub)
@@ -651,17 +640,29 @@ def run_posters():
     print("==============================\n")
 
 # -----------------------
-# CLI
+# CLI (with CI back-compat)
 # -----------------------
 def main():
     import argparse
     ap = argparse.ArgumentParser()
+    # New flags
     ap.add_argument("--posters", action="store_true", help="Generate news-driven posters (optional)")
     ap.add_argument("--once", type=str, help="Generate a single ticker chart")
+    # Legacy flags for CI back-compat
+    ap.add_argument("--ci", action="store_true", help=argparse.SUPPRESS)          # legacy: run daily charts
+    ap.add_argument("--ci-posters", action="store_true", help=argparse.SUPPRESS)  # legacy: run posters
     args = ap.parse_args()
 
     try:
-        if args.posters:
+        # Legacy mappings first
+        if args.ci:
+            log("[info] legacy --ci → daily charts")
+            run_daily_charts()
+        elif args.ci_posters:
+            log("[info] legacy --ci-posters → posters")
+            run_posters()
+        # New flags
+        elif args.posters:
             log("[info] running posters")
             run_posters()
         elif args.once:
