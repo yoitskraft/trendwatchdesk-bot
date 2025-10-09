@@ -20,29 +20,51 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Show Python & pip
+        run: |
+          python --version
+          pip --version
+
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install --upgrade yfinance pillow pandas numpy requests pytz urllib3
 
-      - name: Ensure output
+      - name: Ensure output folder
         run: |
           mkdir -p output
+          echo "Output dir:" && pwd && ls -la output || true
 
-      - name: Run charts mode
+      - name: Run charts mode (debug on)
         env:
           PYTHONUNBUFFERED: "1"
           TWD_MODE: "charts"
+          TWD_TF: "W"         # D for daily, W for weekly visuals (switch as you like)
+          TWD_DEBUG: "1"      # verbose logs during stabilization
+          TWD_UI_SCALE: "0.90"
+          TWD_TEXT_SCALE: "0.78"
+          TWD_TLOGO_SCALE: "0.55"
+          BRAND_LOGO_PATH: "assets/brand_logo.png"
         run: |
           set -x
           python -u main.py 2>&1 | tee run.log
 
-      - name: Print run.log
+      - name: Print run.log to console
         if: always()
         run: |
           echo "===== BEGIN run.log ====="
-          (test -f run.log && tail -n 400 run.log) || echo "run.log missing"
+          (test -f run.log && cat run.log) || echo "run.log missing"
           echo "===== END run.log ====="
+
+      - name: Debug output folder
+        if: always()
+        run: |
+          echo "== output listing =="
+          ls -la output || true
+          echo "== any pngs =="
+          find output -maxdepth 1 -type f -name "*.png" -printf "%f\n" 2>/dev/null || true
+          echo "== any caption =="
+          ls -la output/caption_* 2>/dev/null || true
 
       - name: Require charts
         if: always()
@@ -55,16 +77,19 @@ jobs:
             exit 1
           fi
 
-      - name: Publish charts to 'charts' branch
+      # ---- Publish ONLY the generated PNGs + caption to a separate 'charts' branch ----
+      - name: Publish to 'charts' branch (single-commit)
         if: success()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
           set -e
+          test -d output
+          ls output/*.png >/dev/null 2>&1
+
           rm -rf publish && mkdir publish
-          cp -r output/*.png publish/ 2>/dev/null || true
-          cp -r output/caption_*.txt publish/ 2>/dev/null || true
+          cp -r output/* publish/
 
           cd publish
           git init
@@ -81,7 +106,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: charts-${{ github.run_id }}
+          name: charts-run-${{ github.run_id }}
           path: |
             run.log
             output/**
