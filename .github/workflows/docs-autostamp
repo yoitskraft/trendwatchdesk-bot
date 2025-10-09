@@ -1,0 +1,50 @@
+name: Docs Auto-Stamp (main)
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  autostamp:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update "Last updated" date in docs
+        run: |
+          set -e
+          DATE_STR="$(date -u +'%Y-%m-%d')"
+
+          # Only modify if files exist; ignore if missing
+          for FILE in OPERATIONS_GUIDE.md README.md; do
+            if [ -f "$FILE" ]; then
+              # Replace lines like: _Last updated: 2025-10-09_
+              if grep -qE '^_Last updated:' "$FILE"; then
+                sed -i.bak -E "s/^_Last updated:.*$/_Last updated: ${DATE_STR}_/" "$FILE"
+              else
+                # If not present, insert below first heading
+                awk -v d="$DATE_STR" '
+                  NR==1 && $0 ~ /^# / {
+                    print $0
+                    print ""
+                    print "_Last updated: " d "_"
+                    next
+                  }1
+                ' "$FILE" > "$FILE.tmp" && mv "$FILE.tmp" "$FILE"
+              fi
+              rm -f "$FILE.bak"
+            fi
+          done
+
+          # Commit only if changes
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add OPERATIONS_GUIDE.md README.md 2>/dev/null || true
+            git commit -m "docs: auto-stamp last updated date"
+            git push
+          else
+            echo "No doc changes needed."
+          fi
