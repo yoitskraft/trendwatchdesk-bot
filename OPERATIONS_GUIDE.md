@@ -1,183 +1,201 @@
-# TrendWatchDesk — Operations Guide
+# TrendWatchDesk – Operations Guide (Single Source of Truth)
 
-This document serves as the **single source of truth** for how the TrendWatchDesk system runs, maintained inside the repository root as `OPERATIONS_GUIDE.md`.
+_Last updated: 2025-10-09 (UTC)_
 
----
-
-## 1. Repository Structure
-
-```
-trendwatchdesk-bot/
-├── main.py                 # Core script: ticker selection, chart generation, caption generation, posters
-├── assets/
-│   ├── logos/              # Ticker logos (PNG, ~180px)
-│   └── brand_logo.png      # TrendWatchDesk brand logo
-├── output/                 # Auto-generated IG chart PNGs + captions
-├── posters/                # Auto-generated poster-style news posts
-└── .github/
-    └── workflows/
-        ├── daily.yml       # Mon/Wed/Fri chart runs
-        └── posters.yml     # Breaking news poster generation
-```
+This guide defines the **canonical behavior** of the TrendWatchDesk automation system.  
+It is the **source of truth** for charts, posters, captions, workflows, branches, and assets.  
+All scripts and workflows must conform to this specification.  
+The **docs-guard** workflow enforces compliance; the **docs-autostamp** workflow keeps this date updated automatically.
 
 ---
 
-## 2. Workflows
+## 1. Repository Branches
 
-### `daily.yml` — Chart Generation
+- **`main`**  
+  Source of truth for all code, workflows, and documentation. PRs must target this branch.  
 
-- Runs **Mon/Wed/Fri** via cron.  
-- Produces **6 square 1080×1080 IG-ready charts**.  
-- Steps:
-  1. Checkout repo
-  2. Install deps (`yfinance`, `pandas`, `matplotlib`, `Pillow`, `pytz`, `requests`)
-  3. Run `main.py`
-  4. Save `output/*.png` and `output/caption_YYYYMMDD.txt` as artifacts
-  5. Push all artifacts to `charts` branch (force, single commit per run)
+- **`charts`**  
+  Auto-published artifacts branch. Contains only the generated outputs (`output/*`) from CI runs.  
+  - Rewritten each run (force-pushed, single commit).  
+  - Used for external access, IG-ready visuals, and archiving runs.
 
-### `posters.yml` — Poster Generation
-
-- Runs **every 3h** AND manually triggered.  
-- Produces **poster-style IG post** if breaking news detected.  
-- News verification: headline must be visible on **≥3 credible outlets** (WSJ, FT, Bloomberg, Yahoo Finance, CNBC).  
-- Outputs:
-  - PNG saved to `/posters`
-  - File committed to **`posters` branch** (single commit)
-  - Artifact upload for immediate download
+- **`docs`** (optional, only if configured)  
+  For static site/docs builds. Syncs automatically from `OPERATIONS_GUIDE.md` and `README.md`.  
 
 ---
 
-## 3. Chart Posts
+## 2. Directory Structure
 
-- **Data source**: Yahoo Finance (via `yfinance`).
-- **Timeframe**: Weekly candles (1y lookback).  
-- **Visuals**:
-  - Clean white background (no card border)
-  - Candlesticks: green up / red down
-  - Support zone: **blue shaded box** nearest to last price  
-    - If uptrend → previous swing high = new support  
-    - If downtrend → last swing low = possible bounce  
-  - Brand logo bottom-right, ticker logo top-right  
-  - Footer: support/resistance + “Not financial advice”
-
----
-
-## 4. Poster-Style News
-
-- Generated once every 3h (cron) or triggered on verified breaking news.  
-- **Layout**:
-  - Background: stock-related image @ 15% opacity (e.g. AMD → chips, META → Zuckerberg, Gold → bars)  
-  - Headline in ALL CAPS  
-  - Subheading = summary line  
-  - Body = 1 engaging paragraph (not bullets)  
-  - Logos: TrendWatchDesk brand bottom-right, ticker logo top-right  
-- Output saved in `/posters` and pushed to `posters` branch.
-
----
-
-## 5. Captions
-
-- Human-like, not repetitive.  
-- Blend **recent news + price action**.  
-- Example style:
-
-```
-🧠 META — META TO DEEPEN AI CHIP PUSH … breakout pressure building 🚀; momentum looks strong 🔥; could have more room if momentum sticks ✅
-
-🖥️ AMD — STRONG GPU DEMAND IN HEADLINES … testing overhead supply 🧱; momentum looks strong 🔥; watch for follow-through 🔎
-```
-
-- CTAs rotate randomly:
-  - 💬 Drop your thoughts below!
-  - 📌 Save this for later
-  - 📊 Which ticker should we cover next?
+.
+├── assets/                 # Static resources
+│   ├── logos/              # Per-ticker logo PNGs (color, transparent)
+│   │   ├── AAPL.png
+│   │   ├── MSFT.png
+│   │   └── …
+│   ├── fonts/              # Grift fonts
+│   │   ├── Grift-Bold.ttf
+│   │   └── Grift-Regular.ttf
+│   └── brand_logo.png      # White TrendWatchDesk logo
+│
+├── output/                 # Auto-generated files (cleaned/recreated per run)
+│   ├── charts/             # Daily candlestick charts
+│   │   ├── AAPL_chart.png
+│   │   └── TSLA_chart.png
+│   ├── posters/            # News-driven posters + captions
+│   │   ├── NVDA_poster_20251009.png
+│   │   ├── NVDA_poster_20251009_caption.txt
+│   │   └── …
+│   ├── caption_20251009.txt # Daily captions for 6 tickers
+│   ├── run.log             # Run log (full stdout/stderr)
+│   └── .gitkeep            # Keeps folder in repo
+│
+├── .github/
+│   └── workflows/
+│       ├── daily.yml        # Main CI workflow (charts + posters)
+│       ├── docs-guard.yml   # Validates this guide is followed
+│       └── docs-autostamp.yml # Updates timestamp in this guide/README
+│
+├── main.py                 # Core generator script
+├── OPERATIONS_GUIDE.md     # (This file, single source of truth)
+└── README.md               # Mirror of guide for quick reference
 
 ---
 
-## 6. Branches
+## 3. Outputs
 
-- **main** → codebase  
-- **charts** → all chart PNGs + captions (force-pushed each run, clean single commit)  
-- **posters** → all poster-style news posts (force-pushed each run, clean single commit)  
-
----
-
-## 7. Automation Strategy
-
-- **dlvr.it** (or similar) pulls directly from `charts` branch (for carousels) and `posters` branch (for news).  
-- Charts = 3× weekly, Posters = every 3h or on breaking news.  
-- IG feed = mix of both, with captions from `output/caption_YYYYMMDD.txt`.
+- **Charts** → `output/charts/{TICKER}_chart.png`  
+- **Posters** → `output/posters/{TICKER}_poster_YYYYMMDD.png`  
+- **Poster captions** → `output/posters/{TICKER}_poster_YYYYMMDD_caption.txt`  
+- **Daily captions** → `output/caption_YYYYMMDD.txt`  
+- **Run log** → `output/run.log`  
+- **Branch publish** → all of `output/*` pushed to `charts` branch.
 
 ---
 
-## 8. Known Good Build (Stable)
+## 4. Charts
 
-- This document reflects the **most stable build to date**:  
-  - Charts render correctly (scaled text/logos, polished layout)  
-  - Captions natural & news-linked  
-  - Posters functional (backgrounds + paragraphs + logos)  
-  - Branch outputs stable for automation
-
----
-
-## 9. Future Enhancements
-
-- Auto stories for breaking news (vertical 1080×1920)  
-- Multi-language captions  
-- AI-assisted summarization tuned for engagement  
+- **Source**: Yahoo Finance (`yfinance`), 1y period, interval `1wk`  
+- **Type**: Candlesticks (green = up, red = down)  
+- **Background**: Blue gradient with subtle beams  
+- **Grid**: Disabled  
+- **Support zone**: Transparent feathered rectangle (not solid)  
+- **Branding**:  
+  - Company logo (**color**) → top-left  
+  - TWD logo (**white**) → bottom-right  
+- **Footer**: White text bottom-left (last price, % change 30d)  
+- **Size**: `1080×720`
 
 ---
 
-**TrendWatchDesk Operations Guide v1.0**  
-_Last updated: 2025-10-09_
+## 5. Posters
 
+- **Purpose**: Convert Yahoo Finance headlines into IG-style posters  
+- **Background**: Blue gradient with beams  
+- **Headline**: Grift-Bold, uppercase, 1–2 lines  
+- **Subtext**: Grift-Regular, 3–4 wrapped lines, tied to sector/price action  
+- **Logos**:  
+  - Company logo (**color**) top-right  
+  - TWD logo (white) bottom-right  
+- **NEWS badge**: top-left  
+- **Size**: `1080×1080`
 
 ---
 
-<!-- TWD_STATUS:BEGIN -->
+## 6. Captions
 
-## Automation Status (auto-generated)
-- **Last run:** 2025-10-09 13:10:33 UTC
-- **Triggered by:** TWD Breaking Posters (event-driven)
-- **Mode:** `posters`   ·  **Timeframe:** `D`
-- **Breaking-posters knobs:** recency=720m, min_sources=1, fallback=on, rss=on
-- **Watchlist (preview):** AAPL, MSFT, NVDA, AMD, TSLA, SPY, QQQ, GLD, AMZN, META, GOOGL
-- **Publish targets:** charts → `charts`, posters → `posters`
+- **Charts**:
+  - Must include sector emojis (🍏 AAPL, 🚗 TSLA, 🤖 NVDA, etc.)  
+  - Phrases rotated: “momentum building”, “buyers defending support”, “range tightening” etc.  
+  - Avoid repeating structure; never always mention price.  
 
-<!-- TWD_STATUS:END -->
+- **Posters**:
+  - Must tie to headline context.  
+  - Include sector, price action, forward guidance.  
+  - End with CTA: “What’s your take? 👇” / “Save this 📌” / “Share 🔄”.
 
+---
 
+## 7. Ticker Pools
 
+Core pools for deterministic selections:
 
+- **AI**: NVDA, MSFT, GOOGL, META, AMZN  
+- **MAG7**: AAPL, MSFT, GOOGL, META, AMZN, NVDA, TSLA  
+- **Semis**: NVDA, AMD, AVGO, TSM, INTC, ASML  
+- **Healthcare**: UNH, JNJ, PFE, MRK, LLY  
+- **Fintech**: MA, V, PYPL, SQ, SOFI  
+- **Quantum**: IONQ, IBM, AMZN  
+- **Robotics**: ISRG, FANUY, IRBT, ABB, ROK  
+- **Wildcards**: NFLX, DIS, BABA, NIO, SHOP, PLTR  
 
+---
 
+## 8. Workflows
 
+### `.github/workflows/daily.yml`
+- Runs Mon/Wed/Fri 07:10 UTC + manual dispatch  
+- Generates **charts** + **posters**  
+- Publishes to `charts` branch  
+- Uploads artifacts (PNGs + captions)
 
+### `.github/workflows/docs-guard.yml`
+- Fails if `main.py` / workflows diverge from this guide  
+- Validates **DOCSPEC block**  
 
+### `.github/workflows/docs-autostamp.yml`
+- Updates “Last updated” line in this file and README when code changes.
 
+---
 
+## 9. Assets
 
+- **Logos**: `assets/logos/{TICKER}.png` (color, ~512px, transparent)  
+- **Fonts**: `assets/fonts/Grift-Bold.ttf`, `assets/fonts/Grift-Regular.ttf`  
+- **Brand logo**: `assets/brand_logo.png` (white, transparent)  
 
+---
 
+## 10. Compliance Block
 
+<!-- DOCSPEC:BEGIN -->
+```json
+{
+  "version": "1.0",
+  "branches": ["main", "charts", "docs"],
+  "outputs": {
+    "charts_dir": "output/charts",
+    "posters_dir": "output/posters",
+    "caption_pattern": "output/caption_YYYYMMDD.txt",
+    "run_log": "output/run.log",
+    "publish_branch": "charts"
+  },
+  "charts": {
+    "size": [1080, 720],
+    "interval": "1wk",
+    "style": {
+      "candles": true,
+      "grid": false,
+      "bg": "blue-gradient",
+      "support_zone": "feathered-rectangle",
+      "ticker_text": false,
+      "logo_company": "color-top-left",
+      "logo_twd": "white-bottom-right",
+      "footer_info": "white-bottom-left"
+    }
+  },
+  "posters": {
+    "size": [1080, 1080],
+    "news_source": "yahoo-finance",
+    "logo_company": "color-top-right",
+    "logo_twd": "white-bottom-right",
+    "headline_font": "Grift-Bold",
+    "subtext_font": "Grift-Regular"
+  },
+  "ci": {
+    "workflow": ".github/workflows/daily.yml",
+    "runs": ["charts", "posters"],
+    "branch_publish": "charts"
+  }
+}
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+<!-- DOCSPEC:END -->
