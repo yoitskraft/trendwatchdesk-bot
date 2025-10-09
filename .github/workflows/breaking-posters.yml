@@ -1,7 +1,7 @@
 name: TWD Breaking Posters (event-driven)
 
 on:
-  # Runs every 10 minutes; adjust to "0 */3 * * *" for every 3 hours
+  # Adjust cadence as you like. For testing, every 10 min; production could be every 30-60 min.
   schedule:
     - cron: "*/10 * * * *"
   workflow_dispatch:
@@ -28,10 +28,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install --upgrade yfinance pillow pandas numpy requests pytz urllib3
 
-      - name: Prepare output/state dirs
+      - name: Prepare output/state dirs (ensure folder exists even if no news)
         run: |
           mkdir -p output/posters
           mkdir -p state
+          echo '{"status":"init","utc":"'$(date -u +%FT%TZ)'"}' > output/posters/status.json
 
       # Restore the last seen headlines / cooldown from posters branch if it exists
       - name: Restore previous poster state
@@ -87,15 +88,18 @@ jobs:
           echo "== state listing =="
           ls -la state || true
 
-      - name: Check if poster generated
+      - name: Count posters
         id: checkposter
         run: |
           COUNT=$(find output/posters -maxdepth 1 -type f -name "news_*.png" 2>/dev/null | wc -l | tr -d ' ')
           echo "posters_count=$COUNT" >> $GITHUB_OUTPUT
           echo "Generated posters: $COUNT"
+          # update status.json with summary so branch always shows activity
+          jq -n --arg utc "$(date -u +%FT%TZ)" --arg count "$COUNT" \
+            '{status:"ok", utc:$utc, posters_count:($count|tonumber)}' > output/posters/status.json || \
+          echo '{"status":"ok","posters_count":0}' > output/posters/status.json
 
-      - name: Publish to 'posters' branch (single-commit)
-        if: steps.checkposter.outputs.posters_count != '0'
+      - name: Publish to 'posters' branch (single-commit, always push heartbeat)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -114,7 +118,7 @@ jobs:
           git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
 
           git add -A
-          git commit -m "Publish poster $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+          git commit -m "Posters heartbeat $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
           git push -f origin posters
 
       - name: Upload artifacts
