@@ -101,9 +101,15 @@ def log(msg: str):
 def _as_float(x):
     """Safely get a Python float from numpy/pandas scalars (no FutureWarnings)."""
     try:
-        return float(x.item())  # numpy scalars / 0-d arrays
+        return float(x.item())
     except AttributeError:
         return float(x)
+
+def _close_series_to_array(close_series: pd.Series) -> np.ndarray:
+    """Force a 1-D float64 ndarray from a Pandas Series (no object/Series leaks)."""
+    if close_series is None or close_series.size == 0:
+        return np.array([], dtype="float64")
+    return pd.to_numeric(close_series, errors="coerce").astype("float64").dropna().to_numpy()
 
 # =========================
 # ---- Fonts / Logos ------
@@ -164,10 +170,8 @@ def swing_levels(series: pd.Series, lookback: int = 14) -> Tuple[Optional[float]
         return (None, None)
     highs = series.rolling(lookback).max()
     lows  = series.rolling(lookback).min()
-
     lo = lows.iloc[-1]
     hi = highs.iloc[-1]
-
     lo = None if pd.isna(lo) else _as_float(lo)
     hi = None if pd.isna(hi) else _as_float(hi)
     return (lo, hi)
@@ -185,17 +189,29 @@ def pct_change(series: pd.Series, days: int = 30) -> float:
         return 0.0
 
 def generate_chart(ticker: str) -> Optional[str]:
-    """Weekly ‘clean’ chart with support zone, logos, and text."""
+    """Weekly ‘clean’ chart with support zone, logos, and text (Pandas-safe)."""
     try:
-        df = yf.download(ticker, period="1y", interval="1wk",
-                         progress=False, auto_adjust=False, threads=False)
+        df = yf.download(
+            ticker, period="1y", interval="1wk",
+            progress=False, auto_adjust=False, threads=False
+        )
         if df.empty:
             log(f"[warn] No data for {ticker}")
             return None
-        close = df["Close"].dropna()
-        last  = _as_float(close.iloc[-1])
-        chg30 = pct_change(close, 30)
-        sup_low, sup_high = swing_levels(close, lookback=10)
+
+        close_series = df["Close"]
+        # Force to 1-D float array
+        close_arr = _close_series_to_array(close_series)
+        if close_arr.size == 0:
+            log(f"[warn] No valid closes for {ticker}")
+            return None
+
+        last  = float(close_arr[-1])
+        # For pct change and swings we can reuse the Series safely now
+        chg30 = pct_change(pd.Series(close_arr), 30)
+
+        # swing levels: pass a Series built from array
+        sup_low, sup_high = swing_levels(pd.Series(close_arr), lookback=10)
 
         # Canvas
         W,H = 1080, 720
@@ -216,16 +232,17 @@ def generate_chart(ticker: str) -> Optional[str]:
                fill=(30,30,30,255), font=f_meta)
 
         # Plot
-        xs = np.linspace(x1, x2, num=len(close))
-        minp, maxp = _as_float(close.min()), _as_float(close.max())
-        prange = max(1e-8, maxp - minp)
-        def y_from_price(p): return y2 - (p - minp) / prange * (y2 - y1)
+        n = close_arr.size
+        xs = np.linspace(x1, x2, num=n)
+        minp = float(np.nanmin(close_arr))
+        maxp = float(np.nanmax(close_arr))
+        prange = max(1e-8, float(maxp - minp))
 
-        pts = []
-        for i in range(len(close)):
-            p_val = _as_float(close.iloc[i])
-            pts.append((int(xs[i]), int(y_from_price(p_val))))
-        for i in range(1, len(pts)):
+        def y_from_price(p: float) -> float:
+            return y2 - (float(p) - minp) / prange * (y2 - y1)
+
+        pts = [(int(xs[i]), int(y_from_price(close_arr[i]))) for i in range(n)]
+        for i in range(1, n):
             d.line([pts[i-1], pts[i]], fill=(0,0,0,255), width=3)
 
         # Subtle grid
@@ -233,17 +250,21 @@ def generate_chart(ticker: str) -> Optional[str]:
             d.line([(x1, gy),(x2, gy)], fill=(0,0,0,30), width=1)
 
         # Support zone (translucent)
-        if sup_low is not None and sup_high is not None:
+        if (sup_low is not None) and (sup_high is not None):
             y_lo = y_from_price(sup_high)
             y_hi = y_from_price(sup_low)
-            band = [x1+2, min(y_lo, y_hi), x2-2, max(y_lo, y_hi)]
-            d.rectangle(band, fill=(40,120,255,48), outline=(40,120,255,160), width=2)
+            top = min(y_lo, y_hi)
+            bot = max(y_lo, y_hi)
+            d.rectangle([x1+2, top, x2-2, bot],
+                        fill=(40,120,255,48), outline=(40,120,255,160), width=2)
 
         # Logos
         lg = load_logo(ticker, 140)
-        if lg: img.alpha_composite(lg, (W - lg.width - 26, 24))
+        if lg is not None:
+            img.alpha_composite(lg, (W - lg.width - 26, 24))
         twd = twd_logo(160)
-        if twd: img.alpha_composite(twd, (W - twd.width - 26, H - twd.height - 24))
+        if twd is not None:
+            img.alpha_composite(twd, (W - twd.width - 26, H - twd.height - 24))
 
         # Subheading
         f_sub = font_reg(32)
@@ -267,12 +288,10 @@ def caption_daily(ticker: str, last: float, chg30: float, near_support: bool) ->
     if near_support: cues.append("buyers defending support 🛡️")
     if not cues:
         cues = ["range tightening as traders wait for a trigger"]
-
     cta = rng.choice(["Save for later 📌","Your take below 👇","Share with a friend 🔄"])
     return f"{emj} {ticker} at {last:,.2f} — {chg30:+.2f}% (30d). {' · '.join(cues)}. {cta}"
 
 def caption_poster(ticker: str, poster_headline: str) -> str:
-    """Poster captions MUST complement the poster text (no duplication)."""
     hook = f"{SECTOR_EMOJI.get(ticker, '📈')} {ticker} — still in the spotlight"
     context = ("Beyond the headline, investors are weighing sector read-throughs, "
                "peer reactions, and what this means for near-term demand.")
@@ -284,7 +303,6 @@ def caption_poster(ticker: str, poster_headline: str) -> str:
 # ---- Poster Engine ------
 # =========================
 def poster_background(W=1080, H=1080) -> Image.Image:
-    """Blue gradient + diagonal beams for IG-native look."""
     base = Image.new("RGB", (W, H), "#0d3a66")
     grad = Image.new("RGB", (W, H))
     for y in range(H):
@@ -327,25 +345,20 @@ def draw_news_tag(draw: ImageDraw.ImageDraw, x=40, y=40):
     draw.text((x+pad, y+pad), "NEWS", font=f, fill=(255,255,255,255))
 
 def generate_poster(ticker: str, headline_lines: List[str], subtext_lines: List[str]) -> Optional[str]:
-    """IG-native poster with left-aligned headline + extended subtext (wrapped), logos in correct corners."""
     try:
         W,H = 1080,1080
         img = poster_background(W,H)
         d   = ImageDraw.Draw(img)
 
         draw_news_tag(d)
-
-        # Headline
         d.multiline_text((40,160), "\n".join(headline_lines), font=font_bold(108),
                          fill=(255,255,255,255), spacing=10, align="left")
 
-        # Subtext (3–4 short lines when wrapped)
         sub = " ".join(subtext_lines)
         sub_wrapped = wrap_text_by_width(d, sub, font_reg(48), W-80)
         d.multiline_text((40,420), sub_wrapped, font=font_reg(48),
                          fill=(235,243,255,255), spacing=10, align="left")
 
-        # Ticker logo (top-right) — fallback rounded badge
         logo = load_logo(ticker, 220)
         if logo is not None:
             img.alpha_composite(logo, (W - logo.width - 40, 40))
@@ -360,9 +373,8 @@ def generate_poster(ticker: str, headline_lines: List[str], subtext_lines: List[
             bd.text(((badge_w-tw)//2, (badge_h-64)//2-2), ticker, font=bf, fill="white")
             img.alpha_composite(badge, (W - badge_w - 40, 40))
 
-        # TrendWatchDesk logo (bottom-right), tinted white + subtle glow
         twd = twd_logo(220)
-        if twd:
+        if twd is not None:
             shadow = Image.new("RGBA", twd.size, (0,0,0,0))
             sd = ImageDraw.Draw(shadow)
             sd.bitmap((0,0), twd.split()[3], fill=(0,0,0,80))
@@ -382,7 +394,6 @@ def generate_poster(ticker: str, headline_lines: List[str], subtext_lines: List[
 # ---- News Polling -------
 # =========================
 def fetch_yahoo_headlines(tickers: List[str], max_items: int = 40) -> List[Dict]:
-    """Best-effort Yahoo Finance news pull. If it fails, return empty (no posters)."""
     items = []
     for t in tickers:
         try:
@@ -401,7 +412,6 @@ def fetch_yahoo_headlines(tickers: List[str], max_items: int = 40) -> List[Dict]
                 items.append({"ticker": t, "title": title, "url": link, "ts": pub})
         except Exception as e:
             log(f"[warn] yahoo fetch for {t} failed: {e}")
-    # de-dupe by title
     seen = set(); uniq = []
     for it in items:
         key = it["title"].strip().lower()
@@ -410,7 +420,6 @@ def fetch_yahoo_headlines(tickers: List[str], max_items: int = 40) -> List[Dict]
     return uniq[:max_items]
 
 def cluster_by_popularity(items: List[Dict]) -> List[Dict]:
-    """Keep items that recur by normalized title, else top few."""
     if not items: return []
     counts = {}
     def norm(s: str) -> str: return re.sub(r"[^a-z0-9 ]+","", s.lower()).strip()
@@ -426,7 +435,6 @@ def cluster_by_popularity(items: List[Dict]) -> List[Dict]:
 # ---- Workflows ----------
 # =========================
 def run_daily_charts():
-    """Generate 6 charts + daily captions file (Mon/Wed/Fri in CI)."""
     tickers = pick_tickers(6)
     log(f"[info] selected tickers: {tickers}")
     generated = []
@@ -438,17 +446,16 @@ def run_daily_charts():
             try:
                 df = yf.download(t, period="6mo", interval="1d", progress=False,
                                  auto_adjust=False, threads=False)
-                close = df["Close"].dropna()
-                last = _as_float(close.iloc[-1]) if not close.empty else 0.0
-                chg30 = pct_change(close, 30)
-                # approx near-support check using weekly
+                close_arr = _close_series_to_array(df["Close"].dropna())
+                last = float(close_arr[-1]) if close_arr.size else 0.0
+                chg30 = pct_change(pd.Series(close_arr), 30)
                 wk = yf.download(t, period="1y", interval="1wk", progress=False,
                                  auto_adjust=False, threads=False)["Close"].dropna()
                 sup_low, sup_high = swing_levels(wk, 10)
                 near = False
-                if sup_low is not None and sup_high is not None and last:
-                    mid = 0.5*(sup_low+sup_high)
-                    rngp = max(1e-8, (sup_high - sup_low))
+                if (sup_low is not None) and (sup_high is not None) and (last != 0.0):
+                    mid = 0.5 * (sup_low + sup_high)
+                    rngp = max(1e-8, float(sup_high - sup_low))
                     near = abs(last - mid) <= 0.6 * rngp
                 cap_lines.append(caption_daily(t, last, chg30, near))
             except Exception:
@@ -464,7 +471,6 @@ def run_daily_charts():
         except Exception as e:
             log(f"[warn] failed to write caption file: {e}")
 
-    # Strong console summary
     print("\n==============================")
     if generated:
         print("✅ Daily charts generated:")
@@ -472,14 +478,10 @@ def run_daily_charts():
             print(" -", p)
     else:
         print("⚠️ No charts generated")
-    if cap_file_written:
-        print("Caption file:", cap_file_written)
-    else:
-        print("Caption file: (none)")
+    print("Caption file:", cap_file_written or "(none)")
     print("==============================\n")
 
 def run_posters():
-    """Generate news-driven poster(s). If no news, skip (no artificial fallbacks)."""
     news = fetch_yahoo_headlines(WATCHLIST, max_items=40)
     if not news:
         log("[info] No news found → Poster skipped")
@@ -487,14 +489,11 @@ def run_posters():
         return
     popular = cluster_by_popularity(news)
     rng.shuffle(popular)
-    # One good poster per run
     for item in popular[:1]:
         tkr = item["ticker"]
         title = item["title"].strip()
-        # Headline to 1–2 lines
         words = title.upper().split()
         headline_lines = [" ".join(words[:6]), " ".join(words[6:12])] if len(words) > 6 else [" ".join(words)]
-        # Extended subtext
         sub_lines = [
             f"This headline keeps {tkr} in focus as investors weigh read-through for peers and demand.",
             "The move could shift sentiment across the sector while big funds assess near-term margins.",
@@ -513,7 +512,6 @@ def run_posters():
             log(f"[info] poster saved: {out}")
             log(f"[info] caption saved: {poster_caption}")
 
-            # Strong console output
             print("\n==============================")
             print("✅ News poster generated!")
             print("Ticker     :", tkr)
@@ -521,7 +519,6 @@ def run_posters():
             print("Image file :", out)
             print("Caption txt:", poster_caption)
             print("==============================\n")
-
         else:
             log("[warn] poster generation failed")
             print("\n❌ Poster generation failed (see run.log)\n")
@@ -530,7 +527,6 @@ def run_posters():
 # ---- Demos / Mockups ----
 # =========================
 def run_poster_demo(args: List[str]):
-    """Legacy demo: --poster-demo TKR "HEADLINE..." (kept for parity)."""
     if not args or len(args) < 2:
         print('usage: --poster-demo TKR "HEADLINE..."')
         return
@@ -556,10 +552,6 @@ def run_poster_demo(args: List[str]):
         print("\n❌ Poster demo failed (see run.log)\n")
 
 def run_poster_mockup(args: Optional[List[str]] = None):
-    """
-    New: --poster-mockup [TKR "HEADLINE..."]
-    If no args → default AAPL demo.
-    """
     if args and len(args) >= 2:
         tkr = args[0].upper()
         headline = " ".join(args[1:])
@@ -586,7 +578,6 @@ def run_poster_mockup(args: Optional[List[str]] = None):
         log(f"[mockup] Poster saved: {out}")
         log(f"[mockup] Caption saved: {capfile}")
 
-        # Strong console prints
         print("\n==============================")
         print("✅ Poster generated!")
         print("Image file :", out)
@@ -636,7 +627,6 @@ def main():
         elif args.poster_mockup is not None:
             run_poster_mockup(args.poster_mockup)
         else:
-            # default to daily for convenience in local testing
             log("[info] default mode → daily charts")
             run_daily_charts()
     except Exception as e:
