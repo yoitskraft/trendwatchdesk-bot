@@ -1,8 +1,9 @@
 name: TWD Breaking Posters (event-driven)
 
 on:
+  # Runs every 10 minutes; adjust to "0 */3 * * *" for every 3 hours
   schedule:
-    - cron: "*/10 * * * *"     # every 10 minutes
+    - cron: "*/10 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -32,7 +33,7 @@ jobs:
           mkdir -p output/posters
           mkdir -p state
 
-      # Try to recover prior state from posters branch (seen_stories.json)
+      # Restore the last seen headlines / cooldown from posters branch if it exists
       - name: Restore previous poster state
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -45,11 +46,9 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
-          # fetch posters branch if exists
           git fetch --depth=1 origin posters || true
           if git rev-parse --verify origin/posters >/dev/null 2>&1 ; then
             git checkout -b posters origin/posters
-            # copy state file if present
             test -f state/seen_stories.json && cp state/seen_stories.json ../state/ || true
           else
             echo "No posters branch yet."
@@ -60,14 +59,18 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
           TWD_MODE: "posters"
-          TWD_DEBUG: "1"
-          # 🔧 TEMP: make it easier to trigger during testing
+          TWD_DEBUG: "1"                      # verbose logs (set "0" when stable)
           TWD_BREAKING_ON: "on"
-          TWD_BREAKING_RECENCY_MIN: "360"   # was 90 (allow last 6 hours)
-          TWD_BREAKING_MIN_SOURCES: "2"     # was 3
-          TWD_BREAKING_MIN_INTERVAL_MIN: "0"  # was 30 (disable cooldown)
-          TWD_BREAKING_FALLBACK: "on"       # new: render top single-source story if none cross-confirmed
+          # ---- Filters / knobs ----
+          TWD_BREAKING_RECENCY_MIN: "90"      # consider news <= 90 minutes old
+          TWD_BREAKING_MIN_SOURCES: "3"       # require ≥ 3 distinct publishers
+          TWD_BREAKING_MIN_INTERVAL_MIN: "30" # cooldown (mins) between posters
+          TWD_BREAKING_FALLBACK: "off"        # set "on" to allow single-source fallback
+          # ---- Assets ----
           BRAND_LOGO_PATH: "assets/brand_logo.png"
+        run: |
+          set -x
+          python -u main.py 2>&1 | tee run.log
 
       - name: Show run.log
         if: always()
