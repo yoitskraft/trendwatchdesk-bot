@@ -8,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -21,13 +22,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install yfinance pandas numpy pillow requests
 
+      # Charts must pass
       - name: Generate daily charts (CI)
         run: python main.py --ci
 
-      - name: Generate news posters
-        run: python main.py --posters
+      # Posters must pass
+      - name: Generate news posters (CI)
+        run: python main.py --ci-posters
 
-      - name: Upload all outputs (charts + posters + captions)
+      # Bundle everything from this run
+      - name: Upload outputs (charts + posters + captions + log)
         uses: actions/upload-artifact@v4
         with:
           name: twd-outputs-${{ github.run_id }}
@@ -37,3 +41,4 @@ jobs:
             output/posters/*_caption.txt
             output/caption_*.txt
             output/run.log
+          if-no-files-found: warn
