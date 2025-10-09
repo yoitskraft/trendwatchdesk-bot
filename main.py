@@ -4,6 +4,9 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 from PIL import Image, ImageDraw, ImageFont
+import requests
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 
 # ------------------ Config ------------------
 OUTPUT_DIR = os.path.abspath("output")
@@ -30,11 +33,15 @@ TWD_BREAKING_RECENCY_MIN = int(os.getenv("TWD_BREAKING_RECENCY_MIN", "90"))
 TWD_BREAKING_MIN_SOURCES = int(os.getenv("TWD_BREAKING_MIN_SOURCES", "3"))
 TWD_BREAKING_MIN_INTERVAL_MIN = int(os.getenv("TWD_BREAKING_MIN_INTERVAL_MIN", "30"))
 TWD_BREAKING_FALLBACK = os.getenv("TWD_BREAKING_FALLBACK", "off").lower() in ("on","1","true","yes")
+TWD_ALLOW_RSS = os.getenv("TWD_ALLOW_RSS", "on").lower() in ("on","1","true","yes")
 
 # Paths
 STATE_DIR = os.path.abspath("state")
 SEEN_FILE = os.path.join(STATE_DIR, "seen_stories.json")
 POSTERS_DIR = os.path.join(OUTPUT_DIR, "posters")
+
+SESS = requests.Session()
+SESS.headers.update({"User-Agent":"TrendWatchDesk/1.0 (+github actions)","Accept":"*/*","Accept-Encoding":"identity"})
 
 def _dbg(msg): 
     if TWD_DEBUG: print(f"[debug] {msg}")
@@ -302,7 +309,6 @@ WATCHLIST = [
     "AAPL","MSFT","META","AMZN","GOOGL","TSLA","NVDA","AMD",
     "SPY","QQQ","DIA","IWM","GLD","SLV","USO","UNG"
 ]
-# allow env override
 WATCHLIST_ENV = os.getenv("TWD_WATCHLIST", "").strip()
 if WATCHLIST_ENV:
     WATCHLIST = [s.strip().upper() for s in WATCHLIST_ENV.split(",") if s.strip()]
@@ -310,11 +316,8 @@ if WATCHLIST_ENV:
 
 # Fallback “general news” symbols to mimic Yahoo top headlines
 FALLBACK_SYMBOLS = [
-    # Indices / macro
     "^GSPC","^IXIC","^DJI","^VIX",
-    # Commodities / FX / crypto proxies
     "GC=F","SI=F","CL=F","DX-Y.NYB","BTC-USD","ETH-USD",
-    # Mega-caps & bellwethers
     "META","NVDA","AMD","AAPL","MSFT","AMZN","TSLA",
     "JPM","BAC","XOM","CVX","WMT","TGT","DIS","NFLX","NKE"
 ]
@@ -350,14 +353,61 @@ def collect_news_for_symbols(symbols):
             _dbg(f"news error {sym}: {e}")
     return items
 
+# ---------- NEW: robust RSS fallback ----------
+RSS_FEEDS = [
+    ("Yahoo Finance", "https://finance.yahoo.com/news/rssindex"),
+    ("Reuters", "https://feeds.reuters.com/reuters/businessNews"),
+    ("CNBC", "https://www.cnbc.com/id/100003114/device/rss/rss.html"),
+    ("MarketWatch", "https://www.marketwatch.com/feeds/topstories"),
+]
+TICKER_LOOKUP = set([*WATCHLIST, *FALLBACK_SYMBOLS])
+
+def _rss_fetch(url, source):
+    out = []
+    try:
+        r = SESS.get(url, timeout=10)
+        if not r.ok: 
+            _dbg(f"RSS {source} HTTP {r.status_code}")
+            return out
+        root = ET.fromstring(r.content)
+        for item in root.findall(".//item"):
+            title = (item.findtext("title") or "").strip()
+            link = (item.findtext("link") or "").strip()
+            pub_date = item.findtext("pubDate")
+            try:
+                ts = parsedate_to_datetime(pub_date).timestamp() if pub_date else UTC_NOW.timestamp()
+            except Exception:
+                ts = UTC_NOW.timestamp()
+            age = _news_age_minutes(ts)
+            if age <= max(TWD_BREAKING_RECENCY_MIN, 24*60):  # allow up to 24h on RSS
+                # crude symbol guess: if any known ticker appears in title (capitalized word)
+                symbol = "MARKET"
+                words = set(re.findall(r"[A-Z]{2,6}", title.upper()))
+                match = list(words & set([s.upper().replace("^","").replace("-USD","") for s in TICKER_LOOKUP]))
+                if match:
+                    symbol = match[0]
+                out.append({"symbol": symbol, "title": title, "publisher": source, "link": link, "age": age, "ts": float(ts)})
+    except Exception as e:
+        _dbg(f"RSS fetch fail {source}: {e}")
+    return out
+
 def collect_news_candidates():
-    # Pass 1: user/watchlist
+    # Pass 1: ticker news via yfinance
     items = collect_news_for_symbols(WATCHLIST)
     if items:
         return items
-    # Pass 2: broaden to macro + mega-caps (mimics “general headlines” on Yahoo)
     _dbg("watchlist empty → trying FALLBACK_SYMBOLS for general headlines")
-    return collect_news_for_symbols(FALLBACK_SYMBOLS)
+    items = collect_news_for_symbols(FALLBACK_SYMBOLS)
+    if items:
+        return items
+    # Pass 3: RSS fallbacks if allowed
+    if TWD_ALLOW_RSS:
+        _dbg("yfinance returned none → using RSS fallbacks")
+        rss_items = []
+        for source, url in RSS_FEEDS:
+            rss_items.extend(_rss_fetch(url, source))
+        return rss_items
+    return []
 
 def cluster_and_filter(items):
     clusters = {}
@@ -435,12 +485,12 @@ def render_news_poster(out_path, symbol, title, body, publisher=None):
             _dbg(f"bg load fail: {e}")
 
     f_news = _load_font(28, bold=True)
-    f_head = _load_font(64, bold=True)
+    f_head = _load_font(60, bold=True)   # slightly smaller to avoid clipping
     f_body = _load_font(34, bold=False)
     f_meta = _load_font(24, bold=False)
 
     pad = 60; x1,y1,x2,y2 = pad,pad,W-pad,H-pad
-    draw.text((x1, y1), "NEWS", fill=(30,30,30,255), font=f_news)
+    draw.text((x1, y1+8), "NEWS", fill=(30,30,30,255), font=f_news)
 
     def wrap_text(text, font, max_width):
         words = (text or "").split()
@@ -458,10 +508,10 @@ def render_news_poster(out_path, symbol, title, body, publisher=None):
     head_lines = wrap_text(head, f_head, x2-x1)[:3]
     head_y = y1 + 70
     for i, line in enumerate(head_lines):
-        draw.text((x1, head_y + i*72), line, fill=(10,10,10,255), font=f_head)
-    body_top = head_y + len(head_lines)*72 + 24
+        draw.text((x1, head_y + i*68), line, fill=(10,10,10,255), font=f_head)
+    body_top = head_y + len(head_lines)*68 + 26
 
-    body_lines = wrap_text((body or "").strip(), f_body, x2-x1)[:8]
+    body_lines = wrap_text((body or "").strip(), f_body, x2-x1)[:9]
     for i, line in enumerate(body_lines):
         draw.text((x1, body_top + i*46), line, fill=(35,35,35,255), font=f_body)
 
@@ -492,6 +542,22 @@ def render_news_poster(out_path, symbol, title, body, publisher=None):
     out.save(out_path, quality=92)
 
 # ------------------ Posters driver ------------------
+def cluster_and_filter(items):
+    clusters = {}
+    for it in items:
+        key = _norm_headline(it["title"])
+        if not key:
+            continue
+        clusters.setdefault(key, []).append(it)
+    kept = []
+    for key, arr in clusters.items():
+        pubs = set([a["publisher"] for a in arr if a.get("publisher")])
+        if len(pubs) >= TWD_BREAKING_MIN_SOURCES:
+            arr_sorted = sorted(arr, key=lambda x: (x["publisher"] in PREFERRED_SOURCES, -x["ts"]), reverse=True)
+            kept.append((key, arr_sorted[0], arr))
+    kept.sort(key=lambda x: -x[1]["ts"])
+    return kept
+
 def run_posters_once():
     if not TWD_BREAKING_ON:
         print("[info] Breaking posters OFF by env")
@@ -509,7 +575,6 @@ def run_posters_once():
         for it in items[:10]:
             print(f"[debug] item: {it.get('publisher')} | {it.get('symbol')} | {it.get('title')[:90]}... age={it.get('age'):.1f}m")
 
-    # Cluster by headline and require distinct sources
     def cluster_and_emit(items_local):
         clusters = cluster_and_filter(items_local)
         print(f"[info] clusters (>= {TWD_BREAKING_MIN_SOURCES} sources): {len(clusters)}")
@@ -540,10 +605,9 @@ def run_posters_once():
     made = cluster_and_emit(items)
     if made: return made
 
-    # Fallback: if no clusters, allow newest single item (from watchlist or fallback symbols)
+    # Fallback: widen + single-source if allowed
     if TWD_BREAKING_FALLBACK:
         if not items:
-            # widen to 24h to ensure at least one story
             global TWD_BREAKING_RECENCY_MIN
             TWD_BREAKING_RECENCY_MIN = max(TWD_BREAKING_RECENCY_MIN, 24*60)
             print("[info] No items in window; widened to 24h.")
