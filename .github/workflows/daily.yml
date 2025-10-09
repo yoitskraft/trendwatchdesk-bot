@@ -1,4 +1,4 @@
-name: TrendWatchDesk Generate (Charts + Posters)
+name: TrendWatchDesk Generate (Charts)
 
 on:
   schedule:
@@ -35,21 +35,24 @@ jobs:
           mkdir -p output
           echo "Output dir:" && pwd && ls -la output || true
 
-      # ---- Run daily charts ----
-      - name: Run daily charts (CI mode)
-        env:
-          PYTHONUNBUFFERED: "1"
+      # ⬇️ New step: fetch all missing logos before running charts
+      - name: Fetch missing logos
         run: |
-          set -x
-          python main.py --ci 2>&1 | tee run.log
+          python tools/download_logos.py
 
-      # ---- Run posters ----
-      - name: Run news posters (CI mode)
+      - name: Run charts mode (debug on)
         env:
           PYTHONUNBUFFERED: "1"
+          TWD_MODE: "charts"
+          TWD_TF: "W"
+          TWD_DEBUG: "1"
+          TWD_UI_SCALE: "0.90"
+          TWD_TEXT_SCALE: "0.78"
+          TWD_TLOGO_SCALE: "0.55"
+          BRAND_LOGO_PATH: "assets/brand_logo.png"
         run: |
           set -x
-          python main.py --ci-posters 2>&1 | tee -a run.log
+          python -u main.py 2>&1 | tee run.log
 
       - name: Print run.log to console
         if: always()
@@ -63,14 +66,22 @@ jobs:
         run: |
           echo "== output listing =="
           ls -la output || true
-          echo "== charts =="
-          find output/charts -type f -name "*.png" || true
-          echo "== posters =="
-          find output/posters -type f -name "*.png" || true
-          echo "== captions =="
-          ls -la output/*caption* 2>/dev/null || true
+          echo "== any pngs =="
+          find output -maxdepth 1 -type f -name "*.png" -printf "%f\n" 2>/dev/null || true
+          echo "== any caption =="
+          ls -la output/caption_* 2>/dev/null || true
 
-      # ---- Publish both charts + posters ----
+      - name: Require charts
+        if: always()
+        run: |
+          set -e
+          COUNT=$(find output -maxdepth 1 -type f -name "*.png" 2>/dev/null | wc -l | tr -d ' ')
+          echo "PNG count: $COUNT"
+          if [ "$COUNT" = "0" ]; then
+            echo "::error::No charts generated. Check run.log above for errors."
+            exit 1
+          fi
+
       - name: Publish to 'charts' branch (single-commit)
         if: success()
         env:
@@ -78,8 +89,11 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -e
+          test -d output
+          ls output/*.png >/dev/null 2>&1
+
           rm -rf publish && mkdir publish
-          cp -r output/* publish/ || true
+          cp -r output/* publish/
 
           cd publish
           git init
@@ -89,14 +103,14 @@ jobs:
           git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
 
           git add -A
-          git commit -m "Publish outputs $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+          git commit -m "Publish charts $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
           git push -f origin charts
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: twd-run-${{ github.run_id }}
+          name: charts-run-${{ github.run_id }}
           path: |
             run.log
             output/**
