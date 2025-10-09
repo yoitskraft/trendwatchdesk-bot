@@ -1,0 +1,126 @@
+name: TWD Breaking Posters (event-driven)
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"     # every 10 minutes
+  workflow_dispatch:
+
+jobs:
+  posters:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade yfinance pillow pandas numpy requests pytz urllib3
+
+      - name: Prepare output/state dirs
+        run: |
+          mkdir -p output/posters
+          mkdir -p state
+
+      # Try to recover prior state from posters branch (seen_stories.json)
+      - name: Restore previous poster state
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          rm -rf _pst && mkdir _pst
+          cd _pst
+          git init
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+          # fetch posters branch if exists
+          git fetch --depth=1 origin posters || true
+          if git rev-parse --verify origin/posters >/dev/null 2>&1 ; then
+            git checkout -b posters origin/posters
+            # copy state file if present
+            test -f state/seen_stories.json && cp state/seen_stories.json ../state/ || true
+          else
+            echo "No posters branch yet."
+          fi
+          cd ..
+
+      - name: Run posters mode
+        env:
+          PYTHONUNBUFFERED: "1"
+          TWD_MODE: "posters"
+          TWD_DEBUG: "1"
+          TWD_BREAKING_ON: "on"
+          TWD_BREAKING_RECENCY_MIN: "90"     # consider stories from last 90 min
+          TWD_BREAKING_MIN_SOURCES: "3"      # require 3 distinct publishers
+          TWD_BREAKING_MIN_INTERVAL_MIN: "30"  # cooldown (mins) since last poster
+          BRAND_LOGO_PATH: "assets/brand_logo.png"
+        run: |
+          set -x
+          python -u main.py 2>&1 | tee run.log
+
+      - name: Show run.log
+        if: always()
+        run: |
+          echo "===== BEGIN run.log ====="
+          (test -f run.log && cat run.log) || echo "run.log missing"
+          echo "===== END run.log ====="
+
+      - name: Debug output
+        if: always()
+        run: |
+          echo "== posters listing =="
+          ls -la output/posters || true
+          echo "== state listing =="
+          ls -la state || true
+
+      - name: Check if poster generated
+        id: checkposter
+        run: |
+          COUNT=$(find output/posters -maxdepth 1 -type f -name "news_*.png" 2>/dev/null | wc -l | tr -d ' ')
+          echo "posters_count=$COUNT" >> $GITHUB_OUTPUT
+          echo "Generated posters: $COUNT"
+
+      - name: Publish to 'posters' branch (single-commit)
+        if: steps.checkposter.outputs.posters_count != '0'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          rm -rf publish && mkdir publish
+          cp -r output/posters publish/
+          mkdir -p publish/state
+          cp -f state/seen_stories.json publish/state/ || true
+
+          cd publish
+          git init
+          git checkout -b posters
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+
+          git add -A
+          git commit -m "Publish poster $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+          git push -f origin posters
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: posters-run-${{ github.run_id }}
+          path: |
+            run.log
+            output/posters/**
+            state/seen_stories.json
