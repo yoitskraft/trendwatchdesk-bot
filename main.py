@@ -1,683 +1,617 @@
 #!/usr/bin/env python3
-import os, sys, io, math, json, random, datetime, traceback, re, glob, hashlib
+# -*- coding: utf-8 -*-
+
+"""
+TrendWatchDesk - main.py
+Single source of truth aligned with OPERATIONS_GUIDE.md
+
+Features:
+- Weekly charts (6 tickers per run) with support zone, logos, Grift fonts
+- Posters (breaking news) with IG-native gradient layout, Grift fonts, wrapped subtext
+- Captions (daily + poster) with natural, news-driven tone and emojis
+- Poster captions ALWAYS complement poster copy (no duplication)
+- Watchlist + weighted pools; deterministic selection by date
+- Yahoo Finance polling + simple clustering; graceful fallbacks
+- Outputs: output/charts/, output/posters/, output/caption_YYYYMMDD.txt, run.log
+"""
+
+import os, sys, io, re, math, json, time, random, hashlib, traceback, datetime
+from dataclasses import dataclass
+from typing import List, Dict, Tuple, Optional
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from PIL import Image, ImageDraw, ImageFont
 import requests
-import xml.etree.ElementTree as ET
-from email.utils import parsedate_to_datetime
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
-# ------------------ Config ------------------
-OUTPUT_DIR = os.path.abspath("output")
-TODAY = datetime.date.today()
-DATESTR = TODAY.strftime("%Y%m%d")
-UTC_NOW = datetime.datetime.utcnow()
+# =========================
+# ---- Global Configs -----
+# =========================
+ASSETS_DIR        = "assets"
+LOGO_DIR          = os.path.join(ASSETS_DIR, "logos")
+FONT_DIR          = os.path.join(ASSETS_DIR, "fonts")
+BRAND_LOGO        = os.path.join(ASSETS_DIR, "brand_logo.png")
+FONT_BOLD_PATH    = os.path.join(FONT_DIR, "Grift-Bold.ttf")
+FONT_REG_PATH     = os.path.join(FONT_DIR, "Grift-Regular.ttf")
 
-# Modes
-TWD_MODE = os.getenv("TWD_MODE", "charts").lower()            # charts | posters | all
-TWD_TF = os.getenv("TWD_TF", "D").upper()                     # D or W
-TWD_DEBUG = os.getenv("TWD_DEBUG", "0").lower() in ("1","true","on","yes")
+OUTPUT_DIR        = "output"
+CHART_DIR         = os.path.join(OUTPUT_DIR, "charts")
+POSTER_DIR        = os.path.join(OUTPUT_DIR, "posters")
+CAPTION_TXT       = os.path.join(OUTPUT_DIR, f"caption_{datetime.date.today().strftime('%Y%m%d')}.txt")
+RUN_LOG           = os.path.join(OUTPUT_DIR, "run.log")
 
-# UI scales (charts)
-TWD_UI_SCALE = float(os.getenv("TWD_UI_SCALE", "0.90"))
-TWD_TEXT_SCALE = float(os.getenv("TWD_TEXT_SCALE", "0.78"))
-TWD_TLOGO_SCALE = float(os.getenv("TWD_TLOGO_SCALE", "0.55"))
+# Create dirs
+for d in (OUTPUT_DIR, CHART_DIR, POSTER_DIR):
+    os.makedirs(d, exist_ok=True)
 
-# brand
-BRAND_LOGO_PATH = os.getenv("BRAND_LOGO_PATH", "assets/brand_logo.png").strip()
+# Deterministic seed per day (stable selections)
+TODAY      = datetime.date.today()
+DATESTAMP  = TODAY.strftime("%Y%m%d")
+SEED       = int(hashlib.sha1(DATESTAMP.encode()).hexdigest(), 16) % (10**8)
+rng        = random.Random(SEED)
 
-# Posters knobs
-TWD_BREAKING_ON = os.getenv("TWD_BREAKING_ON", "on").lower() in ("on","1","true","yes")
-TWD_BREAKING_RECENCY_MIN = int(os.getenv("TWD_BREAKING_RECENCY_MIN", "90"))
-TWD_BREAKING_MIN_SOURCES = int(os.getenv("TWD_BREAKING_MIN_SOURCES", "3"))
-TWD_BREAKING_MIN_INTERVAL_MIN = int(os.getenv("TWD_BREAKING_MIN_INTERVAL_MIN", "30"))
-TWD_BREAKING_FALLBACK = os.getenv("TWD_BREAKING_FALLBACK", "off").lower() in ("on","1","true","yes")
-TWD_ALLOW_RSS = os.getenv("TWD_ALLOW_RSS", "on").lower() in ("on","1","true","yes")
+# Watchlist/pools (align with Ops Guide)
+WATCHLIST = ["AAPL","MSFT","NVDA","AMD","TSLA","SPY","QQQ","GLD","AMZN","META","GOOGL"]
 
-# Paths
-STATE_DIR = os.path.abspath("state")
-SEEN_FILE = os.path.join(STATE_DIR, "seen_stories.json")
-POSTERS_DIR = os.path.join(OUTPUT_DIR, "posters")
-
-SESS = requests.Session()
-SESS.headers.update({"User-Agent":"TrendWatchDesk/1.0 (+github actions)","Accept":"*/*","Accept-Encoding":"identity"})
-
-def _dbg(msg): 
-    if TWD_DEBUG: print(f"[debug] {msg}")
-
-# ------------------ Fonts ------------------
-def _load_font(size, bold=False):
-    candidates = []
-    if bold:
-        candidates += ["assets/fonts/Grift-Bold.ttf", "assets/fonts/Roboto-Bold.ttf"]
-    else:
-        candidates += ["assets/fonts/Grift-Regular.ttf", "assets/fonts/Roboto-Regular.ttf"]
-    for p in candidates:
-        if os.path.exists(p):
-            try: return ImageFont.truetype(p, size)
-            except Exception: pass
-    return ImageFont.load_default()
-
-# ------------------ Ticker selection ------------------
-DEFAULT_TICKERS = [
-    "AAPL","MSFT","META","AMZN","GOOGL","TSLA","NVDA",
-    "AMD","TSM","ASML","QCOM","INTC","MU","TXN",
-    "JNJ","UNH","LLY","ABBV","MRK",
-    "MA","V","PYPL","SQ","SOFI",
-    "SNOW","CRM","NOW","PLTR",
-    "NFLX","ADBE","NKE","COST","PEP","KO","XOM","CVX"
-]
-
-def choose_tickers_somehow(n=6, seed=None):
-    rnd = random.Random(seed or DATESTR)
-    return rnd.sample(DEFAULT_TICKERS, k=n)
-
-# ------------------ OHLC helpers ------------------
-def _find_col(df: pd.DataFrame, key: str):
-    if df is None or df.empty: return None
-    if key in df.columns: return df[key]
-    if isinstance(df.columns, pd.MultiIndex):
-        for lvl in reversed(range(df.columns.nlevels)):
-            try:
-                sub = df.xs(key, axis=1, level=lvl, drop_level=False)
-                if isinstance(sub, pd.DataFrame) and sub.shape[1] >= 1:
-                    return sub.iloc[:, 0]
-            except Exception:
-                pass
-    return None
-
-def _get_ohlc_df(df: pd.DataFrame):
-    if df is None or df.empty: return None
-    o = _find_col(df,"Open"); h = _find_col(df,"High"); l = _find_col(df,"Low")
-    c = _find_col(df,"Close") or _find_col(df,"Adj Close")
-    if c is None: return None
-    idx = c.index
-    def _al(x): return pd.to_numeric(x, errors="coerce").reindex(idx) if x is not None else None
-    c = _al(c).astype(float)
-    o = _al(o) if o is not None else c.copy()
-    h = _al(h) if h is not None else c.copy()
-    l = _al(l) if l is not None else c.copy()
-    out = pd.DataFrame({"Open":o,"High":h,"Low":l,"Close":c}).dropna()
-    return out if not out.empty else None
-
-# ------------------ Swings & support (4H) ------------------
-def _swing_points(series: pd.Series, w=3):
-    s = series.values; idxs = series.index.to_list()
-    highs, lows = [], []
-    for i in range(w, len(s)-w):
-        left = s[i-w:i]; right = s[i+1:i+1+w]
-        if s[i] >= max(left) and s[i] >= max(right): highs.append((idxs[i], s[i]))
-        if s[i] <= min(left) and s[i] <= min(right): lows.append((idxs[i], s[i]))
-    return highs, lows
-
-def pick_support_level_from_4h(df_4h: pd.DataFrame, trend_bullish: bool, w=3, pct_tol=0.004, atr_len=14):
-    if df_4h is None or df_4h.empty: return (None, None)
-    cl = pd.to_numeric(df_4h["Close"], errors="coerce").dropna()
-    if cl.empty: return (None, None)
-    last = float(cl.iloc[-1])
-    H, L = _swing_points(cl, w=w)
-    swing_highs = sorted([v for (_, v) in H if v <= last], reverse=True)
-    swing_lows  = sorted([v for (_, v) in L if v <= last], reverse=True)
-    rng = (pd.to_numeric(df_4h["High"], errors="coerce") - pd.to_numeric(df_4h["Low"], errors="coerce")).rolling(atr_len).mean().dropna()
-    atr = float(rng.iloc[-1]) if not rng.empty else last * pct_tol
-    thickness = max(atr, last * pct_tol)
-    if trend_bullish and swing_highs:
-        lvl = swing_highs[0]; return (lvl - thickness*0.5, lvl + thickness*0.5)
-    if (not trend_bullish) and swing_lows:
-        lvl = swing_lows[0]; return (lvl - thickness*0.5, lvl + thickness*0.5)
-    return (None, None)
-
-# ------------------ Charts fetch ------------------
-def fetch_one_chart(ticker):
-    try:
-        df_d = yf.Ticker(ticker).history(period="1y", interval="1d", auto_adjust=True)
-    except Exception as e:
-        _dbg(f"{ticker} daily history error: {e}"); df_d = None
-    if df_d is None or df_d.empty:
-        df_d = yf.download(ticker, period="1y", interval="1d", auto_adjust=True)
-
-    ohlc_d = _get_ohlc_df(df_d)
-    if ohlc_d is None or ohlc_d.empty: return None
-
-    close_d = ohlc_d["Close"].dropna()
-    if close_d.shape[0] < 2: return None
-    last = float(close_d.iloc[-1])
-    base_val = float(close_d.iloc[-31]) if close_d.shape[0] > 30 else float(close_d.iloc[0])
-    chg30 = 100.0 * (last - base_val) / base_val if base_val != 0 else 0.0
-    prev = float(close_d.iloc[-2])
-    chg1d = 100.0 * (last - prev) / prev if prev != 0 else 0.0
-
-    sup_low = sup_high = None
-    try:
-        df_60 = yf.Ticker(ticker).history(period="6mo", interval="60m", auto_adjust=True)
-        if df_60 is None or df_60.empty:
-            df_60 = yf.download(ticker, period="6mo", interval="60m", auto_adjust=True)
-        if df_60 is not None and not df_60.empty:
-            ohlc_60 = _get_ohlc_df(df_60)
-            if ohlc_60 is not None and not ohlc_60.empty:
-                cutoff = ohlc_60.index.max() - pd.Timedelta(days=120)
-                df_60_clip = ohlc_60.loc[ohlc_60.index >= cutoff].copy()
-                if not df_60_clip.empty:
-                    df_4h = df_60_clip.resample("4H").agg(
-                        {"Open":"first","High":"max","Low":"min","Close":"last"}
-                    ).dropna()
-                    if not df_4h.empty:
-                        trend_bullish = (chg30 > 0)
-                        sup_low, sup_high = pick_support_level_from_4h(df_4h, trend_bullish)
-    except Exception as e:
-        _dbg(f"{ticker} support calc err: {e}")
-
-    if TWD_TF == "W":
-        df_render = ohlc_d.resample("W-FRI").agg({"Open":"first","High":"max","Low":"min","Close":"last"}).dropna().tail(60)
-        tf_tag = "W"
-    else:
-        df_render = ohlc_d.dropna().tail(260)
-        tf_tag = "D"
-
-    if df_render is None or df_render.empty: return None
-    return (df_render, last, float(chg30), sup_low, sup_high, tf_tag, float(chg1d))
-
-# ------------------ Captions ------------------
-SECTOR_EMOJI = {
-    "AMD":"🖥️","NVDA":"🧠","TSM":"🔧","ASML":"🔬","QCOM":"📶","INTC":"💾","MU":"💽","TXN":"📟",
-    "META":"🤖","GOOG":"🔎","GOOGL":"🔎","AAPL":"📱","MSFT":"☁️","AMZN":"📦","NFLX":"🎬","ADBE":"🎨",
-    "JNJ":"💊","UNH":"🏥","LLY":"🧪","ABBV":"🧬","MRK":"🧫","MA":"💳","V":"💳","PYPL":"💸","SQ":"💸","SOFI":"🏦",
-    "SNOW":"🧊","CRM":"📇","NOW":"🛠️","PLTR":"🛰️"
+POOLS = {
+    "AI": ["NVDA","MSFT","GOOGL","META","AMZN"],
+    "MAG7": ["AAPL","MSFT","GOOGL","META","AMZN","NVDA","TSLA"],
+    "Semis": ["NVDA","AMD","AVGO","TSM","INTC","ASML"],
+    "Healthcare": ["UNH","JNJ","PFE","MRK","LLY"],
+    "Fintech": ["MA","V","PYPL","SQ"],
+    "Quantum": ["IONQ","IBM","AMZN"],
+    "Wildcards": ["NFLX","DIS","BABA","NIO","SHOP","PLTR"]
 }
-CTA_POOL = [
-    "Save for later 📌 · Comment your levels 💬 · See charts in carousel ➡️",
-    "Tap save 📌 · Drop your take below 💬 · Full charts in carousel ➡️",
-    "Bookmark 📌 · What did we miss? 💬 · More charts inside ➡️"
-]
-def caption_line(ticker, last, chg30, chg1d, sup_low, sup_high, seed=None):
-    rnd = random.Random(seed or DATESTR)
-    cues = []
-    if chg30 >= 8: cues.append("momentum looks strong 🔥")
-    elif chg30 <= -8: cues.append("recent pullback showing ⚠️")
-    def near_sup(l,h,p):
-        if l is None or h is None: return False
-        mid=0.5*(l+h); rng=(h-l)+1e-8
-        return abs(p-mid)<=0.6*rng
-    if near_sup(sup_low, sup_high, last): cues.append("buyers defended support 🛡️")
-    if not cues:
-        cues = rnd.sample(["price action is steady","range bound but coiling","watching for a decisive move soon","tightening ranges on the daily"], k=1)
-    ending = random.choice(["could have more room if momentum sticks ✅","setups lean constructive here 📈","watch for follow-through on strength 🔎"] if chg30>0 else ["risk of rejection—watch reactions at key levels 👀","tone is cautious; patience helps here 🧊","relief bounces possible, trend still mixed ⚖️"])
-    emj = SECTOR_EMOJI.get(ticker, "📈")
-    head = " — ".join([f"{emj} {ticker}", f"{last:,.2f} USD", f"{chg30:+.2f}% (30d)"])
-    cue_txt = rnd.choice(["; ".join(cues), ", ".join(cues), " · ".join(cues)])
-    return f"{head} — {cue_txt}; {ending}"
 
-# ------------------ Chart renderer ------------------
-def render_single_post(out_path, ticker, payload):
-    (df, last, chg30, sup_low, sup_high, tf_tag, chg1d) = payload
-    W, H = 1080, 1080
-    canvas = Image.new("RGBA", (W, H), (255,255,255,255))
-    draw = ImageDraw.Draw(canvas)
+# HTTP session
+SESS = requests.Session()
+SESS.headers.update({
+    "User-Agent": "TrendWatchDesk/1.0 (+github actions)",
+    "Accept": "*/*",
+    "Accept-Encoding": "identity"
+})
 
-    margin = int(40 * TWD_UI_SCALE)
-    header_h = int(190 * TWD_UI_SCALE)
-    footer_h = int(90 * TWD_UI_SCALE)
-    pad_l, pad_r = int(58 * TWD_UI_SCALE), int(52 * TWD_UI_SCALE)
+# Emojis by sector-ish feel (loose)
+SECTOR_EMOJI = {
+    "NVDA":"🤖","AMD":"🔧","TSLA":"🚗","AAPL":"🍏","MSFT":"🧠",
+    "META":"📡","GOOGL":"🔎","AMZN":"📦","SPY":"📊","QQQ":"📈","GLD":"🪙"
+}
 
-    card = [margin, margin, W - margin, H - margin]
-    chart = [card[0] + pad_l, card[1] + header_h, card[2] - pad_r, card[3] - footer_h]
-    cx1, cy1, cx2, cy2 = chart
-
-    f_ticker = _load_font(int(76 * TWD_TEXT_SCALE), bold=True)
-    f_price  = _load_font(int(44 * TWD_TEXT_SCALE), bold=False)
-    f_delta  = _load_font(int(38 * TWD_TEXT_SCALE), bold=True)
-    f_sub    = _load_font(int(26 * TWD_TEXT_SCALE), bold=False)
-    f_sm     = _load_font(int(24 * TWD_TEXT_SCALE), bold=False)
-
-    title_x = card[0] + int(22 * TWD_UI_SCALE)
-    title_y = card[1] + int(20 * TWD_UI_SCALE)
-    draw.text((title_x, title_y), ticker, fill=(20,20,20,255), font=f_ticker)
-    dy = title_y + int(70 * TWD_TEXT_SCALE) + int(12 * TWD_UI_SCALE)
-    draw.text((title_x, dy), f"{last:,.2f} USD", fill=(30,30,30,255), font=f_price)
-    dy2 = dy + int(44 * TWD_TEXT_SCALE)
-    sign_col = (18,161,74,255) if chg30 >= 0 else (200,60,60,255)
-    draw.text((title_x, dy2), f"{chg30:+.2f}% past 30d", fill=sign_col, font=f_delta)
-    dy3 = dy2 + int(40 * TWD_TEXT_SCALE)
-    draw.text((title_x, dy3), ("Weekly chart" if tf_tag=="W" else "Daily chart") + " • key zones", fill=(140,140,140,255), font=f_sub)
-
-    tlogo_path = os.path.join("assets","logos",f"{ticker}.png")
-    if os.path.exists(tlogo_path):
-        try:
-            tlogo = Image.open(tlogo_path).convert("RGBA")
-            hmax = int(72 * TWD_TLOGO_SCALE)
-            scale = min(1.0, hmax / max(1, tlogo.height))
-            tlogo = tlogo.resize((int(tlogo.width*scale), int(tlogo.height*scale)))
-            lx = card[2] - int(24 * TWD_UI_SCALE) - tlogo.width
-            ly = title_y + 4
-            canvas.alpha_composite(tlogo, (lx, ly))
-        except Exception: pass
-
-    grid = Image.new("RGBA", (W, H), (0,0,0,0)); g = ImageDraw.Draw(grid)
-    for i in range(1, 5):
-        y = cy1 + i*(cy2-cy1)/5.0; g.line([(cx1,y),(cx2,y)], fill=(238,238,238,255), width=1)
-    for i in range(1, 6):
-        x = cx1 + i*(cx2-cx1)/6.0; g.line([(x,cy1),(x,cy2)], fill=(238,238,238,255), width=1)
-    canvas = Image.alpha_composite(canvas, grid); draw = ImageDraw.Draw(canvas)
-
-    df2 = df[["Open","High","Low","Close"]].dropna()
-    if df2.empty:
-        out = canvas.convert("RGB"); os.makedirs(os.path.dirname(out_path), exist_ok=True); out.save(out_path, quality=92); return
-
-    ymin = float(np.nanmin(df2["Low"])); ymax = float(np.nanmax(df2["High"]))
-    if not np.isfinite(ymin) or not np.isfinite(ymax) or abs(ymax-ymin) < 1e-9: ymin, ymax = (0,1)
-
-    def sx(i): return cx1 + (i / max(1, len(df2)-1)) * (cx2 - cx1)
-    def sy(v): return cy2 - ((float(v) - ymin) / (ymax - ymin)) * (cy2 - cy1)
-
-    if (sup_low is not None) and (sup_high is not None):
-        sup_y1, sup_y2 = sy(sup_high), sy(sup_low)
-        sup_rect = [cx1, min(sup_y1, sup_y2), cx2, max(sup_y1, sup_y2)]
-        sup_layer = Image.new("RGBA", (W, H), (0,0,0,0))
-        ImageDraw.Draw(sup_layer).rectangle(sup_rect, fill=(120,160,255,60), outline=(120,160,255,120), width=2)
-        canvas = Image.alpha_composite(canvas, sup_layer); draw = ImageDraw.Draw(canvas)
-
-    up_col, dn_col, wick_col = (26,172,93,255),(214,76,76,255),(150,150,150,255)
-    n = len(df2); body_px = max(3, int((cx2 - cx1) / max(60, n * 1.35))); half = body_px // 2
-    for i, row in enumerate(df2.itertuples(index=False)):
-        O,Hh,Ll,C = float(row[0]),float(row[1]),float(row[2]),float(row[3])
-        x = sx(i)
-        draw.line([(x, sy(Hh)), (x, sy(Ll))], fill=wick_col, width=1)
-        col = up_col if C >= O else dn_col
-        y1 = sy(max(O, C)); y2 = sy(min(O, C)); 
-        if abs(y2-y1) < 1: y2 = y1+1
-        draw.rectangle([x-half, y1, x+half, y2], fill=col, outline=col)
-
-    foot_x = card[0] + int(18*TWD_UI_SCALE); foot_y = card[3] - int(70*TWD_UI_SCALE)
-    draw.text((foot_x, foot_y), "Support zone shown" if (sup_low is not None and sup_high is not None) else "Support zone n/a", fill=(120,120,120,255), font=_load_font(int(24*TWD_TEXT_SCALE)))
-    draw.text((foot_x, foot_y + int(26*TWD_UI_SCALE)), "Not financial advice", fill=(160,160,160,255), font=_load_font(int(24*TWD_TEXT_SCALE)))
-
-    if BRAND_LOGO_PATH and os.path.exists(BRAND_LOGO_PATH):
-        try:
-            blogo = Image.open(BRAND_LOGO_PATH).convert("RGBA")
-            maxh = int(120 * TWD_UI_SCALE); scale = min(1.0, maxh / max(1, blogo.height))
-            blogo = blogo.resize((int(blogo.width*scale), int(blogo.height*scale)))
-            bx = card[2] - int(22*TWD_UI_SCALE) - blogo.width; by = card[3] - int(22*TWD_UI_SCALE) - blogo.height
-            canvas.alpha_composite(blogo, (bx, by))
-        except Exception: pass
-
-    out = canvas.convert("RGB"); os.makedirs(os.path.dirname(out_path), exist_ok=True); out.save(out_path, quality=92)
-
-# ------------------ Posters: news fetch & cluster ------------------
-# BASE watchlist (overridable via env)
-WATCHLIST = [
-    "AAPL","MSFT","META","AMZN","GOOGL","TSLA","NVDA","AMD",
-    "SPY","QQQ","DIA","IWM","GLD","SLV","USO","UNG"
-]
-WATCHLIST_ENV = os.getenv("TWD_WATCHLIST", "").strip()
-if WATCHLIST_ENV:
-    WATCHLIST = [s.strip().upper() for s in WATCHLIST_ENV.split(",") if s.strip()]
-    _dbg(f"Using env watchlist: {WATCHLIST}")
-
-# Fallback “general news” symbols to mimic Yahoo top headlines
-FALLBACK_SYMBOLS = [
-    "^GSPC","^IXIC","^DJI","^VIX",
-    "GC=F","SI=F","CL=F","DX-Y.NYB","BTC-USD","ETH-USD",
-    "META","NVDA","AMD","AAPL","MSFT","AMZN","TSLA",
-    "JPM","BAC","XOM","CVX","WMT","TGT","DIS","NFLX","NKE"
-]
-
-PREFERRED_SOURCES = [
-    "Reuters","Bloomberg","Financial Times","The Wall Street Journal","WSJ",
-    "CNBC","MarketWatch","Barron's","Yahoo Finance","The Verge","The New York Times"
-]
-
-def _norm_headline(h: str) -> str:
-    h = (h or "").strip().lower()
-    h = re.sub(r"[^a-z0-9 ]+", "", h)
-    return " ".join(h.split()[:10])
-
-def _news_age_minutes(ts_epoch: float) -> float:
-    dt = datetime.datetime.utcfromtimestamp(ts_epoch)
-    return (UTC_NOW - dt).total_seconds()/60.0
-
-def collect_news_for_symbols(symbols):
-    items = []
-    for sym in symbols:
-        try:
-            news = getattr(yf.Ticker(sym), "news", []) or []
-            for it in news:
-                title = it.get("title") or ""
-                pub = it.get("publisher") or ""
-                link = it.get("link") or ""
-                ts = it.get("providerPublishTime") or it.get("published") or 0
-                age = _news_age_minutes(float(ts)) if ts else 1e9
-                if age <= TWD_BREAKING_RECENCY_MIN:
-                    items.append({"symbol": sym, "title": title, "publisher": pub, "link": link, "age": age, "ts": float(ts)})
-        except Exception as e:
-            _dbg(f"news error {sym}: {e}")
-    return items
-
-# ---------- NEW: robust RSS fallback ----------
-RSS_FEEDS = [
-    ("Yahoo Finance", "https://finance.yahoo.com/news/rssindex"),
-    ("Reuters", "https://feeds.reuters.com/reuters/businessNews"),
-    ("CNBC", "https://www.cnbc.com/id/100003114/device/rss/rss.html"),
-    ("MarketWatch", "https://www.marketwatch.com/feeds/topstories"),
-]
-TICKER_LOOKUP = set([*WATCHLIST, *FALLBACK_SYMBOLS])
-
-def _rss_fetch(url, source):
-    out = []
+# =========================
+# ---- Logging helpers ----
+# =========================
+def log(msg: str):
+    ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
+    line = f"[{ts}] {msg}"
+    print(line)
     try:
-        r = SESS.get(url, timeout=10)
-        if not r.ok: 
-            _dbg(f"RSS {source} HTTP {r.status_code}")
-            return out
-        root = ET.fromstring(r.content)
-        for item in root.findall(".//item"):
-            title = (item.findtext("title") or "").strip()
-            link = (item.findtext("link") or "").strip()
-            pub_date = item.findtext("pubDate")
-            try:
-                ts = parsedate_to_datetime(pub_date).timestamp() if pub_date else UTC_NOW.timestamp()
-            except Exception:
-                ts = UTC_NOW.timestamp()
-            age = _news_age_minutes(ts)
-            if age <= max(TWD_BREAKING_RECENCY_MIN, 24*60):  # allow up to 24h on RSS
-                # crude symbol guess: if any known ticker appears in title (capitalized word)
-                symbol = "MARKET"
-                words = set(re.findall(r"[A-Z]{2,6}", title.upper()))
-                match = list(words & set([s.upper().replace("^","").replace("-USD","") for s in TICKER_LOOKUP]))
-                if match:
-                    symbol = match[0]
-                out.append({"symbol": symbol, "title": title, "publisher": source, "link": link, "age": age, "ts": float(ts)})
+        with open(RUN_LOG, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+# =========================
+# ---- Fonts (Grift) ------
+# =========================
+def _font(path: str, size: int) -> ImageFont.FreeTypeFont:
+    try:
+        return ImageFont.truetype(path, size)
+    except Exception:
+        # Fallback to default if font not found
+        return ImageFont.load_default()
+
+def font_bold(size: int) -> ImageFont.FreeTypeFont:
+    return _font(FONT_BOLD_PATH, size)
+
+def font_reg(size: int) -> ImageFont.FreeTypeFont:
+    return _font(FONT_REG_PATH, size)
+
+# =========================
+# ---- Chart Generator ----
+# =========================
+def pick_tickers(n: int = 6) -> List[str]:
+    # Weighted pick: pull more from AI/MAG7/Semis; fill with others
+    picks = set()
+    def grab(pool, k):
+        cands = [t for t in POOLS[pool] if t not in picks]
+        rng.shuffle(cands)
+        picks.update(cands[:k])
+    grab("AI", 2)
+    grab("MAG7", 2)
+    grab("Semis", 1)
+    # Fill remainder from others
+    flat_others = [t for k,v in POOLS.items() if k not in ("AI","MAG7","Semis") for t in v]
+    rng.shuffle(flat_others)
+    for t in flat_others:
+        if len(picks) >= n: break
+        picks.add(t)
+    return list(picks)[:n]
+
+def swing_levels(series: pd.Series, lookback: int = 14) -> Tuple[Optional[float], Optional[float]]:
+    """Simple swing high/low detection for support zone."""
+    if series is None or series.empty: return (None, None)
+    highs = series.rolling(lookback).max()
+    lows  = series.rolling(lookback).min()
+    return float(lows.iloc[-1]) if not math.isnan(lows.iloc[-1]) else None, \
+           float(highs.iloc[-1]) if not math.isnan(highs.iloc[-1]) else None
+
+def pct_change(series: pd.Series, days: int = 30) -> float:
+    try:
+        if len(series) < days+1: return 0.0
+        return float((series.iloc[-1] - series.iloc[-days-1]) / series.iloc[-days-1] * 100.0)
+    except Exception:
+        return 0.0
+
+def load_logo(ticker: str, target_w: int) -> Optional[Image.Image]:
+    path = os.path.join(LOGO_DIR, f"{ticker}.png")
+    if not os.path.exists(path):
+        return None
+    try:
+        img = Image.open(path).convert("RGBA")
+        w, h = img.size
+        ratio = target_w / max(1, w)
+        new = img.resize((int(w*ratio), int(h*ratio)), Image.Resampling.LANCZOS)
+        return new
+    except Exception:
+        return None
+
+def twd_logo(target_w: int) -> Optional[Image.Image]:
+    if not os.path.exists(BRAND_LOGO): return None
+    try:
+        logo = Image.open(BRAND_LOGO).convert("RGBA")
+        # tint to white using alpha only (so it blends on gradients)
+        r,g,b,a = logo.split()
+        white = Image.new("RGBA", logo.size, (255,255,255,0))
+        white.putalpha(a)
+        w, h = white.size
+        ratio = target_w / max(1, w)
+        new = white.resize((int(w*ratio), int(h*ratio)), Image.Resampling.LANCZOS)
+        return new
+    except Exception:
+        return None
+
+def draw_support_box(draw: ImageDraw.ImageDraw, chart_box: Tuple[int,int,int,int], low: float, high: float, y_from_price) -> None:
+    if low is None or high is None: return
+    x1,y1,x2,y2 = chart_box
+    y_low  = y_from_price(high)   # translucent band around zone mid
+    y_high = y_from_price(low)
+    box = [x1+2, min(y_low, y_high), x2-2, max(y_low, y_high)]
+    draw.rectangle(box, fill=(40,120,255,48), outline=(40,120,255,160), width=2)
+
+def generate_chart(ticker: str) -> Optional[str]:
+    """Weekly close chart with support zone + logos + meta text."""
+    try:
+        df = yf.download(ticker, period="1y", interval="1wk", progress=False, auto_adjust=False, threads=False)
+        if df.empty:
+            log(f"[warn] No data for {ticker}")
+            return None
+        close = df["Close"].dropna()
+        last = float(close.iloc[-1])
+        chg30 = pct_change(close, days=30)
+        chg1d = 0.0
+        sup_low, sup_high = swing_levels(close, lookback=10)
+
+        # Canvas
+        W,H = 1080, 720
+        img = Image.new("RGBA", (W,H), (255,255,255,255))
+        draw = ImageDraw.Draw(img)
+
+        # Areas
+        margin = 40
+        header_h = 150
+        footer_h = 70
+        plot = [margin+30, margin+header_h, W-margin-30, H-margin-footer_h]
+
+        # Title block
+        f_ticker = font_bold(76)
+        f_meta   = font_reg(38)
+        ticker_text = ticker
+        draw.text((margin+30, margin+30), ticker_text, fill=(0,0,0,255), font=f_ticker)
+
+        meta = f"{last:,.2f} • {chg30:+.2f}% (30d)"
+        draw.text((margin+30, margin+100), meta, fill=(30,30,30,255), font=f_meta)
+
+        # Plot close (simple line for clean look)
+        x1,y1,x2,y2 = plot
+        xs = np.linspace(x1, x2, num=len(close))
+        minp, maxp = float(close.min()), float(close.max())
+        prange = max(1e-8, maxp - minp)
+
+        def y_from_price(p):
+            # invert (higher price = lower y)
+            return y2 - (p - minp) / prange * (y2 - y1)
+
+        pts = [(int(xs[i]), int(y_from_price(close.iloc[i]))) for i in range(len(close))]
+        for i in range(1, len(pts)):
+            draw.line([pts[i-1], pts[i]], fill=(0,0,0,255), width=3)
+
+        # subtle grid
+        for gy in np.linspace(y1, y2, 5):
+            draw.line([(x1, gy),(x2, gy)], fill=(0,0,0,30), width=1)
+
+        # Support zone
+        draw_support_box(draw, plot, sup_low, sup_high, y_from_price)
+
+        # Logos
+        logo = load_logo(ticker, target_w=140)
+        if logo:
+            img.alpha_composite(logo, (W - logo.width - 26, 24))
+        twd = twd_logo(target_w=160)
+        if twd:
+            img.alpha_composite(twd, (W - twd.width - 26, H - twd.height - 24))
+
+        # Subheading
+        f_sub = font_reg(32)
+        draw.text((x1, y1-56), "Weekly chart • key support zone", fill=(40,40,40,255), font=f_sub)
+
+        out = os.path.join(CHART_DIR, f"{ticker}_chart.png")
+        img.convert("RGB").save(out, "PNG")
+        return out
     except Exception as e:
-        _dbg(f"RSS fetch fail {source}: {e}")
-    return out
+        log(f"[error] generate_chart({ticker}): {e}")
+        return None
 
-def collect_news_candidates():
-    # Pass 1: ticker news via yfinance
-    items = collect_news_for_symbols(WATCHLIST)
-    if items:
-        return items
-    _dbg("watchlist empty → trying FALLBACK_SYMBOLS for general headlines")
-    items = collect_news_for_symbols(FALLBACK_SYMBOLS)
-    if items:
-        return items
-    # Pass 3: RSS fallbacks if allowed
-    if TWD_ALLOW_RSS:
-        _dbg("yfinance returned none → using RSS fallbacks")
-        rss_items = []
-        for source, url in RSS_FEEDS:
-            rss_items.extend(_rss_fetch(url, source))
-        return rss_items
-    return []
+# =========================
+# ---- Caption Engine -----
+# =========================
+def caption_daily(ticker: str, last: float, chg30: float, near_support: bool) -> str:
+    """For charts (daily workflow) — natural, non-repetitive."""
+    emj = SECTOR_EMOJI.get(ticker, "📈")
+    cues = []
+    if chg30 >= 8: cues.append("momentum building 🔥")
+    if chg30 <= -8: cues.append("recent pullback on the radar ⚠️")
+    if near_support: cues.append("buyers defending support 🛡️")
+    if not cues:
+        cues = rng.sample([
+            "steady drift with eyes on catalysts",
+            "range tightening as traders wait for a trigger",
+            "quiet grind higher while liquidity improves"
+        ], k=1)
+    cue = rng.choice(["; ".join(cues), " · ".join(cues)])
 
-def cluster_and_filter(items):
-    clusters = {}
-    for it in items:
-        key = _norm_headline(it["title"])
-        if not key: 
-            continue
-        clusters.setdefault(key, []).append(it)
-    kept = []
-    for key, arr in clusters.items():
-        pubs = set([a["publisher"] for a in arr if a.get("publisher")])
-        if len(pubs) >= TWD_BREAKING_MIN_SOURCES:
-            arr_sorted = sorted(arr, key=lambda x: (x["publisher"] in PREFERRED_SOURCES, -x["ts"]), reverse=True)
-            kept.append((key, arr_sorted[0], arr))
-    kept.sort(key=lambda x: -x[1]["ts"])
-    return kept
+    ctas = [
+        "Save for later 📌",
+        "Your take below 👇",
+        "Share with a friend 🔄"
+    ]
+    cta = rng.choice(ctas)
 
-# ------------------ Poster state ------------------
-def load_seen():
-    os.makedirs(STATE_DIR, exist_ok=True)
-    if os.path.exists(SEEN_FILE):
-        try:
-            with open(SEEN_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {"hashes": [], "last_post_ts": 0}
-    return {"hashes": [], "last_post_ts": 0}
+    body = f"{emj} {ticker} at {last:,.2f} — {chg30:+.2f}% (30d). {cue}. {cta}"
+    return body
 
-def save_seen(state):
-    os.makedirs(STATE_DIR, exist_ok=True)
-    with open(SEEN_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
+def caption_poster(ticker: str, poster_headline: str) -> str:
+    """
+    For posters — MUST complement poster body.
+    Structure: Hook → Added context → Forward angle → CTA
+    """
+    hook = f"{SECTOR_EMOJI.get(ticker, '📈')} {ticker} — still in the spotlight"
+    context = (
+        "Beyond the headline, investors are weighing sector read-throughs, "
+        "peer reactions, and what this means for near-term demand."
+    )
+    fwd = (
+        "Next up: guidance and earnings commentary — the market wants detail "
+        "on margins and runway."
+    )
+    ctas = [
+        "What’s your take? Drop a comment 👇",
+        "Save this for later 📌",
+        "Share with someone tracking the story 🔄"
+    ]
+    return f"{hook}\n{context}\n{fwd}\n\n{rng.choice(ctas)}"
 
-def headline_hash(key: str) -> str:
-    return hashlib.md5(key.encode("utf-8")).hexdigest()
+# =========================
+# ---- Poster Engine ------
+# =========================
+def poster_background(W=1080, H=1080) -> Image.Image:
+    """Blue gradient + diagonal beams."""
+    base = Image.new("RGB", (W, H), "#0d3a66")
+    grad = Image.new("RGB", (W, H))
+    for y in range(H):
+        t = y / H
+        r = int(10 + (20-10)*t)
+        g = int(58 + (130-58)*t)
+        b = int(102 + (220-102)*t)
+        for x in range(W):
+            grad.putpixel((x, y), (r, g, b))
+    bg = Image.blend(base, grad, 0.9)
 
-# ------------------ Poster background ------------------
-def _pick_story_background_path(symbol: str, title: str):
-    base = "assets/backgrounds"
-    sym_dir = os.path.join(base, symbol.upper())
-    candidates = sorted(glob.glob(os.path.join(sym_dir, "*.*")))
-    if candidates: return candidates[0]
-    title_l = (title or "").lower()
-    themes = []
-    if any(k in title_l for k in ["gold","bullion"]): themes.append("GOLD")
-    if any(k in title_l for k in ["oil","opec","brent","wti"]): themes.append("OIL")
-    if any(k in title_l for k in ["chip","chips","semiconductor","gpu","ai"]): themes.append("CHIPS")
-    if any(k in title_l for k in ["auto","ev","tesla"]): themes.append("AUTO")
-    if any(k in title_l for k in ["health","drug","trial","fda"]): themes.append("HEALTH")
-    if not themes: themes = ["GENERIC"]
-    for th in themes:
-        th_dir = os.path.join(base, th)
-        cand = sorted(glob.glob(os.path.join(th_dir, "*.*")))
-        if cand: return cand[0]
-    return None
+    beams = Image.new("RGBA", (W, H), (0,0,0,0))
+    d = ImageDraw.Draw(beams)
+    for i, alpha in enumerate([80, 60, 40]):
+        off = i * 140
+        d.polygon([(0, 140+off), (W, 0+off), (W, 120+off), (0, 260+off)], fill=(255,255,255,alpha))
+    beams = beams.filter(ImageFilter.GaussianBlur(45))
+    return Image.alpha_composite(bg.convert("RGBA"), beams)
 
-# ------------------ Poster render ------------------
-def render_news_poster(out_path, symbol, title, body, publisher=None):
-    W, H = 1080, 1080
-    canvas = Image.new("RGBA", (W, H), (255,255,255,255))
-    draw = ImageDraw.Draw(canvas)
+def wrap_text_by_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_width_px: int) -> str:
+    words = text.split()
+    lines, line = [], ""
+    for w in words:
+        test = f"{line}{w} "
+        tw = draw.textbbox((0,0), test, font=font)[2]
+        if tw > max_width_px and line:
+            lines.append(line.rstrip())
+            line = w + " "
+        else:
+            line = test
+    if line:
+        lines.append(line.rstrip())
+    return "\n".join(lines)
 
-    bg_path = _pick_story_background_path(symbol, title)
-    if bg_path and os.path.exists(bg_path):
-        try:
-            bg = Image.open(bg_path).convert("RGBA")
-            scale = max(W/bg.width, H/bg.height)
-            bg = bg.resize((int(bg.width*scale), int(bg.height*scale)))
-            bx = (bg.width - W)//2; by = (bg.height - H)//2
-            bg = bg.crop((bx, by, bx+W, by+H))
-            alpha = Image.new("L", (W,H), int(255*0.15))
-            bg.putalpha(alpha)
-            canvas = Image.alpha_composite(canvas, bg); draw = ImageDraw.Draw(canvas)
-        except Exception as e:
-            _dbg(f"bg load fail: {e}")
+def draw_news_tag(draw, x=40, y=40):
+    tag = "NEWS"
+    f = font_bold(42)
+    pad = 14
+    tw, th = draw.textbbox((0,0), tag, font=f)[2:]
+    rect = (x, y, x + tw + pad*2, y + th + pad*2)
+    draw.rounded_rectangle(rect, radius=12, fill=(0,36,73,200))
+    draw.text((x+pad, y+pad), tag, font=f, fill=(255,255,255,255))
 
-    f_news = _load_font(28, bold=True)
-    f_head = _load_font(60, bold=True)   # slightly smaller to avoid clipping
-    f_body = _load_font(34, bold=False)
-    f_meta = _load_font(24, bold=False)
+def generate_poster(ticker: str, headline_lines: List[str], subtext_lines: List[str]) -> Optional[str]:
+    """
+    IG-native poster with:
+    - Headline (Grift-Bold, left-aligned)
+    - Subtext (Grift-Regular, 3–4 lines), wrapped to safe margins
+    - Ticker logo top-right; TWD bottom-right
+    """
+    try:
+        W,H = 1080,1080
+        img = poster_background(W,H)
+        draw = ImageDraw.Draw(img)
 
-    pad = 60; x1,y1,x2,y2 = pad,pad,W-pad,H-pad
-    draw.text((x1, y1+8), "NEWS", fill=(30,30,30,255), font=f_news)
+        draw_news_tag(draw, 40, 40)
 
-    def wrap_text(text, font, max_width):
-        words = (text or "").split()
-        lines, cur = [], ""
-        for w in words:
-            test = f"{cur} {w}".strip()
-            if draw.textlength(test, font=font) <= max_width: cur = test
-            else:
-                if cur: lines.append(cur)
-                cur = w
-        if cur: lines.append(cur)
-        return lines
+        # Headline
+        f_head = font_bold(108)
+        head = "\n".join(headline_lines)
+        draw.multiline_text((40, 160), head, font=f_head, fill=(255,255,255,255), spacing=10, align="left")
 
-    head = (title or "MARKET UPDATE").upper()
-    head_lines = wrap_text(head, f_head, x2-x1)[:3]
-    head_y = y1 + 70
-    for i, line in enumerate(head_lines):
-        draw.text((x1, head_y + i*68), line, fill=(10,10,10,255), font=f_head)
-    body_top = head_y + len(head_lines)*68 + 26
+        # Subtext (wrapped)
+        f_sub = font_reg(48)
+        sub = " ".join(subtext_lines)
+        wrapped = wrap_text_by_width(draw, sub, f_sub, max_width_px=W-80)
+        draw.multiline_text((40, 420), wrapped, font=f_sub, fill=(235,243,255,255), spacing=10, align="left")
 
-    body_lines = wrap_text((body or "").strip(), f_body, x2-x1)[:9]
-    for i, line in enumerate(body_lines):
-        draw.text((x1, body_top + i*46), line, fill=(35,35,35,255), font=f_body)
+        # Ticker logo top-right (fallback badge if missing)
+        logo = load_logo(ticker, target_w=220)
+        if logo is None:
+            # badge fallback using Grift-Bold text
+            badge_w, badge_h = 220, 110
+            badge = Image.new("RGBA", (badge_w, badge_h), (255,255,255,35))
+            bd = ImageDraw.Draw(badge)
+            bd.rounded_rectangle([0,0,badge_w,badge_h], radius=20, outline=(255,255,255,120), width=2, fill=(255,255,255,28))
+            bf = font_bold(64)
+            tw = bd.textbbox((0,0), ticker, font=bf)[2]
+            bd.text(((badge_w-tw)//2, (badge_h-64)//2 - 2), ticker, font=bf, fill=(255,255,255,255))
+            img.alpha_composite(badge, (W - badge_w - 40, 40))
+        else:
+            img.alpha_composite(logo, (W - logo.width - 40, 40))
 
-    if publisher:
-        draw.text((x1, y2 - 30), f"Source: {publisher}", fill=(90,90,90,255), font=f_meta)
+        # TWD logo bottom-right (white tinted)
+        twd = twd_logo(target_w=220)
+        if twd:
+            # subtle shadow
+            shadow = Image.new("RGBA", twd.size, (0,0,0,0))
+            sd = ImageDraw.Draw(shadow)
+            sd.bitmap((0,0), twd.split()[3], fill=(0,0,0,80))
+            shadow = shadow.filter(ImageFilter.GaussianBlur(6))
+            pos = (W - twd.width - 40, H - twd.height - 40)
+            img.alpha_composite(shadow, pos)
+            img.alpha_composite(twd, pos)
 
-    tlogo_path = os.path.join("assets","logos",f"{symbol.upper()}.png")
-    if os.path.exists(tlogo_path):
-        try:
-            tlogo = Image.open(tlogo_path).convert("RGBA")
-            hmax = 80; scale = min(1.0, hmax / max(1, tlogo.height))
-            tlogo = tlogo.resize((int(tlogo.width*scale), int(tlogo.height*scale)))
-            lx = x2 - tlogo.width; ly = y1
-            canvas.alpha_composite(tlogo, (lx, ly))
-        except Exception: pass
+        out = os.path.join(POSTER_DIR, f"{ticker}_poster_{DATESTAMP}.png")
+        img.convert("RGB").save(out, "PNG")
+        return out
+    except Exception as e:
+        log(f"[error] generate_poster({ticker}): {e}")
+        return None
 
-    if BRAND_LOGO_PATH and os.path.exists(BRAND_LOGO_PATH):
-        try:
-            blogo = Image.open(BRAND_LOGO_PATH).convert("RGBA")
-            maxh = 130; scale = min(1.0, maxh / max(1, blogo.height))
-            blogo = blogo.resize((int(blogo.width*scale), int(blogo.height*scale)))
-            bx = x2 - blogo.width; by = y2 - blogo.height
-            canvas.alpha_composite(blogo, (bx, by))
-        except Exception: pass
+# =========================
+# ---- News Polling -------
+# =========================
+YF_NEWS_ENDPOINT = "https://query1.finance.yahoo.com/v1/finance/search"
 
-    out = canvas.convert("RGB")
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    out.save(out_path, quality=92)
-
-# ------------------ Posters driver ------------------
-def cluster_and_filter(items):
-    clusters = {}
-    for it in items:
-        key = _norm_headline(it["title"])
-        if not key:
-            continue
-        clusters.setdefault(key, []).append(it)
-    kept = []
-    for key, arr in clusters.items():
-        pubs = set([a["publisher"] for a in arr if a.get("publisher")])
-        if len(pubs) >= TWD_BREAKING_MIN_SOURCES:
-            arr_sorted = sorted(arr, key=lambda x: (x["publisher"] in PREFERRED_SOURCES, -x["ts"]), reverse=True)
-            kept.append((key, arr_sorted[0], arr))
-    kept.sort(key=lambda x: -x[1]["ts"])
-    return kept
-
-def run_posters_once():
-    if not TWD_BREAKING_ON:
-        print("[info] Breaking posters OFF by env")
-        return 0
-
-    os.makedirs(POSTERS_DIR, exist_ok=True); os.makedirs(STATE_DIR, exist_ok=True)
-    seen = load_seen()
-    last_post_ts = seen.get("last_post_ts", 0)
-    mins_since_last = (UTC_NOW - datetime.datetime.utcfromtimestamp(last_post_ts)).total_seconds()/60.0 if last_post_ts else 1e9
-    _dbg(f"mins since last poster: {mins_since_last:.1f}")
-
-    items = collect_news_candidates()
-    print(f"[info] news items within window: {len(items)}")
-    if TWD_DEBUG:
-        for it in items[:10]:
-            print(f"[debug] item: {it.get('publisher')} | {it.get('symbol')} | {it.get('title')[:90]}... age={it.get('age'):.1f}m")
-
-    def cluster_and_emit(items_local):
-        clusters = cluster_and_filter(items_local)
-        print(f"[info] clusters (>= {TWD_BREAKING_MIN_SOURCES} sources): {len(clusters)}")
-        for key, best, arr in clusters:
-            h = headline_hash(key)
-            pubs = sorted(list(set([a.get("publisher","") for a in arr if a.get("publisher")])))
-            print(f"[info] candidate cluster: pubs={len(pubs)} key='{key}' best_pub={best.get('publisher')}")
-            if h in set(seen.get("hashes", [])):
-                print("[info]  -> skipped (already seen)")
-                continue
-            if mins_since_last < TWD_BREAKING_MIN_INTERVAL_MIN:
-                print(f"[info] Cooldown active ({mins_since_last:.1f}m < {TWD_BREAKING_MIN_INTERVAL_MIN}m). No poster.")
-                return 0
-            symbol = best.get("symbol") or "MARKET"
-            title = best.get("title") or "MARKET UPDATE"
-            pub = best.get("publisher") or "Multiple"
-            paragraph = f"{title}. Coverage from {', '.join(pubs[:5])}" + (" and others." if len(pubs) > 5 else ".")
-            ts_str = datetime.datetime.utcfromtimestamp(best["ts"]).strftime("%Y%m%d_%H%M%S")
-            out_path = os.path.join(POSTERS_DIR, f"news_{ts_str}.png")
-            try:
-                render_news_poster(out_path, symbol, title, paragraph, publisher=pub)
-                print("poster:", out_path)
-            except Exception as e:
-                print(f"[warn] poster render failed: {e}"); traceback.print_exc(); return 0
-            seen.setdefault("hashes", []).append(h); seen["last_post_ts"] = best["ts"]; save_seen(seen); return 1
-        return 0
-
-    made = cluster_and_emit(items)
-    if made: return made
-
-    # Fallback: widen + single-source if allowed
-    if TWD_BREAKING_FALLBACK:
-        if not items:
-            global TWD_BREAKING_RECENCY_MIN
-            TWD_BREAKING_RECENCY_MIN = max(TWD_BREAKING_RECENCY_MIN, 24*60)
-            print("[info] No items in window; widened to 24h.")
-            items = collect_news_candidates()
-            print(f"[info] widened window items: {len(items)}")
-
-        if items:
-            best = sorted(items, key=lambda x: -x["ts"])[0]
-            symbol = best.get("symbol") or "MARKET"
-            title = best.get("title") or "MARKET UPDATE"
-            pub = best.get("publisher") or "Source"
-            paragraph = f"{title}. Reported by {pub}."
-            key = _norm_headline(title); h = headline_hash(key)
-            if h in set(seen.get("hashes", [])):
-                print("[info] fallback skipped (already seen)"); return 0
-            ts_str = datetime.datetime.utcfromtimestamp(best["ts"]).strftime("%Y%m%d_%H%M%S")
-            out_path = os.path.join(POSTERS_DIR, f"news_{ts_str}.png")
-            try:
-                render_news_poster(out_path, symbol, title, paragraph, publisher=pub)
-                print("poster (fallback):", out_path)
-            except Exception as e:
-                print(f"[warn] fallback poster render failed: {e}"); traceback.print_exc(); return 0
-            seen.setdefault("hashes", []).append(h); seen["last_post_ts"] = best["ts"]; save_seen(seen); return 1
-
-    print("[info] No cross-confirmed clusters and fallback disabled or no items.")
-    return 0
-
-# ------------------ Charts driver ------------------
-def run_charts_once():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    tickers = choose_tickers_somehow(n=6, seed=DATESTR)
-    print("[info] selected tickers:", tickers)
-    saved = 0; captions = []
+def fetch_yahoo_headlines(tickers: List[str], max_items: int = 40) -> List[Dict]:
+    """
+    Lightweight news pull (Yahoo). If it fails, return empty and skip posters.
+    """
+    items = []
     for t in tickers:
         try:
-            payload = fetch_one_chart(t)
-            if not payload:
-                print(f"[warn] no data for {t}, skipping"); continue
-            out_path = os.path.join(OUTPUT_DIR, f"twd_{t}_{DATESTR}.png")
-            try:
-                render_single_post(out_path, t, payload)
-            except Exception as re:
-                _dbg(f"render error for {t}: {re}")
-                img = Image.new("RGB", (1080,1080), "white"); d = ImageDraw.Draw(img)
-                d.text((40,40), f"Render error: {t}\n{re}", fill="black")
-                os.makedirs(os.path.dirname(out_path), exist_ok=True); img.save(out_path, quality=85)
-            saved += 1
-            (df,last,chg30,sup_low,sup_high,tf_tag,chg1d) = payload
-            captions.append(caption_line(t, last, chg30, chg1d, sup_low, sup_high, seed=DATESTR))
+            # Best-effort: Yahoo Finance search endpoint (subject to change)
+            params = {"q": t, "quotesCount": 0, "newsCount": 10}
+            r = SESS.get(YF_NEWS_ENDPOINT, params=params, timeout=10)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            news = data.get("news", [])[:10]
+            for n in news:
+                title = n.get("title") or ""
+                link  = n.get("link") or ""
+                pub   = n.get("providerPublishTime")
+                if not title or not link: 
+                    continue
+                items.append({"ticker": t, "title": title, "url": link, "ts": pub})
         except Exception as e:
-            print(f"Error: failed for {t}: {e}"); traceback.print_exc()
-    print(f"[info] saved images: {saved}")
-    if saved > 0:
-        caption_path = os.path.join(OUTPUT_DIR, f"caption_{DATESTR}.txt")
-        now_str = TODAY.strftime("%d %b %Y")
-        header = f"Ones to Watch – {now_str}\n\n"
-        footer = f"\n\n{random.choice(CTA_POOL)}\n\nIdeas only — not financial advice"
-        with open(caption_path, "w", encoding="utf-8") as f:
-            f.write(header); f.write("\n\n".join(captions)); f.write(footer)
-        print("[info] wrote caption:", caption_path)
-    return saved
+            log(f"[warn] yahoo fetch for {t} failed: {e}")
+    # de-dupe by title
+    seen = set()
+    uniq = []
+    for it in items:
+        key = it["title"].strip().lower()
+        if key in seen: 
+            continue
+        seen.add(key)
+        uniq.append(it)
+    return uniq[:max_items]
 
-# ------------------ Main ------------------
+def cluster_by_popularity(items: List[Dict]) -> List[Dict]:
+    """
+    Simple heuristic: pick items whose titles mention broader themes or recur across multiple tickers.
+    """
+    if not items: return []
+    # Count occurrences by normalized title segments
+    counts = {}
+    for it in items:
+        key = re.sub(r"[^a-z0-9 ]+","", it["title"].lower()).strip()
+        counts[key] = counts.get(key, 0) + 1
+    # Keep items with count >= 2, else fallback to top few
+    pops = [it for it in items if counts.get(re.sub(r"[^a-z0-9 ]+","", it["title"].lower()).strip(),0) >= 2]
+    if not pops:
+        pops = items[:6]
+    return pops
+
+# =========================
+# ---- Workflows ----------
+# =========================
+def run_daily_charts():
+    """Mon/Wed/Fri workflow equivalent: generate 6 charts + a caption file."""
+    tickers = pick_tickers(6)
+    log(f"[info] selected tickers: {tickers}")
+    cap_lines = []
+    for t in tickers:
+        path = generate_chart(t)
+        if path:
+            # Build daily caption line
+            try:
+                df = yf.download(t, period="6mo", interval="1d", progress=False, auto_adjust=False, threads=False)
+                close = df["Close"].dropna()
+                last = float(close.iloc[-1])
+                chg30 = pct_change(close, days=30)
+                # approximate near support using weekly as proxy
+                wk = yf.download(t, period="1y", interval="1wk", progress=False, auto_adjust=False, threads=False)["Close"].dropna()
+                sup_low, sup_high = swing_levels(wk, 10)
+                near = False
+                if sup_low is not None and sup_high is not None:
+                    mid = 0.5*(sup_low+sup_high)
+                    rng = (sup_high - sup_low) + 1e-8
+                    near = abs(last - mid) <= 0.6 * rng
+                cap_lines.append(caption_daily(t, last, chg30, near))
+            except Exception:
+                pass
+    if cap_lines:
+        try:
+            with open(CAPTION_TXT, "w", encoding="utf-8") as f:
+                f.write("\n".join(cap_lines))
+            log(f"[info] caption file written: {CAPTION_TXT}")
+        except Exception as e:
+            log(f"[warn] failed to write caption file: {e}")
+
+def run_posters():
+    """Every 3 hours workflow equivalent: generate a poster for popular headline(s)."""
+    news = fetch_yahoo_headlines(WATCHLIST, max_items=40)
+    if not news:
+        log("[info] no news items fetched; skipping posters")
+        return
+    popular = cluster_by_popularity(news)
+    rng.shuffle(popular)
+    for item in popular[:1]:  # one strong item per run
+        tkr = item["ticker"]
+        title = item["title"].strip()
+
+        # Headline → ALL CAPS, broken into 1–2 lines max
+        # simple split heuristic
+        words = title.upper().split()
+        if len(words) > 6:
+            head_lines = [" ".join(words[:6]), " ".join(words[6:12])]
+        else:
+            head_lines = [" ".join(words)]
+
+        # Subtext (3–4 lines total when wrapped): we build a richer paragraph
+        sub_lines = [
+            f"This headline keeps {tkr} in focus as investors weigh the read-through for peers and demand.",
+            "The move could shift sentiment across the sector while big funds assess near-term margins.",
+            "Analysts will watch guidance and updates on runway into the next print."
+        ]
+
+        out = generate_poster(tkr, head_lines, sub_lines)
+        if out:
+            cap = caption_poster(tkr, title)
+            # save companion caption to help the post scheduler
+            poster_caption = os.path.splitext(out)[0] + "_caption.txt"
+            try:
+                with open(poster_caption, "w", encoding="utf-8") as f:
+                    f.write(cap)
+            except Exception:
+                pass
+            log(f"[info] poster saved: {out}")
+        else:
+            log("[warn] poster generation failed")
+
+# =========================
+# ---- CLI Entrypoint -----
+# =========================
 def main():
-    charts = posters = 0
-    if TWD_MODE in ("charts","all"):
-        charts = run_charts_once()
-    if TWD_MODE in ("posters","all"):
-        posters = run_posters_once()
-    print(f"[info] charts_generated={charts}, posters_generated={posters}")
+    """
+    Modes:
+      --daily      Generate 6 charts + caption file
+      --posters    Generate breaking-news poster(s)
+      --both       Run both (daily first, then posters)
+      --once TKR   Generate a single chart quickly
+      --poster-demo TKR "HEADLINE"   Generate one poster locally with default subtext
+    """
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--daily", action="store_true")
+    ap.add_argument("--posters", action="store_true")
+    ap.add_argument("--both", action="store_true")
+    ap.add_argument("--once", type=str, help="single ticker chart")
+    ap.add_argument("--poster-demo", nargs="+", help='usage: --poster-demo TKR "HEADLINE..."')
+    args = ap.parse_args()
+
+    try:
+        if args.daily:
+            log("[info] running daily charts")
+            run_daily_charts()
+        elif args.posters:
+            log("[info] running posters")
+            run_posters()
+        elif args.both:
+            log("[info] running daily charts + posters")
+            run_daily_charts()
+            run_posters()
+        elif args.once:
+            t = args.once.upper()
+            log(f"[info] quick chart for {t}")
+            out = generate_chart(t)
+            if out:
+                log(f"[info] saved: {out}")
+            else:
+                log("[warn] chart failed")
+        elif args.poster_demo:
+            if len(args.poster_demo) < 2:
+                print("usage: --poster-demo TKR \"HEADLINE...\"")
+                return
+            tkr = args.poster_demo[0].upper()
+            head = " ".join(args.poster_demo[1:]).upper()
+            words = head.split()
+            if len(words) > 6:
+                head_lines = [" ".join(words[:6]), " ".join(words[6:12])]
+            else:
+                head_lines = [head]
+            sub = [
+                f"{tkr} stays in the spotlight as investors parse sector read-throughs.",
+                "Institutional desks will watch guidance and margin commentary.",
+                "Momentum hinges on execution into the next print."
+            ]
+            out = generate_poster(tkr, head_lines, sub)
+            if out:
+                cap = caption_poster(tkr, head)
+                sc = os.path.splitext(out)[0] + "_caption.txt"
+                with open(sc, "w", encoding="utf-8") as f:
+                    f.write(cap)
+                log(f"[info] poster saved: {out}")
+            else:
+                log("[warn] poster failed")
+        else:
+            # default daily behavior (for CI convenience)
+            log("[info] default mode → daily charts")
+            run_daily_charts()
+    except Exception as e:
+        log(f"[fatal] {e}")
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()
