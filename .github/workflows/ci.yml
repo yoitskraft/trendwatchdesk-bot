@@ -21,5 +21,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install yfinance pandas numpy pillow requests
 
-      - name: Generate charts (CI)
+      - name: Generate daily charts (CI)
         run: python main.py --ci
+
+      - name: Generate news posters
+        run: python main.py --posters
+
+      - name: Upload all outputs (charts + posters + captions)
+        uses: actions/upload-artifact@v4
+        with:
+          name: twd-outputs-${{ github.run_id }}
+          path: |
+            output/charts/*.png
+            output/posters/*.png
+            output/posters/*_caption.txt
+            output/caption_*.txt
+            output/run.log
