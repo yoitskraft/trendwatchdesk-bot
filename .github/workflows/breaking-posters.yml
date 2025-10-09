@@ -56,17 +56,22 @@ jobs:
           fi
           cd ..
 
-      - name: Run posters mode
+            - name: Run posters mode
         env:
           PYTHONUNBUFFERED: "1"
           TWD_MODE: "posters"
-          TWD_DEBUG: "1"                        # keep on while stabilizing
+          TWD_DEBUG: "1"                      # keep on to see details
           TWD_BREAKING_ON: "on"
-          # Looser filters so at least 1 poster is likely:
-          TWD_BREAKING_RECENCY_MIN: "720"       # look back 12 hours (was 90)
-          TWD_BREAKING_MIN_SOURCES: "2"         # allow 2 sources (was 3)
-          TWD_BREAKING_MIN_INTERVAL_MIN: "0"    # no cooldown for now
-          TWD_BREAKING_FALLBACK: "on"           # if no cluster, use newest single source
+
+          # Ultra-permissive to guarantee a poster for testing:
+          TWD_BREAKING_RECENCY_MIN: "720"     # last 12 hours
+          TWD_BREAKING_MIN_SOURCES: "1"       # allow a single Yahoo Finance source
+          TWD_BREAKING_MIN_INTERVAL_MIN: "0"  # no cooldown
+          TWD_BREAKING_FALLBACK: "on"         # if clustering yields none, take newest item
+
+          # Focus the scan (env watchlist overrides the default in main.py)
+          TWD_WATCHLIST: "AAPL,MSFT,NVDA,AMD,TSLA,SPY,QQQ,GLD,AMZN,META,GOOGL"
+
           BRAND_LOGO_PATH: "assets/brand_logo.png"
         run: |
           set -x
