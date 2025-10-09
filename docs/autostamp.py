@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, json, datetime, subprocess, re
+import os, json, datetime, re, subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,34 +12,37 @@ def _env(k, default=""):
 def stamp_block():
     now_utc = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    # capture key knobs if present (absent ones will be blank)
-    mode = _env("TWD_MODE")
-    tf = _env("TWD_TF")
-    recency = _env("TWD_BREAKING_RECENCY_MIN")
-    min_sources = _env("TWD_BREAKING_MIN_SOURCES")
-    fallback = _env("TWD_BREAKING_FALLBACK")
-    allow_rss = _env("TWD_ALLOW_RSS")
-    wl = _env("TWD_WATCHLIST")
-    charts_branch = "charts"
-    posters_branch = "posters"
+    mode         = _env("TWD_MODE")                 # charts | posters | all
+    tf           = _env("TWD_TF")                   # D | W
+    recency      = _env("TWD_BREAKING_RECENCY_MIN")
+    min_sources  = _env("TWD_BREAKING_MIN_SOURCES")
+    fallback     = _env("TWD_BREAKING_FALLBACK")
+    allow_rss    = _env("TWD_ALLOW_RSS")
+    wl           = _env("TWD_WATCHLIST")
+    charts_branch   = _env("TWD_CHARTS_BRANCH", "charts")
+    posters_branch  = _env("TWD_POSTERS_BRANCH", "posters")
+    trigger_name = _env("TWD_TRIGGER_NAME")
 
     lines = []
     lines.append("<!-- TWD_STATUS:BEGIN -->")
     lines.append("")
     lines.append("## Automation Status (auto-generated)")
     lines.append(f"- **Last run:** {now_utc}")
+    if trigger_name:
+        lines.append(f"- **Triggered by:** {trigger_name}")
     if mode:
         lines.append(f"- **Mode:** `{mode}`   ·  **Timeframe:** `{tf or 'D'}`")
-    if recency or min_sources or fallback:
-        bits = []
-        if recency: bits.append(f"recency={recency}m")
-        if min_sources: bits.append(f"min_sources={min_sources}")
-        if fallback: bits.append(f"fallback={fallback}")
-        if allow_rss: bits.append(f"rss={allow_rss}")
-        lines.append(f"- **Breaking-posters knobs:** {', '.join(bits)}")
+    knobs = []
+    if recency:     knobs.append(f"recency={recency}m")
+    if min_sources: knobs.append(f"min_sources={min_sources}")
+    if fallback:    knobs.append(f"fallback={fallback}")
+    if allow_rss:   knobs.append(f"rss={allow_rss}")
+    if knobs:
+        lines.append(f"- **Breaking-posters knobs:** {', '.join(knobs)}")
     if wl:
-        wl_fmt = ", ".join([s.strip() for s in wl.split(",") if s.strip()][:20])
-        lines.append(f"- **Watchlist (top):** {wl_fmt}{' …' if len(wl_fmt) > 0 and len(wl.split(','))>20 else ''}")
+        wl_list = [s.strip() for s in wl.split(",") if s.strip()]
+        preview = ", ".join(wl_list[:20]) + (" …" if len(wl_list) > 20 else "")
+        lines.append(f"- **Watchlist (preview):** {preview}")
     lines.append(f"- **Publish targets:** charts → `{charts_branch}`, posters → `{posters_branch}`")
     lines.append("")
     lines.append("<!-- TWD_STATUS:END -->")
@@ -56,7 +59,6 @@ def upsert_block(file_path: Path, block: str):
             flags=re.S
         )
     else:
-        # Append to end with a separator if file exists; else create
         sep = "\n\n---\n\n" if content.strip() else ""
         new = content + sep + block
     if new != content:
@@ -65,8 +67,8 @@ def upsert_block(file_path: Path, block: str):
     return False
 
 def ensure_file(path: Path, title: str):
-    if path.exists(): return
-    path.write_text(f"# {title}\n\n", encoding="utf-8")
+    if not path.exists():
+        path.write_text(f"# {title}\n\n", encoding="utf-8")
 
 def main():
     block = stamp_block()
