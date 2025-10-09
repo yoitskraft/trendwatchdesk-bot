@@ -1,7 +1,7 @@
 name: TWD Breaking Posters (event-driven)
 
 on:
-  # Adjust cadence as you like. For testing, every 10 min; production could be every 30-60 min.
+  # For testing you can keep this frequent; for prod consider "0 */3 * * *"
   schedule:
     - cron: "*/10 * * * *"
   workflow_dispatch:
@@ -28,13 +28,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install --upgrade yfinance pillow pandas numpy requests pytz urllib3
 
-      - name: Prepare output/state dirs (ensure folder exists even if no news)
+      - name: Prepare output/state dirs (always create folder)
         run: |
           mkdir -p output/posters
           mkdir -p state
+          # write a heartbeat so branch always shows activity
           echo '{"status":"init","utc":"'$(date -u +%FT%TZ)'"}' > output/posters/status.json
 
-      # Restore the last seen headlines / cooldown from posters branch if it exists
+      # Restore dedupe/cooldown state from posters branch if it exists
       - name: Restore previous poster state
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -56,22 +57,20 @@ jobs:
           fi
           cd ..
 
-            - name: Run posters mode
+      - name: Run posters mode
         env:
           PYTHONUNBUFFERED: "1"
           TWD_MODE: "posters"
-          TWD_DEBUG: "1"                      # keep on to see details
+          TWD_DEBUG: "1"                      # verbose while stabilizing
           TWD_BREAKING_ON: "on"
-
-          # Ultra-permissive to guarantee a poster for testing:
-          TWD_BREAKING_RECENCY_MIN: "720"     # last 12 hours
-          TWD_BREAKING_MIN_SOURCES: "1"       # allow a single Yahoo Finance source
+          # ---- Filters (relaxed so you see a poster quickly; tighten later) ----
+          TWD_BREAKING_RECENCY_MIN: "720"     # scan last 12h (was 90)
+          TWD_BREAKING_MIN_SOURCES: "1"       # allow single Yahoo source
           TWD_BREAKING_MIN_INTERVAL_MIN: "0"  # no cooldown
-          TWD_BREAKING_FALLBACK: "on"         # if clustering yields none, take newest item
-
-          # Focus the scan (env watchlist overrides the default in main.py)
+          TWD_BREAKING_FALLBACK: "on"         # render newest if no cluster
+          # ---- Optional: override watchlist (comma-separated) ----
           TWD_WATCHLIST: "AAPL,MSFT,NVDA,AMD,TSLA,SPY,QQQ,GLD,AMZN,META,GOOGL"
-
+          # ---- Assets ----
           BRAND_LOGO_PATH: "assets/brand_logo.png"
         run: |
           set -x
@@ -98,10 +97,10 @@ jobs:
           COUNT=$(find output/posters -maxdepth 1 -type f -name "news_*.png" 2>/dev/null | wc -l | tr -d ' ')
           echo "posters_count=$COUNT" >> $GITHUB_OUTPUT
           echo "Generated posters: $COUNT"
-          # update status.json with summary so branch always shows activity
-          jq -n --arg utc "$(date -u +%FT%TZ)" --arg count "$COUNT" \
-            '{status:"ok", utc:$utc, posters_count:($count|tonumber)}' > output/posters/status.json || \
-          echo '{"status":"ok","posters_count":0}' > output/posters/status.json
+          # update heartbeat summary so branch shows activity even with 0 posters
+          (jq -n --arg utc "$(date -u +%FT%TZ)" --arg count "$COUNT" \
+            '{status:"ok", utc:$utc, posters_count:($count|tonumber)}' > output/posters/status.json) \
+            || echo '{"status":"ok","posters_count":0}' > output/posters/status.json
 
       - name: Publish to 'posters' branch (single-commit, always push heartbeat)
         env:
