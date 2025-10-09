@@ -13,10 +13,10 @@ SETTINGS = {
     "POSTER_LOGO_SCALE": 0.9,    # same idea for posters
 
     # ---- Support zone ----
-    "SUPPORT_FILL_ALPHA": 96,
-    "SUPPORT_BLUR_RADIUS": 6,
-    "SUPPORT_OUTLINE_ALPHA": 140,
-    "SUPPORT_MIN_PX": 26,
+    "SUPPORT_FILL_ALPHA": 110,   # whiter/stronger
+    "SUPPORT_BLUR_RADIUS": 5,    # crisper
+    "SUPPORT_OUTLINE_ALPHA": 160,
+    "SUPPORT_MIN_PX": 28,
 
     # ---- Candlesticks ----
     "CANDLE_BODY_RATIO": 0.35,
