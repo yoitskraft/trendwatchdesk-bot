@@ -129,4 +129,4 @@ trendwatchdesk-bot/
 ---
 
 **TrendWatchDesk Operations Guide v1.0**  
-_Last updated: Oct 2025_
+_Last updated: 2025-10-09_
