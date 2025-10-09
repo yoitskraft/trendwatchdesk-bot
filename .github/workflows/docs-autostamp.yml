@@ -3,8 +3,8 @@ name: Docs Autostamp
 on:
   workflow_run:
     workflows:
-      - TrendWatchDesk Generate          # your charts workflow name
-      - TWD Breaking Posters (event-driven)  # your posters workflow name
+      - TrendWatchDesk Generate                 # << exact name of your charts workflow
+      - TWD Breaking Posters (event-driven)     # << exact name of your posters workflow
     types: [completed]
   workflow_dispatch: {}
 
@@ -25,47 +25,130 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install tiny deps
-        run: |
-          python -m pip install --upgrade pip
-
-      - name: Ensure docs dir
+      # Ensure the autostamp script exists/updated (idempotent)
+      - name: Write autostamp script
         run: |
           mkdir -p docs
-
-      - name: Add autostamp script
-        run: |
           cat > docs/autostamp.py <<'PY'
-# (content injected by workflow)
-PY
-        shell: bash
-
-      - name: Write autostamp content
-        run: |
-          python - <<'PY'
+#!/usr/bin/env python3
+import os, json, datetime, re, subprocess
 from pathlib import Path
-p = Path("docs/autostamp.py")
-p.write_text(open("docs/autostamp.py", "r", encoding="utf-8").read(), encoding="utf-8")
-print("[info] autostamp present:", p.exists())
+
+ROOT = Path(__file__).resolve().parents[1]
+GUIDE = ROOT / "OPERATIONS_GUIDE.md"
+README = ROOT / "README.md"
+
+def _env(k, default=""):
+    return os.getenv(k, default)
+
+def stamp_block():
+    now_utc = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    mode         = _env("TWD_MODE")                 # charts | posters | all
+    tf           = _env("TWD_TF")                   # D | W
+    recency      = _env("TWD_BREAKING_RECENCY_MIN")
+    min_sources  = _env("TWD_BREAKING_MIN_SOURCES")
+    fallback     = _env("TWD_BREAKING_FALLBACK")
+    allow_rss    = _env("TWD_ALLOW_RSS")
+    wl           = _env("TWD_WATCHLIST")
+    charts_branch   = _env("TWD_CHARTS_BRANCH", "charts")
+    posters_branch  = _env("TWD_POSTERS_BRANCH", "posters")
+    trigger_name = _env("TWD_TRIGGER_NAME")
+
+    lines = []
+    lines.append("<!-- TWD_STATUS:BEGIN -->")
+    lines.append("")
+    lines.append("## Automation Status (auto-generated)")
+    lines.append(f"- **Last run:** {now_utc}")
+    if trigger_name:
+        lines.append(f"- **Triggered by:** {trigger_name}")
+    if mode:
+        lines.append(f"- **Mode:** `{mode}`   ·  **Timeframe:** `{tf or 'D'}`")
+    knobs = []
+    if recency:     knobs.append(f"recency={recency}m")
+    if min_sources: knobs.append(f"min_sources={min_sources}")
+    if fallback:    knobs.append(f"fallback={fallback}")
+    if allow_rss:   knobs.append(f"rss={allow_rss}")
+    if knobs:
+        lines.append(f"- **Breaking-posters knobs:** {', '.join(knobs)}")
+    if wl:
+        wl_list = [s.strip() for s in wl.split(",") if s.strip()]
+        preview = ", ".join(wl_list[:20]) + (" …" if len(wl_list) > 20 else "")
+        lines.append(f"- **Watchlist (preview):** {preview}")
+    lines.append(f"- **Publish targets:** charts → `{charts_branch}`, posters → `{posters_branch}`")
+    lines.append("")
+    lines.append("<!-- TWD_STATUS:END -->")
+    lines.append("")
+    return "\n".join(lines)
+
+def upsert_block(file_path: Path, block: str):
+    content = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
+    if "<!-- TWD_STATUS:BEGIN -->" in content and "<!-- TWD_STATUS:END -->" in content:
+        new = re.sub(
+            r"<!-- TWD_STATUS:BEGIN -->.*?<!-- TWD_STATUS:END -->",
+            block,
+            content,
+            flags=re.S
+        )
+    else:
+        sep = "\n\n---\n\n" if content.strip() else ""
+        new = content + sep + block
+    if new != content:
+        file_path.write_text(new, encoding="utf-8")
+        return True
+    return False
+
+def ensure_file(path: Path, title: str):
+    if not path.exists():
+        path.write_text(f"# {title}\n\n", encoding="utf-8")
+
+def main():
+    block = stamp_block()
+    ensure_file(GUIDE, "TrendWatchDesk — Operations Guide")
+    ensure_file(README, "TrendWatchDesk — README")
+
+    changed = False
+    changed |= upsert_block(GUIDE, block)
+    changed |= upsert_block(README, block)
+
+    if changed:
+        print("[info] docs updated")
+        # stage from repo root
+        os.chdir(ROOT)
+        subprocess.run(["git", "add", "OPERATIONS_GUIDE.md", "README.md"], check=False)
+    else:
+        print("[info] docs already up-to-date; no changes")
+
+if __name__ == "__main__":
+    main()
 PY
 
-      - name: Run autostamp (captures env knobs if set in prior workflows)
-        env:
-          # Pass through commonly used knobs so the status block reflects latest config.
-          TWD_MODE: charts
-          TWD_TF: D
-          TWD_BREAKING_RECENCY_MIN: "720"
-          TWD_BREAKING_MIN_SOURCES: "1"
-          TWD_BREAKING_FALLBACK: "on"
-          TWD_ALLOW_RSS: "on"
-          TWD_WATCHLIST: "AAPL,MSFT,NVDA,AMD,TSLA,SPY,QQQ,GLD,AMZN,META,GOOGL"
+      # Derive env for the stamp from the triggering workflow name
+      - name: Derive status env
+        run: |
+          TRIGGER="${{ github.event.workflow.name || 'manual' }}"
+          echo "TWD_TRIGGER_NAME=$TRIGGER" >> $GITHUB_ENV
+          # Best effort: infer mode from workflow name
+          if echo "$TRIGGER" | grep -qi "poster"; then MODE="posters"; else MODE="charts"; fi
+          echo "TWD_MODE=$MODE" >> $GITHUB_ENV
+          # Sensible defaults (these just document current setup; adjust if you want)
+          echo "TWD_TF=D" >> $GITHUB_ENV
+          echo "TWD_BREAKING_RECENCY_MIN=720" >> $GITHUB_ENV
+          echo "TWD_BREAKING_MIN_SOURCES=1" >> $GITHUB_ENV
+          echo "TWD_BREAKING_FALLBACK=on" >> $GITHUB_ENV
+          echo "TWD_ALLOW_RSS=on" >> $GITHUB_ENV
+          echo "TWD_CHARTS_BRANCH=charts" >> $GITHUB_ENV
+          echo "TWD_POSTERS_BRANCH=posters" >> $GITHUB_ENV
+          # If you want the exact watchlist shown, mirror your other workflows here:
+          echo "TWD_WATCHLIST=AAPL,MSFT,NVDA,AMD,TSLA,SPY,QQQ,GLD,AMZN,META,GOOGL" >> $GITHUB_ENV
+
+      - name: Run autostamp
         run: |
           python docs/autostamp.py
 
       - name: Commit docs if changed
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
         run: |
           set -e
           if git diff --staged --quiet; then
