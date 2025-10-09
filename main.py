@@ -21,6 +21,15 @@ import yfinance as yf
 import requests
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
+# =========================
+# ---- External Controls --
+# =========================
+try:
+    import controls
+    controls.apply_overrides(globals())
+except Exception as e:
+    print(f"[warn] controls.py not loaded: {e}")
+
 # -----------------------
 # Paths & constants
 # -----------------------
@@ -308,7 +317,7 @@ def generate_chart(ticker: str) -> Optional[str]:
             return None
 
         # Canvas
-        W, H = 1080, 720
+        W, H = CHART_W, CHART_H
         img = blue_gradient_bg(W, H)
         d   = ImageDraw.Draw(img)
 
@@ -320,39 +329,39 @@ def generate_chart(ticker: str) -> Optional[str]:
         # 1) Candles first (no grid)
         render_candles(d, ohlc, (x1, y1, x2, y2))
 
-        # 2) Support zone OVER candles (so it's actually visible)
-        close_s = ohlc["Close"]
-        lo, hi = swing_levels(close_s, lookback=10)
-        if (lo is not None) and (hi is not None) and (hi >= lo):
-            pmin = float(ohlc["Low"].min())
-            pmax = float(ohlc["High"].max())
-            pr   = max(1e-9, pmax - pmin)
+     # 2) Support zone OVER candles (so it's actually visible)
+close_s = ohlc["Close"]
+lo, hi = swing_levels(close_s, lookback=10)
+if (lo is not None) and (hi is not None) and (hi >= lo):
+    pmin = float(ohlc["Low"].min())
+    pmax = float(ohlc["High"].max())
+    pr   = max(1e-9, pmax - pmin)
 
-            def y(p: float) -> int:
-                return int(y2 - (float(p) - pmin) / pr * (y2 - y1))
+    def y(p: float) -> int:
+        return int(y2 - (float(p) - pmin) / pr * (y2 - y1))
 
-            y_top, y_bot = y(hi), y(lo)
+    y_top, y_bot = y(hi), y(lo)
 
-            # Enforce a minimum visual thickness so the zone never vanishes
-            MIN_PX = 26
-            if (y_bot - y_top) < MIN_PX:
-                mid = (y_top + y_bot) // 2
-                pad = MIN_PX // 2
-                y_top = max(y1 + 4, mid - pad)
-                y_bot = min(y2 - 4, mid + pad)
+    # Enforce a minimum visual thickness so the zone never vanishes
+    MIN_PX = int(SUPPORT_MIN_PX)
+    if (y_bot - y_top) < MIN_PX:
+        mid = (y_top + y_bot) // 2
+        pad = MIN_PX // 2
+        y_top = max(y1 + 4, mid - pad)
+        y_bot = min(y2 - 4, mid + pad)
 
-            # Feathered white zone (visible but not shouty)
-            feathered_support(
-                img,
-                x1 + 6, min(y_top, y_bot),
-                x2 - 6, max(y_top, y_bot),
-                fill_alpha=96,    # bump to 112 if you want more presence
-                blur_radius=6,    # lower to 4 for crisper edges
-                outline_alpha=140 # faint white hairline for definition
-            )
+    # Feathered white zone (visible but not shouty)
+    feathered_support(
+        img,
+        x1 + 6, min(y_top, y_bot),
+        x2 - 6, max(y_top, y_bot),
+        fill_alpha=int(SUPPORT_FILL_ALPHA),     # from controls.py
+        blur_radius=int(SUPPORT_BLUR_RADIUS),   # from controls.py
+        outline_alpha=int(SUPPORT_OUTLINE_ALPHA) # from controls.py
+    )
 
         # 3) Logos — company (white mono) top-left, TWD white bottom-right
-        lg = load_logo_color(ticker, 170)
+        lg = load_logo(ticker, int(170 * CHART_LOGO_SCALE))
         if lg is not None:
             lg_white = to_white_mono(lg, alpha=255)
             img.alpha_composite(lg_white, (x1, 16))
@@ -482,7 +491,7 @@ def generate_poster_image(ticker: str, headline: str, subtext: str) -> Optional[
         subw=wrap_text(d, subtext, sfont, W-80)
         d.multiline_text((40,420), subw, font=sfont, fill=(235,243,255,255), spacing=10, align="left")
         # logos (color on right for posters)
-        lg = load_logo_color_safe(ticker, 220)
+        logo = load_logo(ticker, int(220 * POSTER_LOGO_SCALE))
         if lg is not None:
             img.alpha_composite(lg, (W - lg.width - 40, 40))
         twd=load_twd_white(220)
