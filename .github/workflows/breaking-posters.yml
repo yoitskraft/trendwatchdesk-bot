@@ -60,14 +60,13 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
           TWD_MODE: "posters"
-          TWD_DEBUG: "1"                      # verbose logs (set "0" when stable)
+          TWD_DEBUG: "1"                        # keep on while stabilizing
           TWD_BREAKING_ON: "on"
-          # ---- Filters / knobs ----
-          TWD_BREAKING_RECENCY_MIN: "90"      # consider news <= 90 minutes old
-          TWD_BREAKING_MIN_SOURCES: "3"       # require ≥ 3 distinct publishers
-          TWD_BREAKING_MIN_INTERVAL_MIN: "30" # cooldown (mins) between posters
-          TWD_BREAKING_FALLBACK: "off"        # set "on" to allow single-source fallback
-          # ---- Assets ----
+          # Looser filters so at least 1 poster is likely:
+          TWD_BREAKING_RECENCY_MIN: "720"       # look back 12 hours (was 90)
+          TWD_BREAKING_MIN_SOURCES: "2"         # allow 2 sources (was 3)
+          TWD_BREAKING_MIN_INTERVAL_MIN: "0"    # no cooldown for now
+          TWD_BREAKING_FALLBACK: "on"           # if no cluster, use newest single source
           BRAND_LOGO_PATH: "assets/brand_logo.png"
         run: |
           set -x
