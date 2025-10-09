@@ -61,20 +61,14 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
           TWD_MODE: "posters"
-          TWD_DEBUG: "1"                      # verbose while stabilizing
+          TWD_DEBUG: "1"
           TWD_BREAKING_ON: "on"
-          # ---- Filters (relaxed so you see a poster quickly; tighten later) ----
-          TWD_BREAKING_RECENCY_MIN: "1440"     # scan last 12h (was 90)
-          TWD_BREAKING_MIN_SOURCES: "1"       # allow single Yahoo source
+          TWD_BREAKING_RECENCY_MIN: "720"     # 12h window
+          TWD_BREAKING_MIN_SOURCES: "1"       # allow single-source
           TWD_BREAKING_MIN_INTERVAL_MIN: "0"  # no cooldown
-          TWD_BREAKING_FALLBACK: "on"         # render newest if no cluster
-          # ---- Optional: override watchlist (comma-separated) ----
+          TWD_BREAKING_FALLBACK: "on"         # ensure a poster gets made
           TWD_WATCHLIST: "AAPL,MSFT,NVDA,AMD,TSLA,SPY,QQQ,GLD,AMZN,META,GOOGL"
-          # ---- Assets ----
           BRAND_LOGO_PATH: "assets/brand_logo.png"
-        run: |
-          set -x
-          python -u main.py 2>&1 | tee run.log
 
       - name: Show run.log
         if: always()
