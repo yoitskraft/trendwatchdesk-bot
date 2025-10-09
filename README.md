@@ -38,3 +38,18 @@ pip install --upgrade yfinance pillow pandas numpy requests pytz urllib3
 TWD_MODE=charts python main.py
 # or
 TWD_MODE=posters python main.py
+
+
+---
+
+<!-- TWD_STATUS:BEGIN -->
+
+## Automation Status (auto-generated)
+- **Last run:** 2025-10-09 02:11:08 UTC
+- **Triggered by:** manual
+- **Mode:** `charts`   ·  **Timeframe:** `D`
+- **Breaking-posters knobs:** recency=720m, min_sources=1, fallback=on, rss=on
+- **Watchlist (preview):** AAPL, MSFT, NVDA, AMD, TSLA, SPY, QQQ, GLD, AMZN, META, GOOGL
+- **Publish targets:** charts → `charts`, posters → `posters`
+
+<!-- TWD_STATUS:END -->
