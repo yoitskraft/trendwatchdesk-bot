@@ -1,91 +1,52 @@
-# TrendWatchDesk
+# TrendWatchDesk 📊
 
-_Last updated: 2025-10-09_
-
-TrendWatchDesk auto-generates **Instagram-ready market content**:
-- 📊 **Charts**: 6 clean, 1080×1080 candlestick charts with a single support zone, 3× per week.
-- 📝 **Captions**: Human-style, news-aware lines with light technical cues + emojis.
-- 📰 **News Posters**: All-caps headlines + short paragraphs with faint themed backgrounds, triggered by cross-confirmed breaking news.
-
-## How it works
-
-- **`main.py`** is the single entrypoint:
-  - Mode `charts`: generates images into `output/` and writes a daily caption.
-  - Mode `posters`: scans news, renders a news poster into `output/posters/` when criteria pass.
-- **GitHub Actions** automate runs and publish artifacts to dedicated branches:
-  - `charts` branch → chart PNGs + captions.
-  - `posters` branch → news posters + dedupe state.
-
-## Workflows
-
-- `.github/workflows/daily.yml`  
-  Runs **Mon/Wed/Fri 07:10 UTC**. Publishes chart images + caption to `charts` branch.
-
-- `.github/workflows/breaking-posters.yml`  
-  Runs **every 10 minutes**. Publishes 0–1 posters (if cross-confirmed news) to `posters` branch.
-
-- `.github/workflows/docs-guard.yml`  
-  **PR guard**: fails if core files change but docs (`README.md`/`OPERATIONS_GUIDE.md`) aren’t updated.
-
-- `.github/workflows/docs-autostamp.yml`  
-  **Auto-stamp**: updates the “Last updated” date in docs on pushes to `main`.
-
-## Local run
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install --upgrade yfinance pillow pandas numpy requests pytz urllib3
-TWD_MODE=charts python main.py
-# or
-TWD_MODE=posters python main.py
-
+Automated system for generating **stock market visuals** — candlestick charts and news-driven posters — optimized for **Instagram engagement**.
 
 ---
 
-<!-- TWD_STATUS:BEGIN -->
+## 🚀 Features
 
-## Automation Status (auto-generated)
-- **Last run:** 2025-10-09 13:10:33 UTC
-- **Triggered by:** TWD Breaking Posters (event-driven)
-- **Mode:** `posters`   ·  **Timeframe:** `D`
-- **Breaking-posters knobs:** recency=720m, min_sources=1, fallback=on, rss=on
-- **Watchlist (preview):** AAPL, MSFT, NVDA, AMD, TSLA, SPY, QQQ, GLD, AMZN, META, GOOGL
-- **Publish targets:** charts → `charts`, posters → `posters`
+- **Daily/weekly candlestick charts** with support zones
+- **News-driven posters** with sector-aware context
+- **Auto captions** (IG-ready, with emojis & variety)
+- **Deterministic ticker selection** (stable randomness per day)
+- **CI publishing** to `charts` branch for easy artifact access
 
-<!-- TWD_STATUS:END -->
+---
 
+## 📂 Repo Structure
 
+```text
+.
+├── assets/                 # Logos, fonts, brand identity
+├── output/                 # Charts + posters (CI artifacts)
+├── .github/workflows/      # Automation (daily, docs, CI)
+├── main.py                 # Core engine
+├── OPERATIONS_GUIDE.md     # Canonical ops reference
+├── README.md               # This file
+└── update_docs.py          # Script to regen docs
+```
 
+---
 
+## ⚙️ Workflows
 
+- `daily.yml` → Generates charts Mon/Wed/Fri 07:10 UTC  
+- `ci.yml` → Extended charts + posters run (optional)  
+- `docs-autostamp.yml` → Auto-updates timestamps in docs  
+- `docs-guard.yml` → Ensures docs compliance  
 
+---
 
+## 📸 Outputs
 
+- **Charts** → `output/charts/` → candlesticks + support zones  
+- **Posters** → `output/posters/` → news headlines + sector logos  
+- **Captions** → `output/caption_YYYYMMDD.txt`  
+- **Run logs** → `output/run.log`  
 
+---
 
+## 📖 Operations Guide
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+See [OPERATIONS_GUIDE.md](OPERATIONS_GUIDE.md) for full canonical spec.
