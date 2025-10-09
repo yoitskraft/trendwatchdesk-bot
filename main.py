@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-TrendWatchDesk - main.py
-Stable CI version: Charts + Posters + Yahoo Finance news
+TrendWatchDesk - Stable CI Version
+Charts + Posters + Captions
 """
 
 import os, re, random, hashlib, traceback, datetime
@@ -29,6 +29,7 @@ OUTPUT_DIR   = "output"
 CHART_DIR    = os.path.join(OUTPUT_DIR, "charts")
 POSTER_DIR   = os.path.join(OUTPUT_DIR, "posters")
 RUN_LOG      = os.path.join(OUTPUT_DIR, "run.log")
+CAPTION_TXT  = os.path.join(OUTPUT_DIR, f"caption_{datetime.date.today().strftime('%Y%m%d')}.txt")
 
 for d in (OUTPUT_DIR, CHART_DIR, POSTER_DIR):
     os.makedirs(d, exist_ok=True)
@@ -63,58 +64,84 @@ def log(msg: str):
 # =========================
 # ---- Helpers ------------
 # =========================
-def _as_float(x):
-    try: return float(x.item())
-    except AttributeError: return float(x)
+def _to_1d_float_array(x) -> np.ndarray:
+    if x is None: return np.array([],dtype="float64")
+    if isinstance(x, pd.DataFrame):
+        x = x.select_dtypes(include=[np.number]).iloc[:,0] if not x.empty else x.iloc[:,0]
+    if isinstance(x, pd.Series): arr = x.to_numpy()
+    elif isinstance(x, np.ndarray): arr = x
+    else: arr = np.array(x)
+    arr = pd.to_numeric(arr, errors="coerce")
+    if isinstance(arr, pd.Series): arr = arr.to_numpy()
+    arr = np.asarray(arr, dtype="float64").ravel()
+    arr = arr[~np.isnan(arr)]
+    return arr
 
-def _close_series_to_array(series: pd.Series) -> np.ndarray:
-    if series is None or series.size==0: return np.array([],dtype="float64")
-    arr=pd.to_numeric(series,errors="coerce").dropna().to_numpy(dtype="float64")
-    return arr.reshape(-1)
-
-def _font(path,size):
+def _font(path,size): 
     try: return ImageFont.truetype(path,size)
     except: return ImageFont.load_default()
 def font_bold(size): return _font(FONT_BOLD,size)
 def font_reg(size):  return _font(FONT_REG,size)
 
-def load_logo(ticker:str,w:int)->Optional[Image.Image]:
+def recolor_to_white(img: Image.Image) -> Image.Image:
+    img = img.convert("RGBA")
+    r,g,b,a = img.split()
+    white = Image.new("RGBA", img.size, (255,255,255,255))
+    white.putalpha(a)
+    return white
+
+def load_logo_white(ticker:str,w:int)->Optional[Image.Image]:
     p=os.path.join(LOGO_DIR,f"{ticker}.png")
     if not os.path.exists(p): return None
     img=Image.open(p).convert("RGBA")
     ratio=w/max(1,img.width)
-    return img.resize((int(img.width*ratio),int(img.height*ratio)),Image.Resampling.LANCZOS)
+    img=img.resize((int(img.width*ratio),int(img.height*ratio)),Image.Resampling.LANCZOS)
+    return recolor_to_white(img)
 
-def twd_logo(w:int)->Optional[Image.Image]:
+def twd_logo_white(w:int)->Optional[Image.Image]:
     if not os.path.exists(BRAND_LOGO): return None
-    logo=Image.open(BRAND_LOGO).convert("RGBA")
-    r,g,b,a=logo.split()
-    base=Image.new("RGBA",logo.size,(255,255,255,0)); base.putalpha(a)
-    ratio=w/max(1,logo.width)
-    return base.resize((int(logo.width*ratio),int(logo.height*ratio)),Image.Resampling.LANCZOS)
+    img=Image.open(BRAND_LOGO).convert("RGBA")
+    ratio=w/max(1,img.width)
+    img=img.resize((int(img.width*ratio),int(img.height*ratio)),Image.Resampling.LANCZOS)
+    return recolor_to_white(img)
+
+def measure_text(draw,text,font): 
+    bbox=draw.textbbox((0,0),text,font=font)
+    return bbox[2]-bbox[0], bbox[3]-bbox[1]
+
+def wrap_to_width(draw,text,font,max_w):
+    words=text.split(); lines=[]; line=""
+    for w in words:
+        test=(line+" "+w).strip()
+        tw,_=measure_text(draw,test,font)
+        if tw>max_w and line: lines.append(line); line=w
+        else: line=test
+    if line: lines.append(line)
+    return lines
+
+def fit_headline(draw,text,font_path,start_size,max_w,max_lines):
+    size=start_size
+    while size>=56:
+        f=ImageFont.truetype(font_path,size)
+        lines=wrap_to_width(draw,text,f,max_w)
+        if len(lines)<=max_lines: return lines,f
+        size-=4
+    f=ImageFont.truetype(font_path,56)
+    return wrap_to_width(draw,text,f,max_w)[:max_lines],f
 
 # =========================
 # ---- Charts -------------
 # =========================
-def swing_levels(series: pd.Series, lookback=14):
-    if series is None or series.empty: return (None,None)
-    hi,lo=series.rolling(lookback).max().iloc[-1], series.rolling(lookback).min().iloc[-1]
-    return (None if pd.isna(lo) else _as_float(lo),
-            None if pd.isna(hi) else _as_float(hi))
-
-def pct_change(series: pd.Series, days=30)->float:
-    if len(series)<days+1: return 0.0
-    last,prev=_as_float(series.iloc[-1]),_as_float(series.iloc[-days-1])
-    return 0.0 if prev==0 else (last-prev)/prev*100.0
-
 def generate_chart(tkr:str)->Optional[str]:
     try:
         df=yf.download(tkr,period="1y",interval="1wk",progress=False,auto_adjust=False,threads=False)
         if df.empty: return None
-        arr=_close_series_to_array(df["Close"])
-        if arr.size==0: return None
-        last=float(arr[-1]); chg30=pct_change(pd.Series(arr),30)
-        sup_lo,sup_hi=swing_levels(pd.Series(arr),10)
+        arr=_to_1d_float_array(df["Close"])
+        if arr.size<2: return None
+        last=float(arr[-1]); chg30=(last-float(arr[-31]))/float(arr[-31])*100 if arr.size>31 else 0.0
+        s=pd.Series(arr)
+        hi,lo=s.rolling(10).max().iloc[-1], s.rolling(10).min().iloc[-1]
+        sup_lo=None if pd.isna(lo) else float(lo); sup_hi=None if pd.isna(hi) else float(hi)
 
         W,H=1080,720
         img=Image.new("RGBA",(W,H),"white"); d=ImageDraw.Draw(img)
@@ -123,17 +150,16 @@ def generate_chart(tkr:str)->Optional[str]:
 
         xs=np.linspace(100,W-100,num=arr.size)
         minp,maxp=np.nanmin(arr),np.nanmax(arr); pr=max(1e-8,maxp-minp)
-        def y(p): return (H-100)-(p-minp)/pr*(H-200)
+        def y(p): return (H-100)-((p-minp)/pr*(H-200))
         pts=[(int(xs[i]),int(y(arr[i]))) for i in range(arr.size)]
         for i in range(1,len(pts)): d.line([pts[i-1],pts[i]],fill="black",width=3)
 
         if sup_lo and sup_hi:
-            y_lo,y_hi=y(sup_hi),y(sup_lo)
-            d.rectangle([100,y_lo,W-100,y_hi],fill=(40,120,255,48),outline=(40,120,255,160))
+            d.rectangle([100,int(y(sup_hi)),W-100,int(y(sup_lo))],fill=(40,120,255,48),outline=(40,120,255,160))
 
-        lg=load_logo(tkr,140)
+        lg=load_logo_white(tkr,140)
         if lg: img.alpha_composite(lg,(W-lg.width-30,30))
-        twd=twd_logo(160)
+        twd=twd_logo_white(160)
         if twd: img.alpha_composite(twd,(W-twd.width-30,H-twd.height-30))
 
         out=os.path.join(CHART_DIR,f"{tkr}_chart.png")
@@ -157,79 +183,75 @@ def poster_background(W=1080,H=1080):
         off=i*140; d.polygon([(0,140+off),(W,0+off),(W,120+off),(0,260+off)],fill=(255,255,255,a))
     return Image.alpha_composite(base.convert("RGBA"),beams.filter(ImageFilter.GaussianBlur(45)))
 
-def wrap_text(draw,text,font,max_w):
-    words=text.split(); lines=[]; line=""
-    for w in words:
-        test=f"{line}{w} "; tw=draw.textbbox((0,0),test,font=font)[2]
-        if tw>max_w and line: lines.append(line.rstrip()); line=w+" "
-        else: line=test
-    if line: lines.append(line.rstrip())
-    return "\n".join(lines)
-
-def generate_poster(tkr:str,headline:str,sub_lines:List[str])->Optional[str]:
+def generate_poster(tkr:str,headline:str,subtext_lines:List[str])->Optional[str]:
     try:
-        W,H=1080,1080; img=poster_background(W,H); d=ImageDraw.Draw(img)
-        d.text((40,40),"NEWS",font=font_bold(42),fill="white")
-        d.multiline_text((40,160),wrap_text(d,headline.upper(),font_bold(108),W-80),
-                         font=font_bold(108),fill="white",spacing=10)
-        sub="\n".join([wrap_text(d,s,font_reg(48),W-80) for s in sub_lines])
-        d.multiline_text((40,420),sub,font=font_reg(48),fill=(235,243,255),spacing=10)
-        lg=load_logo(tkr,220)
-        if lg: img.alpha_composite(lg,(W-lg.width-40,40))
-        twd=twd_logo(220)
-        if twd: img.alpha_composite(twd,(W-twd.width-40,H-twd.height-40))
+        W,H=1080,1080; PAD=44; img=poster_background(W,H); d=ImageDraw.Draw(img)
+        # NEWS tag
+        tag_font=font_bold(42); d.text((PAD,PAD),"NEWS",font=tag_font,fill="white")
+        # Logos
+        lg=load_logo_white(tkr,220); twd=twd_logo_white(220)
+        if lg: img.alpha_composite(lg,(W-lg.width-PAD,PAD))
+        if twd: img.alpha_composite(twd,(W-twd.width-PAD,H-twd.height-PAD))
+        # Headline
+        lines,hfont=fit_headline(d,headline.upper(),FONT_BOLD,112,W-2*PAD,2)
+        y=PAD+80
+        for l in lines:
+            d.text((PAD,y),l,font=hfont,fill="white"); y+=measure_text(d,l,hfont)[1]+10
+        # Subtext
+        subf=font_reg(48); sub_y=y+20
+        for para in subtext_lines:
+            for l in wrap_to_width(d,para,subf,W-2*PAD):
+                if sub_y+60>H-PAD-220: break
+                d.text((PAD,sub_y),l,font=subf,fill=(235,243,255)); sub_y+=55
         out=os.path.join(POSTER_DIR,f"{tkr}_poster_{DATESTAMP}.png")
-        img.convert("RGB").save(out,"PNG")
-        return out
+        img.convert("RGB").save(out,"PNG"); return out
     except Exception as e:
-        log(f"[error] generate_poster({tkr}): {e}")
-        return None
+        log(f"[error] generate_poster({tkr}): {e}"); return None
 
 # =========================
-# ---- Yahoo News ---------
+# ---- News ---------------
 # =========================
-def fetch_yahoo_headlines(tickers: List[str], max_items=20) -> List[Dict]:
+def fetch_yahoo_headlines(tickers: List[str], max_items: int = 20) -> List[Dict]:
     items=[]
     for t in tickers:
         try:
-            r=SESS.get(YF_NEWS_ENDPOINT,params={"q":t,"newsCount":10},timeout=10)
+            r=SESS.get(YF_NEWS_ENDPOINT,params={"q":t,"newsCount":5},timeout=10)
             if r.status_code!=200: continue
-            for n in r.json().get("news",[])[:10]:
-                if n.get("title"):
-                    items.append({"ticker":t,"title":n["title"]})
-        except Exception as e:
-            log(f"[warn] yahoo fetch {t}: {e}")
+            for n in r.json().get("news",[])[:5]:
+                if "title" in n: items.append({"ticker":t,"title":n["title"]})
+        except Exception as e: log(f"[warn] fetch fail {t}: {e}")
     seen=set(); uniq=[]
     for it in items:
-        k=it["title"].strip().lower()
-        if k in seen: continue
-        seen.add(k); uniq.append(it)
+        if it["title"].lower() not in seen:
+            seen.add(it["title"].lower()); uniq.append(it)
     return uniq[:max_items]
 
 # =========================
 # ---- Workflows ----------
 # =========================
-def run_daily_charts()->int:
+def run_daily_charts():
     tickers=["AAPL","MSFT","NVDA","AMD","TSLA","AMZN"]
     generated=[generate_chart(t) for t in tickers if generate_chart(t)]
-    if generated: print("==============================\n✅ Charts generated:",len(generated),"\n==============================")
-    else: print("==============================\n❌ No charts generated\n==============================")
+    print("==============================")
+    if generated: print(f"✅ Charts generated: {len(generated)}")
+    else: print("❌ No charts generated")
+    print("==============================")
     return len(generated)
 
-def run_posters()->int:
-    news=fetch_yahoo_headlines(WATCHLIST,20)
+def run_posters():
+    news=fetch_yahoo_headlines(WATCHLIST)
     if not news: return 0
-    generated=[]
+    count=0
     for item in news[:2]:
-        tkr=item["ticker"]; title=item["title"]
-        sub=[f"{tkr} stays in focus as investors parse demand signals.",
+        sub=[f"{item['ticker']} stays in focus as investors parse signals.",
              "Analysts highlight sector implications.",
              "Guidance and margins remain key."]
-        p=generate_poster(tkr,title,sub)
-        if p: generated.append(p)
-    if generated: print("==============================\n✅ Posters generated:",len(generated),"\n==============================")
-    else: print("==============================\n❌ No posters generated\n==============================")
-    return len(generated)
+        if generate_poster(item["ticker"],item["title"],sub): count+=1
+    print("==============================")
+    if count: print(f"✅ Posters generated: {count}")
+    else: print("❌ No posters generated")
+    print("==============================")
+    return count
 
 # =========================
 # ---- CLI ----------------
@@ -242,7 +264,6 @@ def main():
     ap.add_argument("--daily",action="store_true")
     ap.add_argument("--posters",action="store_true")
     args=ap.parse_args()
-
     try:
         if args.ci:
             c=run_daily_charts(); raise SystemExit(0 if c>0 else 2)
