@@ -212,7 +212,7 @@ def blue_gradient_bg(W: int, H: int) -> Image.Image:
     return Image.alpha_composite(bg, beams)
 
 def feathered_support(img: Image.Image, x1:int, y1:int, x2:int, y2:int,
-                      fill_alpha: int = 70, blur_radius: int = 10, outline_alpha: int = 100):
+                      fill_alpha: int = 70, blur_radius: int = 5, outline_alpha: int = 100):
     """
     Draw a semi-transparent feathered support/resistance zone:
     - white haze with slight transparency
