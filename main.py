@@ -3,20 +3,25 @@
 
 """
 TrendWatchDesk - main.py
-Single source of truth aligned with OPERATIONS_GUIDE.md
+Aligned with OPERATIONS_GUIDE.md (single source of truth)
 
-Features:
+Features
 - Weekly charts (6 tickers per run) with support zone, logos, Grift fonts
-- Posters (breaking news) with IG-native gradient layout, Grift fonts, wrapped subtext
-- Captions (daily + poster) with natural, news-driven tone and emojis
-- Poster captions ALWAYS complement poster copy (no duplication)
-- Watchlist + weighted pools; deterministic selection by date
-- Yahoo Finance polling + simple clustering; graceful fallbacks
-- Outputs: output/charts/, output/posters/, output/caption_YYYYMMDD.txt, run.log
+- Captions: natural, news-driven, emojis; poster captions complement posters (no duplication)
+- Posters: IG-native gradient + beams; Grift-Bold headline + Grift-Regular subtext (3–4 lines), word-wrapped
+- News polling (Yahoo Finance lightweight) + simple clustering, safe fallback
+- Deterministic daily seed for stable selections
+- Outputs: output/charts/, output/posters/, output/caption_YYYYMMDD.txt, output/run.log
+- CLI:
+    --daily              Generate charts + a daily caption file (like Mon/Wed/Fri workflow)
+    --posters            Generate breaking news posters (news-driven only)
+    --both               Run daily then posters
+    --once TKR           One-off chart for a single ticker
+    --poster-demo TKR "HEADLINE..."   Force-generate a poster for testing (kept for parity)
+    --poster-mockup [TKR "HEADLINE..."]  New: easy local poster test; defaults to AAPL if args omitted
 """
 
-import os, sys, io, re, math, json, time, random, hashlib, traceback, datetime
-from dataclasses import dataclass
+import os, re, math, random, hashlib, traceback, datetime, json
 from typing import List, Dict, Tuple, Optional
 
 import numpy as np
@@ -41,45 +46,44 @@ POSTER_DIR        = os.path.join(OUTPUT_DIR, "posters")
 CAPTION_TXT       = os.path.join(OUTPUT_DIR, f"caption_{datetime.date.today().strftime('%Y%m%d')}.txt")
 RUN_LOG           = os.path.join(OUTPUT_DIR, "run.log")
 
-# Create dirs
 for d in (OUTPUT_DIR, CHART_DIR, POSTER_DIR):
     os.makedirs(d, exist_ok=True)
 
-# Deterministic seed per day (stable selections)
 TODAY      = datetime.date.today()
 DATESTAMP  = TODAY.strftime("%Y%m%d")
 SEED       = int(hashlib.sha1(DATESTAMP.encode()).hexdigest(), 16) % (10**8)
 rng        = random.Random(SEED)
 
-# Watchlist/pools (align with Ops Guide)
+# Watchlist per Ops Guide
 WATCHLIST = ["AAPL","MSFT","NVDA","AMD","TSLA","SPY","QQQ","GLD","AMZN","META","GOOGL"]
 
 POOLS = {
-    "AI": ["NVDA","MSFT","GOOGL","META","AMZN"],
-    "MAG7": ["AAPL","MSFT","GOOGL","META","AMZN","NVDA","TSLA"],
-    "Semis": ["NVDA","AMD","AVGO","TSM","INTC","ASML"],
-    "Healthcare": ["UNH","JNJ","PFE","MRK","LLY"],
-    "Fintech": ["MA","V","PYPL","SQ"],
-    "Quantum": ["IONQ","IBM","AMZN"],
+    "AI":        ["NVDA","MSFT","GOOGL","META","AMZN"],
+    "MAG7":      ["AAPL","MSFT","GOOGL","META","AMZN","NVDA","TSLA"],
+    "Semis":     ["NVDA","AMD","AVGO","TSM","INTC","ASML"],
+    "Healthcare":["UNH","JNJ","PFE","MRK","LLY"],
+    "Fintech":   ["MA","V","PYPL","SQ"],
+    "Quantum":   ["IONQ","IBM","AMZN"],
     "Wildcards": ["NFLX","DIS","BABA","NIO","SHOP","PLTR"]
 }
 
-# HTTP session
+# Lightweight Yahoo Finance search (subject to change upstream)
+YF_NEWS_ENDPOINT = "https://query1.finance.yahoo.com/v1/finance/search"
+
 SESS = requests.Session()
 SESS.headers.update({
     "User-Agent": "TrendWatchDesk/1.0 (+github actions)",
-    "Accept": "*/*",
+    "Accept": "application/json",
     "Accept-Encoding": "identity"
 })
 
-# Emojis by sector-ish feel (loose)
 SECTOR_EMOJI = {
-    "NVDA":"🤖","AMD":"🔧","TSLA":"🚗","AAPL":"🍏","MSFT":"🧠",
+    "AAPL":"🍏","MSFT":"🧠","NVDA":"🤖","AMD":"🔧","TSLA":"🚗",
     "META":"📡","GOOGL":"🔎","AMZN":"📦","SPY":"📊","QQQ":"📈","GLD":"🪙"
 }
 
 # =========================
-# ---- Logging helpers ----
+# ---- Logging ------------
 # =========================
 def log(msg: str):
     ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
@@ -92,26 +96,44 @@ def log(msg: str):
         pass
 
 # =========================
-# ---- Fonts (Grift) ------
+# ---- Fonts / Logos ------
 # =========================
-def _font(path: str, size: int) -> ImageFont.FreeTypeFont:
+def _font(path: str, size: int):
     try:
         return ImageFont.truetype(path, size)
     except Exception:
-        # Fallback to default if font not found
         return ImageFont.load_default()
 
-def font_bold(size: int) -> ImageFont.FreeTypeFont:
-    return _font(FONT_BOLD_PATH, size)
+def font_bold(size: int): return _font(FONT_BOLD_PATH, size)
+def font_reg(size: int):  return _font(FONT_REG_PATH, size)
 
-def font_reg(size: int) -> ImageFont.FreeTypeFont:
-    return _font(FONT_REG_PATH, size)
+def load_logo(ticker: str, target_w: int) -> Optional[Image.Image]:
+    path = os.path.join(LOGO_DIR, f"{ticker}.png")
+    if not os.path.exists(path): return None
+    try:
+        img = Image.open(path).convert("RGBA")
+        w, h = img.size
+        ratio = target_w / max(1, w)
+        return img.resize((int(w*ratio), int(h*ratio)), Image.Resampling.LANCZOS)
+    except Exception:
+        return None
+
+def twd_logo(target_w: int) -> Optional[Image.Image]:
+    if not os.path.exists(BRAND_LOGO): return None
+    try:
+        logo = Image.open(BRAND_LOGO).convert("RGBA")
+        r,g,b,a = logo.split()
+        white = Image.new("RGBA", logo.size, (255,255,255,0)); white.putalpha(a)
+        w,h = white.size
+        ratio = target_w / max(1, w)
+        return white.resize((int(w*ratio), int(h*ratio)), Image.Resampling.LANCZOS)
+    except Exception:
+        return None
 
 # =========================
 # ---- Chart Generator ----
 # =========================
 def pick_tickers(n: int = 6) -> List[str]:
-    # Weighted pick: pull more from AI/MAG7/Semis; fill with others
     picks = set()
     def grab(pool, k):
         cands = [t for t in POOLS[pool] if t not in picks]
@@ -120,21 +142,21 @@ def pick_tickers(n: int = 6) -> List[str]:
     grab("AI", 2)
     grab("MAG7", 2)
     grab("Semis", 1)
-    # Fill remainder from others
-    flat_others = [t for k,v in POOLS.items() if k not in ("AI","MAG7","Semis") for t in v]
-    rng.shuffle(flat_others)
-    for t in flat_others:
+    # fill remaining from others
+    others = [t for k,v in POOLS.items() if k not in ("AI","MAG7","Semis") for t in v]
+    rng.shuffle(others)
+    for t in others:
         if len(picks) >= n: break
         picks.add(t)
     return list(picks)[:n]
 
 def swing_levels(series: pd.Series, lookback: int = 14) -> Tuple[Optional[float], Optional[float]]:
-    """Simple swing high/low detection for support zone."""
     if series is None or series.empty: return (None, None)
     highs = series.rolling(lookback).max()
     lows  = series.rolling(lookback).min()
-    return float(lows.iloc[-1]) if not math.isnan(lows.iloc[-1]) else None, \
-           float(highs.iloc[-1]) if not math.isnan(highs.iloc[-1]) else None
+    lo = lows.iloc[-1]; hi = highs.iloc[-1]
+    return (float(lo) if not math.isnan(lo) else None,
+            float(hi) if not math.isnan(hi) else None)
 
 def pct_change(series: pd.Series, days: int = 30) -> float:
     try:
@@ -143,107 +165,65 @@ def pct_change(series: pd.Series, days: int = 30) -> float:
     except Exception:
         return 0.0
 
-def load_logo(ticker: str, target_w: int) -> Optional[Image.Image]:
-    path = os.path.join(LOGO_DIR, f"{ticker}.png")
-    if not os.path.exists(path):
-        return None
-    try:
-        img = Image.open(path).convert("RGBA")
-        w, h = img.size
-        ratio = target_w / max(1, w)
-        new = img.resize((int(w*ratio), int(h*ratio)), Image.Resampling.LANCZOS)
-        return new
-    except Exception:
-        return None
-
-def twd_logo(target_w: int) -> Optional[Image.Image]:
-    if not os.path.exists(BRAND_LOGO): return None
-    try:
-        logo = Image.open(BRAND_LOGO).convert("RGBA")
-        # tint to white using alpha only (so it blends on gradients)
-        r,g,b,a = logo.split()
-        white = Image.new("RGBA", logo.size, (255,255,255,0))
-        white.putalpha(a)
-        w, h = white.size
-        ratio = target_w / max(1, w)
-        new = white.resize((int(w*ratio), int(h*ratio)), Image.Resampling.LANCZOS)
-        return new
-    except Exception:
-        return None
-
-def draw_support_box(draw: ImageDraw.ImageDraw, chart_box: Tuple[int,int,int,int], low: float, high: float, y_from_price) -> None:
-    if low is None or high is None: return
-    x1,y1,x2,y2 = chart_box
-    y_low  = y_from_price(high)   # translucent band around zone mid
-    y_high = y_from_price(low)
-    box = [x1+2, min(y_low, y_high), x2-2, max(y_low, y_high)]
-    draw.rectangle(box, fill=(40,120,255,48), outline=(40,120,255,160), width=2)
-
 def generate_chart(ticker: str) -> Optional[str]:
-    """Weekly close chart with support zone + logos + meta text."""
+    """Weekly ‘clean’ chart with support zone, logos, and text."""
     try:
         df = yf.download(ticker, period="1y", interval="1wk", progress=False, auto_adjust=False, threads=False)
         if df.empty:
             log(f"[warn] No data for {ticker}")
             return None
         close = df["Close"].dropna()
-        last = float(close.iloc[-1])
-        chg30 = pct_change(close, days=30)
-        chg1d = 0.0
+        last  = float(close.iloc[-1])
+        chg30 = pct_change(close, 30)
         sup_low, sup_high = swing_levels(close, lookback=10)
 
         # Canvas
         W,H = 1080, 720
         img = Image.new("RGBA", (W,H), (255,255,255,255))
-        draw = ImageDraw.Draw(img)
+        d   = ImageDraw.Draw(img)
 
-        # Areas
+        # Regions
         margin = 40
         header_h = 150
         footer_h = 70
-        plot = [margin+30, margin+header_h, W-margin-30, H-margin-footer_h]
+        x1,y1,x2,y2 = margin+30, margin+header_h, W-margin-30, H-margin-footer_h
 
-        # Title block
+        # Titles
         f_ticker = font_bold(76)
         f_meta   = font_reg(38)
-        ticker_text = ticker
-        draw.text((margin+30, margin+30), ticker_text, fill=(0,0,0,255), font=f_ticker)
+        d.text((margin+30, margin+30), ticker, fill=(0,0,0,255), font=f_ticker)
+        d.text((margin+30, margin+100), f"{last:,.2f} • {chg30:+.2f}% (30d)", fill=(30,30,30,255), font=f_meta)
 
-        meta = f"{last:,.2f} • {chg30:+.2f}% (30d)"
-        draw.text((margin+30, margin+100), meta, fill=(30,30,30,255), font=f_meta)
-
-        # Plot close (simple line for clean look)
-        x1,y1,x2,y2 = plot
+        # Plot
         xs = np.linspace(x1, x2, num=len(close))
         minp, maxp = float(close.min()), float(close.max())
         prange = max(1e-8, maxp - minp)
-
-        def y_from_price(p):
-            # invert (higher price = lower y)
-            return y2 - (p - minp) / prange * (y2 - y1)
+        def y_from_price(p): return y2 - (p - minp) / prange * (y2 - y1)
 
         pts = [(int(xs[i]), int(y_from_price(close.iloc[i]))) for i in range(len(close))]
         for i in range(1, len(pts)):
-            draw.line([pts[i-1], pts[i]], fill=(0,0,0,255), width=3)
+            d.line([pts[i-1], pts[i]], fill=(0,0,0,255), width=3)
 
-        # subtle grid
+        # Subtle grid
         for gy in np.linspace(y1, y2, 5):
-            draw.line([(x1, gy),(x2, gy)], fill=(0,0,0,30), width=1)
+            d.line([(x1, gy),(x2, gy)], fill=(0,0,0,30), width=1)
 
-        # Support zone
-        draw_support_box(draw, plot, sup_low, sup_high, y_from_price)
+        # Support zone (translucent)
+        if sup_low is not None and sup_high is not None:
+            y_lo = y_from_price(sup_high)
+            y_hi = y_from_price(sup_low)
+            band = [x1+2, min(y_lo, y_hi), x2-2, max(y_lo, y_hi)]
+            d.rectangle(band, fill=(40,120,255,48), outline=(40,120,255,160), width=2)
 
         # Logos
-        logo = load_logo(ticker, target_w=140)
-        if logo:
-            img.alpha_composite(logo, (W - logo.width - 26, 24))
-        twd = twd_logo(target_w=160)
-        if twd:
-            img.alpha_composite(twd, (W - twd.width - 26, H - twd.height - 24))
+        lg = load_logo(ticker, 140)
+        if lg: img.alpha_composite(lg, (W - lg.width - 26, 24))
+        twd = twd_logo(160)
+        if twd: img.alpha_composite(twd, (W - twd.width - 26, H - twd.height - 24))
 
         # Subheading
         f_sub = font_reg(32)
-        draw.text((x1, y1-56), "Weekly chart • key support zone", fill=(40,40,40,255), font=f_sub)
+        d.text((x1, y1-56), "Weekly chart • key support zone", fill=(40,40,40,255), font=f_sub)
 
         out = os.path.join(CHART_DIR, f"{ticker}_chart.png")
         img.convert("RGB").save(out, "PNG")
@@ -256,56 +236,31 @@ def generate_chart(ticker: str) -> Optional[str]:
 # ---- Caption Engine -----
 # =========================
 def caption_daily(ticker: str, last: float, chg30: float, near_support: bool) -> str:
-    """For charts (daily workflow) — natural, non-repetitive."""
     emj = SECTOR_EMOJI.get(ticker, "📈")
     cues = []
     if chg30 >= 8: cues.append("momentum building 🔥")
     if chg30 <= -8: cues.append("recent pullback on the radar ⚠️")
     if near_support: cues.append("buyers defending support 🛡️")
     if not cues:
-        cues = rng.sample([
-            "steady drift with eyes on catalysts",
-            "range tightening as traders wait for a trigger",
-            "quiet grind higher while liquidity improves"
-        ], k=1)
-    cue = rng.choice(["; ".join(cues), " · ".join(cues)])
+        cues = ["range tightening as traders wait for a trigger"]
 
-    ctas = [
-        "Save for later 📌",
-        "Your take below 👇",
-        "Share with a friend 🔄"
-    ]
-    cta = rng.choice(ctas)
-
-    body = f"{emj} {ticker} at {last:,.2f} — {chg30:+.2f}% (30d). {cue}. {cta}"
-    return body
+    cta = rng.choice(["Save for later 📌","Your take below 👇","Share with a friend 🔄"])
+    return f"{emj} {ticker} at {last:,.2f} — {chg30:+.2f}% (30d). {' · '.join(cues)}. {cta}"
 
 def caption_poster(ticker: str, poster_headline: str) -> str:
-    """
-    For posters — MUST complement poster body.
-    Structure: Hook → Added context → Forward angle → CTA
-    """
+    """Poster captions MUST complement the poster text (no duplication)."""
     hook = f"{SECTOR_EMOJI.get(ticker, '📈')} {ticker} — still in the spotlight"
-    context = (
-        "Beyond the headline, investors are weighing sector read-throughs, "
-        "peer reactions, and what this means for near-term demand."
-    )
-    fwd = (
-        "Next up: guidance and earnings commentary — the market wants detail "
-        "on margins and runway."
-    )
-    ctas = [
-        "What’s your take? Drop a comment 👇",
-        "Save this for later 📌",
-        "Share with someone tracking the story 🔄"
-    ]
-    return f"{hook}\n{context}\n{fwd}\n\n{rng.choice(ctas)}"
+    context = ("Beyond the headline, investors are weighing sector read-throughs, "
+               "peer reactions, and what this means for near-term demand.")
+    fwd = "Next up: guidance and earnings commentary — the market wants detail on margins and runway."
+    cta = rng.choice(["What’s your take? Drop a comment 👇", "Save this for later 📌", "Share with a friend 🔄"])
+    return f"{hook}\n{context}\n{fwd}\n\n{cta}"
 
 # =========================
 # ---- Poster Engine ------
 # =========================
 def poster_background(W=1080, H=1080) -> Image.Image:
-    """Blue gradient + diagonal beams."""
+    """Blue gradient + diagonal beams for IG-native look."""
     base = Image.new("RGB", (W, H), "#0d3a66")
     grad = Image.new("RGB", (W, H))
     for y in range(H):
@@ -340,59 +295,50 @@ def wrap_text_by_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.Fre
         lines.append(line.rstrip())
     return "\n".join(lines)
 
-def draw_news_tag(draw, x=40, y=40):
-    tag = "NEWS"
-    f = font_bold(42)
-    pad = 14
-    tw, th = draw.textbbox((0,0), tag, font=f)[2:]
+def draw_news_tag(draw: ImageDraw.ImageDraw, x=40, y=40):
+    f = font_bold(42); pad = 14
+    tw, th = draw.textbbox((0,0), "NEWS", font=f)[2:]
     rect = (x, y, x + tw + pad*2, y + th + pad*2)
-    draw.rounded_rectangle(rect, radius=12, fill=(0,36,73,200))
-    draw.text((x+pad, y+pad), tag, font=f, fill=(255,255,255,255))
+    draw.rounded_rectangle(rect, 12, fill=(0,36,73,200))
+    draw.text((x+pad, y+pad), "NEWS", font=f, fill=(255,255,255,255))
 
 def generate_poster(ticker: str, headline_lines: List[str], subtext_lines: List[str]) -> Optional[str]:
-    """
-    IG-native poster with:
-    - Headline (Grift-Bold, left-aligned)
-    - Subtext (Grift-Regular, 3–4 lines), wrapped to safe margins
-    - Ticker logo top-right; TWD bottom-right
-    """
+    """IG-native poster with left-aligned headline + extended subtext (wrapped), logos in correct corners."""
     try:
         W,H = 1080,1080
         img = poster_background(W,H)
-        draw = ImageDraw.Draw(img)
+        d   = ImageDraw.Draw(img)
 
-        draw_news_tag(draw, 40, 40)
+        draw_news_tag(d)
 
         # Headline
-        f_head = font_bold(108)
-        head = "\n".join(headline_lines)
-        draw.multiline_text((40, 160), head, font=f_head, fill=(255,255,255,255), spacing=10, align="left")
+        d.multiline_text((40,160), "\n".join(headline_lines), font=font_bold(108),
+                         fill=(255,255,255,255), spacing=10, align="left")
 
-        # Subtext (wrapped)
-        f_sub = font_reg(48)
+        # Subtext (3–4 short lines when wrapped)
         sub = " ".join(subtext_lines)
-        wrapped = wrap_text_by_width(draw, sub, f_sub, max_width_px=W-80)
-        draw.multiline_text((40, 420), wrapped, font=f_sub, fill=(235,243,255,255), spacing=10, align="left")
+        sub_wrapped = wrap_text_by_width(d, sub, font_reg(48), W-80)
+        d.multiline_text((40,420), sub_wrapped, font=font_reg(48),
+                         fill=(235,243,255,255), spacing=10, align="left")
 
-        # Ticker logo top-right (fallback badge if missing)
-        logo = load_logo(ticker, target_w=220)
-        if logo is None:
-            # badge fallback using Grift-Bold text
+        # Ticker logo (top-right) — fallback rounded badge
+        logo = load_logo(ticker, 220)
+        if logo is not None:
+            img.alpha_composite(logo, (W - logo.width - 40, 40))
+        else:
             badge_w, badge_h = 220, 110
             badge = Image.new("RGBA", (badge_w, badge_h), (255,255,255,35))
             bd = ImageDraw.Draw(badge)
-            bd.rounded_rectangle([0,0,badge_w,badge_h], radius=20, outline=(255,255,255,120), width=2, fill=(255,255,255,28))
+            bd.rounded_rectangle([0,0,badge_w, badge_h], 20, outline=(255,255,255,120),
+                                 width=2, fill=(255,255,255,28))
             bf = font_bold(64)
             tw = bd.textbbox((0,0), ticker, font=bf)[2]
-            bd.text(((badge_w-tw)//2, (badge_h-64)//2 - 2), ticker, font=bf, fill=(255,255,255,255))
+            bd.text(((badge_w-tw)//2, (badge_h-64)//2-2), ticker, font=bf, fill="white")
             img.alpha_composite(badge, (W - badge_w - 40, 40))
-        else:
-            img.alpha_composite(logo, (W - logo.width - 40, 40))
 
-        # TWD logo bottom-right (white tinted)
-        twd = twd_logo(target_w=220)
+        # TrendWatchDesk logo (bottom-right), tinted white + subtle glow
+        twd = twd_logo(220)
         if twd:
-            # subtle shadow
             shadow = Image.new("RGBA", twd.size, (0,0,0,0))
             sd = ImageDraw.Draw(shadow)
             sd.bitmap((0,0), twd.split()[3], fill=(0,0,0,80))
@@ -411,16 +357,11 @@ def generate_poster(ticker: str, headline_lines: List[str], subtext_lines: List[
 # =========================
 # ---- News Polling -------
 # =========================
-YF_NEWS_ENDPOINT = "https://query1.finance.yahoo.com/v1/finance/search"
-
 def fetch_yahoo_headlines(tickers: List[str], max_items: int = 40) -> List[Dict]:
-    """
-    Lightweight news pull (Yahoo). If it fails, return empty and skip posters.
-    """
+    """Best-effort Yahoo Finance news pull. If it fails, return empty (no posters)."""
     items = []
     for t in tickers:
         try:
-            # Best-effort: Yahoo Finance search endpoint (subject to change)
             params = {"q": t, "quotesCount": 0, "newsCount": 10}
             r = SESS.get(YF_NEWS_ENDPOINT, params=params, timeout=10)
             if r.status_code != 200:
@@ -431,34 +372,28 @@ def fetch_yahoo_headlines(tickers: List[str], max_items: int = 40) -> List[Dict]
                 title = n.get("title") or ""
                 link  = n.get("link") or ""
                 pub   = n.get("providerPublishTime")
-                if not title or not link: 
+                if not title or not link:
                     continue
                 items.append({"ticker": t, "title": title, "url": link, "ts": pub})
         except Exception as e:
             log(f"[warn] yahoo fetch for {t} failed: {e}")
     # de-dupe by title
-    seen = set()
-    uniq = []
+    seen = set(); uniq = []
     for it in items:
         key = it["title"].strip().lower()
-        if key in seen: 
-            continue
-        seen.add(key)
-        uniq.append(it)
+        if key in seen: continue
+        seen.add(key); uniq.append(it)
     return uniq[:max_items]
 
 def cluster_by_popularity(items: List[Dict]) -> List[Dict]:
-    """
-    Simple heuristic: pick items whose titles mention broader themes or recur across multiple tickers.
-    """
+    """Keep items that recur by normalized title, else top few."""
     if not items: return []
-    # Count occurrences by normalized title segments
     counts = {}
+    def norm(s: str) -> str: return re.sub(r"[^a-z0-9 ]+","", s.lower()).strip()
     for it in items:
-        key = re.sub(r"[^a-z0-9 ]+","", it["title"].lower()).strip()
-        counts[key] = counts.get(key, 0) + 1
-    # Keep items with count >= 2, else fallback to top few
-    pops = [it for it in items if counts.get(re.sub(r"[^a-z0-9 ]+","", it["title"].lower()).strip(),0) >= 2]
+        k = norm(it["title"])
+        counts[k] = counts.get(k, 0) + 1
+    pops = [it for it in items if counts.get(norm(it["title"]), 0) >= 2]
     if not pops:
         pops = items[:6]
     return pops
@@ -467,27 +402,26 @@ def cluster_by_popularity(items: List[Dict]) -> List[Dict]:
 # ---- Workflows ----------
 # =========================
 def run_daily_charts():
-    """Mon/Wed/Fri workflow equivalent: generate 6 charts + a caption file."""
+    """Generate 6 charts + daily captions file (Mon/Wed/Fri in CI)."""
     tickers = pick_tickers(6)
     log(f"[info] selected tickers: {tickers}")
     cap_lines = []
     for t in tickers:
         path = generate_chart(t)
         if path:
-            # Build daily caption line
             try:
                 df = yf.download(t, period="6mo", interval="1d", progress=False, auto_adjust=False, threads=False)
                 close = df["Close"].dropna()
-                last = float(close.iloc[-1])
-                chg30 = pct_change(close, days=30)
-                # approximate near support using weekly as proxy
+                last = float(close.iloc[-1]) if not close.empty else 0.0
+                chg30 = pct_change(close, 30)
+                # approx near-support check using weekly
                 wk = yf.download(t, period="1y", interval="1wk", progress=False, auto_adjust=False, threads=False)["Close"].dropna()
                 sup_low, sup_high = swing_levels(wk, 10)
                 near = False
-                if sup_low is not None and sup_high is not None:
+                if sup_low is not None and sup_high is not None and last:
                     mid = 0.5*(sup_low+sup_high)
-                    rng = (sup_high - sup_low) + 1e-8
-                    near = abs(last - mid) <= 0.6 * rng
+                    rngp = max(1e-8, (sup_high - sup_low))
+                    near = abs(last - mid) <= 0.6 * rngp
                 cap_lines.append(caption_daily(t, last, chg30, near))
             except Exception:
                 pass
@@ -500,36 +434,29 @@ def run_daily_charts():
             log(f"[warn] failed to write caption file: {e}")
 
 def run_posters():
-    """Every 3 hours workflow equivalent: generate a poster for popular headline(s)."""
+    """Generate news-driven poster(s). If no news, skip (no artificial fallbacks)."""
     news = fetch_yahoo_headlines(WATCHLIST, max_items=40)
     if not news:
-        log("[info] no news items fetched; skipping posters")
+        log("[info] No news found → Poster skipped")
         return
     popular = cluster_by_popularity(news)
     rng.shuffle(popular)
-    for item in popular[:1]:  # one strong item per run
+    # One good poster per run
+    for item in popular[:1]:
         tkr = item["ticker"]
         title = item["title"].strip()
-
-        # Headline → ALL CAPS, broken into 1–2 lines max
-        # simple split heuristic
+        # Headline to 1–2 lines
         words = title.upper().split()
-        if len(words) > 6:
-            head_lines = [" ".join(words[:6]), " ".join(words[6:12])]
-        else:
-            head_lines = [" ".join(words)]
-
-        # Subtext (3–4 lines total when wrapped): we build a richer paragraph
+        headline_lines = [" ".join(words[:6]), " ".join(words[6:12])] if len(words) > 6 else [" ".join(words)]
+        # Extended subtext (richer paragraph → wrapped later)
         sub_lines = [
-            f"This headline keeps {tkr} in focus as investors weigh the read-through for peers and demand.",
+            f"This headline keeps {tkr} in focus as investors weigh read-through for peers and demand.",
             "The move could shift sentiment across the sector while big funds assess near-term margins.",
-            "Analysts will watch guidance and updates on runway into the next print."
+            "Analysts will watch guidance and runway into the next print."
         ]
-
-        out = generate_poster(tkr, head_lines, sub_lines)
+        out = generate_poster(tkr, headline_lines, sub_lines)
         if out:
             cap = caption_poster(tkr, title)
-            # save companion caption to help the post scheduler
             poster_caption = os.path.splitext(out)[0] + "_caption.txt"
             try:
                 with open(poster_caption, "w", encoding="utf-8") as f:
@@ -541,24 +468,75 @@ def run_posters():
             log("[warn] poster generation failed")
 
 # =========================
-# ---- CLI Entrypoint -----
+# ---- Demos / Mockups ----
+# =========================
+def run_poster_demo(args: List[str]):
+    """Legacy demo: --poster-demo TKR "HEADLINE..." (kept for parity)."""
+    if not args or len(args) < 2:
+        print('usage: --poster-demo TKR "HEADLINE..."')
+        return
+    tkr = args[0].upper()
+    head = " ".join(args[1:]).upper()
+    words = head.split()
+    headline_lines = [" ".join(words[:6]), " ".join(words[6:12])] if len(words) > 6 else [head]
+    sub = [
+        f"{tkr} stays in the spotlight as investors parse sector read-throughs.",
+        "Institutional desks will watch guidance and margin commentary.",
+        "Momentum hinges on execution into the next print."
+    ]
+    out = generate_poster(tkr, headline_lines, sub)
+    if out:
+        cap = caption_poster(tkr, head)
+        sc = os.path.splitext(out)[0] + "_caption.txt"
+        with open(sc, "w", encoding="utf-8") as f:
+            f.write(cap)
+        log(f"[info] poster saved: {out}")
+    else:
+        log("[warn] poster failed")
+
+def run_poster_mockup(args: Optional[List[str]] = None):
+    """
+    New: --poster-mockup [TKR "HEADLINE..."]
+    If no args → default AAPL demo.
+    """
+    if args and len(args) >= 2:
+        tkr = args[0].upper()
+        headline = " ".join(args[1:])
+    else:
+        tkr = "AAPL"
+        headline = "APPLE HITS RECORD HIGH"
+
+    words = headline.upper().split()
+    headline_lines = [" ".join(words[:6]), " ".join(words[6:12])] if len(words) > 6 else [headline.upper()]
+
+    sub_lines = [
+        f"{tkr} stays in focus as investors parse demand signals across the sector.",
+        "Analysts highlight broader implications for peers and market sentiment.",
+        "Guidance and margin commentary will be key going forward."
+    ]
+
+    out = generate_poster(tkr, headline_lines, sub_lines)
+    if out:
+        cap = caption_poster(tkr, headline)
+        capfile = os.path.splitext(out)[0] + "_caption.txt"
+        with open(capfile, "w", encoding="utf-8") as f:
+            f.write(cap)
+        log(f"[mockup] Poster saved: {out}")
+    else:
+        log("[mockup] Poster generation failed")
+
+# =========================
+# ---- CLI ----------------
 # =========================
 def main():
-    """
-    Modes:
-      --daily      Generate 6 charts + caption file
-      --posters    Generate breaking-news poster(s)
-      --both       Run both (daily first, then posters)
-      --once TKR   Generate a single chart quickly
-      --poster-demo TKR "HEADLINE"   Generate one poster locally with default subtext
-    """
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--daily", action="store_true")
-    ap.add_argument("--posters", action="store_true")
-    ap.add_argument("--both", action="store_true")
-    ap.add_argument("--once", type=str, help="single ticker chart")
-    ap.add_argument("--poster-demo", nargs="+", help='usage: --poster-demo TKR "HEADLINE..."')
+    ap.add_argument("--daily", action="store_true", help="Generate 6 charts + daily caption file")
+    ap.add_argument("--posters", action="store_true", help="Generate news-driven posters")
+    ap.add_argument("--both", action="store_true", help="Run daily then posters")
+    ap.add_argument("--once", type=str, help="Generate a single chart for one ticker")
+    ap.add_argument("--poster-demo", nargs="*", help='Legacy: --poster-demo TKR "HEADLINE..."')
+    ap.add_argument("--poster-mockup", nargs="*", help='New: --poster-mockup [TKR "HEADLINE..."]')
     args = ap.parse_args()
 
     try:
@@ -566,7 +544,7 @@ def main():
             log("[info] running daily charts")
             run_daily_charts()
         elif args.posters:
-            log("[info] running posters")
+            log("[info] running posters (news-driven)")
             run_posters()
         elif args.both:
             log("[info] running daily charts + posters")
@@ -576,37 +554,14 @@ def main():
             t = args.once.upper()
             log(f"[info] quick chart for {t}")
             out = generate_chart(t)
-            if out:
-                log(f"[info] saved: {out}")
-            else:
-                log("[warn] chart failed")
+            if out: log(f"[info] saved: {out}")
+            else:   log("[warn] chart failed")
         elif args.poster_demo:
-            if len(args.poster_demo) < 2:
-                print("usage: --poster-demo TKR \"HEADLINE...\"")
-                return
-            tkr = args.poster_demo[0].upper()
-            head = " ".join(args.poster_demo[1:]).upper()
-            words = head.split()
-            if len(words) > 6:
-                head_lines = [" ".join(words[:6]), " ".join(words[6:12])]
-            else:
-                head_lines = [head]
-            sub = [
-                f"{tkr} stays in the spotlight as investors parse sector read-throughs.",
-                "Institutional desks will watch guidance and margin commentary.",
-                "Momentum hinges on execution into the next print."
-            ]
-            out = generate_poster(tkr, head_lines, sub)
-            if out:
-                cap = caption_poster(tkr, head)
-                sc = os.path.splitext(out)[0] + "_caption.txt"
-                with open(sc, "w", encoding="utf-8") as f:
-                    f.write(cap)
-                log(f"[info] poster saved: {out}")
-            else:
-                log("[warn] poster failed")
+            run_poster_demo(args.poster_demo)
+        elif args.poster_mockup is not None:
+            run_poster_mockup(args.poster_mockup)
         else:
-            # default daily behavior (for CI convenience)
+            # default to daily for convenience in local testing
             log("[info] default mode → daily charts")
             run_daily_charts()
     except Exception as e:
