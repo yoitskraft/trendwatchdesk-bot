@@ -68,6 +68,7 @@ jobs:
           TWD_BREAKING_MIN_SOURCES: "1"       # allow single-source headlines
           TWD_BREAKING_MIN_INTERVAL_MIN: "0"  # no cooldown
           TWD_BREAKING_FALLBACK: "on"         # render newest if no clusters meet threshold
+          TWD_ALLOW_RSS: "on"                 # <— enable RSS fallback
           # ---- Optional override of watchlist (comma-separated)
           TWD_WATCHLIST: "AAPL,MSFT,NVDA,AMD,TSLA,SPY,QQQ,GLD,AMZN,META,GOOGL"
           # ---- Assets
