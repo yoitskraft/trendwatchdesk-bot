@@ -291,61 +291,84 @@ def render_candles(draw: ImageDraw.ImageDraw, ohlc: pd.DataFrame, box: Tuple[int
 # Chart generator
 # -----------------------
 def generate_chart(ticker: str) -> Optional[str]:
+    """Weekly chart: blue gradient, candles (no grid), feathered support zone OVER candles, white logos."""
     try:
-        # weekly for the look you wanted
-        df = yf.download(ticker, period="1y", interval="1wk", progress=False, auto_adjust=False, threads=False)
+        # 1y weekly data for structure & zone context
+        df = yf.download(
+            ticker, period="1y", interval="1wk",
+            progress=False, auto_adjust=False, threads=False
+        )
         if df is None or df.empty:
             log(f"[warn] no data for {ticker}")
             return None
+
         ohlc = extract_ohlc(df, ticker)
         if ohlc.empty:
             log(f"[warn] no ohlc for {ticker}")
             return None
-        close_s = ohlc["Close"]
 
-        W,H = 1080, 720
-        img  = blue_gradient_bg(W,H)
-        d    = ImageDraw.Draw(img)
+        # Canvas
+        W, H = 1080, 720
+        img = blue_gradient_bg(W, H)
+        d   = ImageDraw.Draw(img)
 
         # Plot area
         margin = 40
-        x1,y1 = margin, margin+30
-        x2,y2 = W - margin, H - margin
+        x1, y1 = margin, margin + 30
+        x2, y2 = W - margin, H - margin
 
-        # Feathered, ultra-subtle support zone
-        lo, hi = swing_levels(close_s, 10)
-        if lo is not None and hi is not None and hi >= lo:
-            pmin, pmax = float(ohlc["Low"].min()), float(ohlc["High"].max())
-            pr = max(1e-9, pmax-pmin)
-            def y(p): return y2 - (float(p)-pmin)/pr*(y2-y1)
-            y_top, y_bot = int(y(hi)), int(y(lo))
-            feathered_support(img, x1+6, min(y_top,y_bot), x2-6, max(y_top,y_bot),
-                              fill_alpha=14, blur_radius=22, outline_alpha=60)
-
-        # Candles (NO grid)
+        # 1) Candles first (no grid)
         render_candles(d, ohlc, (x1, y1, x2, y2))
 
-# --- SUPPORT ZONE (draw OVER candles) ---
-close_s = ohlc["Close"]
-lo, hi = swing_levels(close_s, 10)
-if (lo is not None) and (hi is not None) and (hi >= lo):
-    pmin, pmax = float(ohlc["Low"].min()), float(ohlc["High"].max())
-    pr = max(1e-9, pmax - pmin)
-    def y(p): return y2 - (float(p) - pmin) / pr * (y2 - y1)
-    y_top, y_bot = int(y(hi)), int(y(lo))
+        # 2) Support zone OVER candles (so it's actually visible)
+        close_s = ohlc["Close"]
+        lo, hi = swing_levels(close_s, lookback=10)
+        if (lo is not None) and (hi is not None) and (hi >= lo):
+            pmin = float(ohlc["Low"].min())
+            pmax = float(ohlc["High"].max())
+            pr   = max(1e-9, pmax - pmin)
 
-    # Enforce a minimum visual thickness so it doesn't vanish
-    MIN_PX = 26
-    if (y_bot - y_top) < MIN_PX:
-        mid = (y_top + y_bot) // 2
-        pad = MIN_PX // 2
-        y_top = max(y1 + 4, mid - pad)
-        y_bot = min(y2 - 4, mid + pad)
+            def y(p: float) -> int:
+                return int(y2 - (float(p) - pmin) / pr * (y2 - y1))
 
-    # Feathered white zone over candles (now clearly visible)
-    feathered_support(img, x1 + 6, y_top, x2 - 6, y_bot,
-                      fill_alpha=96, blur_radius=6, outline_alpha=140)
+            y_top, y_bot = y(hi), y(lo)
 
+            # Enforce a minimum visual thickness so the zone never vanishes
+            MIN_PX = 26
+            if (y_bot - y_top) < MIN_PX:
+                mid = (y_top + y_bot) // 2
+                pad = MIN_PX // 2
+                y_top = max(y1 + 4, mid - pad)
+                y_bot = min(y2 - 4, mid + pad)
+
+            # Feathered white zone (visible but not shouty)
+            feathered_support(
+                img,
+                x1 + 6, min(y_top, y_bot),
+                x2 - 6, max(y_top, y_bot),
+                fill_alpha=96,    # bump to 112 if you want more presence
+                blur_radius=6,    # lower to 4 for crisper edges
+                outline_alpha=140 # faint white hairline for definition
+            )
+
+        # 3) Logos — company (white mono) top-left, TWD white bottom-right
+        lg = load_logo_color(ticker, 170)
+        if lg is not None:
+            lg_white = to_white_mono(lg, alpha=255)
+            img.alpha_composite(lg_white, (x1, 16))
+
+        twd = load_twd_white(160)
+        if twd is not None:
+            img.alpha_composite(twd, (W - twd.width - 18, H - twd.height - 14))
+
+        # Save
+        out = os.path.join(CHART_DIR, f"{ticker}_chart.png")
+        img.convert("RGB").save(out, "PNG")
+        return out
+
+    except Exception as e:
+        log(f"[error] generate_chart({ticker}): {e}")
+        return None
 # -----------------------
 # Captions (same logic, CTA once at end)
 # -----------------------
