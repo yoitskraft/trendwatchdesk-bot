@@ -1,71 +1,28 @@
-name: Docs Guard (PR)
+name: Docs Guard
 
 on:
   pull_request:
-    types: [opened, synchronize, edited, reopened]
+    branches:
+      - main
 
 jobs:
-  docs_guard:
+  guard:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-            fetch-depth: 0
+          python-version: "3.11"
 
-      - name: Detect changed files
-        id: diff
+      - name: Run update_docs.py
+        run: python update_docs.py
+
+      - name: Verify docs are up to date
         run: |
-          # Base vs head for the PR
-          BASE_SHA="${{ github.event.pull_request.base.sha }}"
-          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
-
-          echo "Base: $BASE_SHA"
-          echo "Head: $HEAD_SHA"
-
-          # List changed files (names only)
-          git diff --name-only "$BASE_SHA" "$HEAD_SHA" > changed.txt || true
-          echo "Changed files:"
-          cat changed.txt || true
-
-          # Paths that *require* docs update when changed
-          MUST_DOCS_PATTERNS='
-          ^main\.py$
-          ^assets/
-          ^\.github/workflows/
-          '
-
-          # Docs files that count as updated
-          DOCS_FILES='
-          ^OPERATIONS_GUIDE\.md$
-          ^README\.md$
-          '
-
-          NEEDS_DOCS=0
-          UPDATED_DOCS=0
-
-          while IFS= read -r f; do
-            # matches any code/workflow path?
-            if echo "$f" | grep -Eq "$MUST_DOCS_PATTERNS"; then
-              NEEDS_DOCS=1
-            fi
-            # matches docs?
-            if echo "$f" | grep -Eq "$DOCS_FILES"; then
-              UPDATED_DOCS=1
-            fi
-          done < changed.txt
-
-          echo "needs_docs=$NEEDS_DOCS" >> $GITHUB_OUTPUT
-          echo "updated_docs=$UPDATED_DOCS" >> $GITHUB_OUTPUT
-
-      - name: Enforce docs update
-        if: steps.diff.outputs.needs_docs == '1' && steps.diff.outputs.updated_docs != '1'
-        run: |
-          echo "::error::Core files changed but docs not updated. Please update README.md and/or OPERATIONS_GUIDE.md."
-          echo "Changed core paths trigger this rule: main.py, assets/**, .github/workflows/**"
-          exit 1
-
-      - name: Pass if no docs needed or already updated
-        run: echo "Docs check passed ✅"
+          if ! git diff --exit-code OPERATIONS_GUIDE.md README.md; then
+            echo "::error::Docs are out of sync. Please re-run update_docs.py and commit changes."
+            exit 1
+          fi
