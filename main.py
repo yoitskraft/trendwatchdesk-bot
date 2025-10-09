@@ -416,6 +416,12 @@ WATCHLIST = [
     "GLD","SLV","USO","UNG"
 ]
 
+# Allow overriding the watchlist from an env var (comma-separated symbols)
+WATCHLIST_ENV = os.getenv("TWD_WATCHLIST", "").strip()
+if WATCHLIST_ENV:
+    WATCHLIST = [s.strip().upper() for s in WATCHLIST_ENV.split(",") if s.strip()]
+    _dbg(f"Using env watchlist: {WATCHLIST}")
+
 PREFERRED_SOURCES = [
     "Reuters","Bloomberg","Financial Times","The Wall Street Journal","WSJ",
     "CNBC","MarketWatch","Barron's","Yahoo Finance","The Verge","The New York Times"
