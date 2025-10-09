@@ -475,29 +475,37 @@ def load_logo_color_safe(ticker: str, w: int) -> Optional[Image.Image]:
 
 def generate_poster_image(ticker: str, headline: str, subtext: str) -> Optional[str]:
     try:
-        W,H=1080,1080
-        img=poster_bg(W,H); d=ImageDraw.Draw(img)
+        W, H = 1080, 1080
+        img = poster_bg(W, H)
+        d   = ImageDraw.Draw(img)
+
         # tag
-        tag_font=font_bold(44); pad=12; txt="NEWS"
-        tw,th=d.textbbox((0,0),txt,font=tag_font)[2:]
-        d.rounded_rectangle([40,40,40+tw+2*pad,40+th+2*pad],14,fill=(0,36,73,210))
-        d.text((40+pad,40+pad),txt,fill="white",font=tag_font)
+        tag_font = font_bold(44); pad = 12; txt = "NEWS"
+        tw, th = d.textbbox((0,0), txt, font=tag_font)[2:]
+        d.rounded_rectangle([40,40,40+tw+2*pad,40+th+2*pad], 14, fill=(0,36,73,210))
+        d.text((40+pad,40+pad), txt, fill="white", font=tag_font)
+
         # headline
-        hfont=font_bold(100)
-        head=wrap_text(d, headline.upper(), hfont, W-80)
+        hfont = font_bold(100)
+        head  = wrap_text(d, headline.upper(), hfont, W-80)
         d.multiline_text((40,150), head, font=hfont, fill="white", spacing=10, align="left")
-        # sub
-        sfont=font_reg(46)
-        subw=wrap_text(d, subtext, sfont, W-80)
+
+        # subtext
+        sfont = font_reg(46)
+        subw  = wrap_text(d, subtext, sfont, W-80)
         d.multiline_text((40,420), subw, font=sfont, fill=(235,243,255,255), spacing=10, align="left")
-        # logos (color on right for posters)
-        logo = load_logo(ticker, int(220 * POSTER_LOGO_SCALE))
+
+        # LOGOS (color on right for posters)
+        scale = float(globals().get("POSTER_LOGO_SCALE", 1.0))
+        lg = load_logo_color_safe(ticker, int(220 * scale))
         if lg is not None:
             img.alpha_composite(lg, (W - lg.width - 40, 40))
-        twd=load_twd_white(220)
+
+        twd = load_twd_white(int(220 * scale))
         if twd is not None:
             img.alpha_composite(twd, (W - twd.width - 40, H - twd.height - 40))
-        out=os.path.join(POSTER_DIR, f"{ticker}_poster_{DATESTR}.png")
+
+        out = os.path.join(POSTER_DIR, f"{ticker}_poster_{DATESTR}.png")
         img.convert("RGB").save(out, "PNG")
         return out
     except Exception as e:
