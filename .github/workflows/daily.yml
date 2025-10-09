@@ -1,8 +1,8 @@
-name: TrendWatchDesk • Daily Charts
+name: TrendWatchDesk Generate (Charts + Posters)
 
 on:
   schedule:
-    - cron: "10 7 * * 1,3,5"
+    - cron: "10 7 * * 1,3,5"   # Mon/Wed/Fri 07:10 UTC
   workflow_dispatch:
 
 jobs:
@@ -20,65 +20,104 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies (stable pins)
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install \
-            yfinance==0.2.40 \
-            pandas==2.2.2 \
-            numpy==1.26.4 \
-            pillow==10.4.0 \
-            requests==2.32.3
+          # use versions that were stable for you
+          pip install --upgrade yfinance pillow pandas numpy requests
 
-      - name: Ensure folders
+      - name: Ensure output folders
         run: |
           mkdir -p output/charts
           mkdir -p output/posters
           mkdir -p assets/logos
           mkdir -p assets/fonts
 
-      - name: Run daily charts (attempt 1)
+      - name: Fetch missing logos
+        shell: bash
+        run: |
+          set -e
+          # simple non-failing fetcher; skips any ticker that already exists
+          TICKERS="AAPL MSFT NVDA AMD TSLA META AMZN GOOGL AVGO TSM INTC ASML NFLX DIS BABA NIO SHOP PLTR MA V PYPL SQ SOFI IONQ IBM ISRG ROK"
+          for t in $TICKERS; do
+            f="assets/logos/${t}.png"
+            if [ ! -f "$f" ]; then
+              # try a couple of public sources; ignore failures so the step never breaks the workflow
+              curl -LfsS "https://logo.clearbit.com/${t}.com" -o "$f" || true
+              # if the downloaded file is HTML or empty, remove it
+              if [ ! -s "$f" ] || file "$f" | grep -qi html; then rm -f "$f"; fi
+            fi
+          done
+          echo "Logo inventory:"
+          ls -1 assets/logos | wc -l || true
+
+      - name: Generate charts (CI-gated)
         env:
           PYTHONUNBUFFERED: "1"
         run: |
           set -x
-          python -u main.py 2>&1 | tee output/run.log
+          # main.py must support --ci (back-compat shim included)
+          python -u main.py --ci 2>&1 | tee output/run.log
 
-      - name: Retry once if zero PNGs
+      - name: Generate posters (CI-gated)
+        env:
+          PYTHONUNBUFFERED: "1"
         run: |
-          set -e
-          COUNT=$(find output/charts -type f -name "*.png" | wc -l | tr -d ' ')
-          echo "PNG count after attempt 1: $COUNT"
-          if [ "$COUNT" = "0" ]; then
-            echo "Retrying once..."
-            sleep 8
-            python -u main.py 2>&1 | tee -a output/run.log
-          fi
+          set -x
+          # posters are optional; never fail the run if news is empty
+          python -u main.py --ci-posters 2>&1 | tee -a output/run.log || true
 
-      - name: Show logs & tree
+      - name: Print run.log to console
         if: always()
         run: |
-          echo "===== BEGIN output/run.log ====="
+          echo "===== BEGIN run.log ====="
           (test -f output/run.log && cat output/run.log) || echo "run.log missing"
-          echo "===== END output/run.log ====="
-          echo
-          echo "===== OUTPUT TREE ====="
-          (command -v tree >/dev/null && tree -a output || find output -maxdepth 3 -printf "%y %p\n") || true
-          echo "======================="
+          echo "===== END run.log ====="
 
-      - name: Require charts (stop if zero)
+      - name: Show output tree
+        if: always()
+        run: |
+          echo "== OUTPUT TREE =="
+          (command -v tree >/dev/null && tree -a output || find output -maxdepth 3 -printf "%y %p\n") || true
+          echo "== LIST CHARTS =="
+          find output/charts -type f -name "*.png" -printf "%f\n" 2>/dev/null || true
+          echo "== LIST POSTERS =="
+          find output/posters -type f -name "*.png" -printf "%f\n" 2>/dev/null || true
+
+      - name: Require charts
         run: |
           set -e
           COUNT=$(find output/charts -type f -name "*.png" | wc -l | tr -d ' ')
-          echo "Final charts PNG count: $COUNT"
+          echo "Charts PNG count: $COUNT"
           if [ "$COUNT" = "0" ]; then
             echo "::error::No charts generated."
             exit 1
           fi
 
-      - name: Upload artifact (for debugging / Pages)
+      - name: Publish to 'charts' branch (single-commit)
+        if: success()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          rm -rf publish && mkdir publish
+          cp -r output/* publish/
+
+          cd publish
+          git init
+          git checkout -b charts
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+
+          git add -A
+          git commit -m "Publish charts $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+          git push -f origin charts
+
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: daily-output-${{ github.run_id }}
+          name: twd-output-${{ github.run_id }}
           path: output/**
