@@ -22,7 +22,7 @@ Features
 """
 
 import os, re, math, random, hashlib, traceback, datetime
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -96,7 +96,7 @@ def log(msg: str):
         pass
 
 # =========================
-# ---- Pandas-safe cast ---
+# ---- Pandas-safe helpers
 # =========================
 def _as_float(x):
     """Safely get a Python float from numpy/pandas scalars (no FutureWarnings)."""
@@ -105,11 +105,30 @@ def _as_float(x):
     except AttributeError:
         return float(x)
 
-def _close_series_to_array(close_series: pd.Series) -> np.ndarray:
-    """Force a 1-D float64 ndarray from a Pandas Series (no object/Series leaks)."""
-    if close_series is None or close_series.size == 0:
-        return np.array([], dtype="float64")
-    return pd.to_numeric(close_series, errors="coerce").astype("float64").dropna().to_numpy()
+def _ensure_series_1d(x: Union[pd.Series, pd.DataFrame, np.ndarray, list, tuple]) -> pd.Series:
+    """
+    Convert any reasonable input into a 1-D numeric pandas Series (no NaNs).
+    Handles yfinance quirks where Close may be a DataFrame (multi-index).
+    """
+    if isinstance(x, pd.DataFrame):
+        # squeeze to 1 column if possible; otherwise first column
+        if x.shape[1] == 1:
+            s = x.iloc[:, 0]
+        else:
+            s = x.select_dtypes(include=[np.number]).iloc[:, 0] if not x.select_dtypes(include=[np.number]).empty else x.iloc[:, 0]
+    elif isinstance(x, pd.Series):
+        s = x
+    else:
+        s = pd.Series(x)
+    s = pd.to_numeric(s, errors="coerce")
+    s = s.dropna()
+    s.name = "Close"
+    return s
+
+def _close_to_array(x: Union[pd.Series, pd.DataFrame, np.ndarray, list, tuple]) -> np.ndarray:
+    """Force a 1-D float64 ndarray from any Close-like input."""
+    s = _ensure_series_1d(x)
+    return s.astype("float64").to_numpy()
 
 # =========================
 # ---- Fonts / Logos ------
@@ -155,9 +174,7 @@ def pick_tickers(n: int = 6) -> List[str]:
         cands = [t for t in POOLS[pool] if t not in picks]
         rng.shuffle(cands)
         picks.update(cands[:k])
-    grab("AI", 2)
-    grab("MAG7", 2)
-    grab("Semis", 1)
+    grab("AI", 2); grab("MAG7", 2); grab("Semis", 1)
     others = [t for k,v in POOLS.items() if k not in ("AI","MAG7","Semis") for t in v]
     rng.shuffle(others)
     for t in others:
@@ -165,23 +182,24 @@ def pick_tickers(n: int = 6) -> List[str]:
         picks.add(t)
     return list(picks)[:n]
 
-def swing_levels(series: pd.Series, lookback: int = 14) -> Tuple[Optional[float], Optional[float]]:
-    if series is None or series.empty:
+def swing_levels(series_like, lookback: int = 14) -> Tuple[Optional[float], Optional[float]]:
+    s = _ensure_series_1d(series_like)
+    if s.empty:
         return (None, None)
-    highs = series.rolling(lookback).max()
-    lows  = series.rolling(lookback).min()
-    lo = lows.iloc[-1]
-    hi = highs.iloc[-1]
+    highs = s.rolling(lookback).max()
+    lows  = s.rolling(lookback).min()
+    lo = lows.iloc[-1]; hi = highs.iloc[-1]
     lo = None if pd.isna(lo) else _as_float(lo)
     hi = None if pd.isna(hi) else _as_float(hi)
     return (lo, hi)
 
-def pct_change(series: pd.Series, days: int = 30) -> float:
+def pct_change(series_like, days: int = 30) -> float:
+    s = _ensure_series_1d(series_like)
     try:
-        if len(series) < days + 1:
+        if len(s) < days + 1:
             return 0.0
-        last = _as_float(series.iloc[-1])
-        prev = _as_float(series.iloc[-days-1])
+        last = _as_float(s.iloc[-1])
+        prev = _as_float(s.iloc[-days-1])
         if prev == 0:
             return 0.0
         return (last - prev) / prev * 100.0
@@ -191,27 +209,21 @@ def pct_change(series: pd.Series, days: int = 30) -> float:
 def generate_chart(ticker: str) -> Optional[str]:
     """Weekly ‘clean’ chart with support zone, logos, and text (Pandas-safe)."""
     try:
-        df = yf.download(
-            ticker, period="1y", interval="1wk",
-            progress=False, auto_adjust=False, threads=False
-        )
+        df = yf.download(ticker, period="1y", interval="1wk",
+                         progress=False, auto_adjust=False, threads=False)
         if df.empty:
             log(f"[warn] No data for {ticker}")
             return None
 
-        close_series = df["Close"]
-        # Force to 1-D float array
-        close_arr = _close_series_to_array(close_series)
+        close_s = _ensure_series_1d(df["Close"])
+        close_arr = _close_to_array(close_s)
         if close_arr.size == 0:
             log(f"[warn] No valid closes for {ticker}")
             return None
 
         last  = float(close_arr[-1])
-        # For pct change and swings we can reuse the Series safely now
-        chg30 = pct_change(pd.Series(close_arr), 30)
-
-        # swing levels: pass a Series built from array
-        sup_low, sup_high = swing_levels(pd.Series(close_arr), lookback=10)
+        chg30 = pct_change(close_s, 30)
+        sup_low, sup_high = swing_levels(close_s, lookback=10)
 
         # Canvas
         W,H = 1080, 720
@@ -234,13 +246,10 @@ def generate_chart(ticker: str) -> Optional[str]:
         # Plot
         n = close_arr.size
         xs = np.linspace(x1, x2, num=n)
-        minp = float(np.nanmin(close_arr))
-        maxp = float(np.nanmax(close_arr))
+        minp = float(np.nanmin(close_arr)); maxp = float(np.nanmax(close_arr))
         prange = max(1e-8, float(maxp - minp))
-
         def y_from_price(p: float) -> float:
             return y2 - (float(p) - minp) / prange * (y2 - y1)
-
         pts = [(int(xs[i]), int(y_from_price(close_arr[i]))) for i in range(n)]
         for i in range(1, n):
             d.line([pts[i-1], pts[i]], fill=(0,0,0,255), width=3)
@@ -253,8 +262,7 @@ def generate_chart(ticker: str) -> Optional[str]:
         if (sup_low is not None) and (sup_high is not None):
             y_lo = y_from_price(sup_high)
             y_hi = y_from_price(sup_low)
-            top = min(y_lo, y_hi)
-            bot = max(y_lo, y_hi)
+            top = min(y_lo, y_hi); bot = max(y_lo, y_hi)
             d.rectangle([x1+2, top, x2-2, bot],
                         fill=(40,120,255,48), outline=(40,120,255,160), width=2)
 
@@ -446,17 +454,22 @@ def run_daily_charts():
             try:
                 df = yf.download(t, period="6mo", interval="1d", progress=False,
                                  auto_adjust=False, threads=False)
-                close_arr = _close_series_to_array(df["Close"].dropna())
-                last = float(close_arr[-1]) if close_arr.size else 0.0
-                chg30 = pct_change(pd.Series(close_arr), 30)
-                wk = yf.download(t, period="1y", interval="1wk", progress=False,
-                                 auto_adjust=False, threads=False)["Close"].dropna()
-                sup_low, sup_high = swing_levels(wk, 10)
+                close_s = _ensure_series_1d(df["Close"].dropna())
+                last = _as_float(close_s.iloc[-1]) if not close_s.empty else 0.0
+                chg30 = pct_change(close_s, 30)
+
+                wk_close = _ensure_series_1d(
+                    yf.download(t, period="1y", interval="1wk",
+                                progress=False, auto_adjust=False, threads=False)["Close"]
+                ).dropna()
+                sup_low, sup_high = swing_levels(wk_close, 10)
+
                 near = False
                 if (sup_low is not None) and (sup_high is not None) and (last != 0.0):
                     mid = 0.5 * (sup_low + sup_high)
                     rngp = max(1e-8, float(sup_high - sup_low))
                     near = abs(last - mid) <= 0.6 * rngp
+
                 cap_lines.append(caption_daily(t, last, chg30, near))
             except Exception:
                 pass
