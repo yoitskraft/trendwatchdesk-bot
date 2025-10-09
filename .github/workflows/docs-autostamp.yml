@@ -11,40 +11,59 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0             # needed for safe push
+          persist-credentials: true  # use GITHUB_TOKEN
 
       - name: Update "Last updated" date in docs
         run: |
           set -e
           DATE_STR="$(date -u +'%Y-%m-%d')"
 
-          # Only modify if files exist; ignore if missing
-          for FILE in OPERATIONS_GUIDE.md README.md; do
-            if [ -f "$FILE" ]; then
-              # Replace lines like: _Last updated: 2025-10-09_
-              if grep -qE '^_Last updated:' "$FILE"; then
-                sed -i.bak -E "s/^_Last updated:.*$/_Last updated: ${DATE_STR}_/" "$FILE"
-              else
-                # If not present, insert below first heading
-                awk -v d="$DATE_STR" '
-                  NR==1 && $0 ~ /^# / {
-                    print $0
-                    print ""
-                    print "_Last updated: " d "_"
-                    next
-                  }1
-                ' "$FILE" > "$FILE.tmp" && mv "$FILE.tmp" "$FILE"
-              fi
-              rm -f "$FILE.bak"
-            fi
-          done
+          touch .docstamp       # flag file so we can always detect something to stage if we changed text
 
-          # Commit only if changes
-          if [ -n "$(git status --porcelain)" ]; then
-            git config user.name  "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add OPERATIONS_GUIDE.md README.md 2>/dev/null || true
-            git commit -m "docs: auto-stamp last updated date"
+          # function to stamp a single file (if it exists)
+          stamp_file () {
+            local FILE="$1"
+            [ -f "$FILE" ] || return 0
+
+            # If a line like `_Last updated: YYYY-MM-DD_` exists, replace it. Otherwise insert below # heading.
+            if grep -qE '^_Last updated:' "$FILE"; then
+              sed -i.bak -E "s/^_Last updated:.*$/_Last updated: ${DATE_STR}_/" "$FILE"
+              rm -f "$FILE.bak"
+            else
+              awk -v d="$DATE_STR" '
+                NR==1 && $0 ~ /^# / {
+                  print $0
+                  print ""
+                  print "_Last updated: " d "_"
+                  next
+                }1
+              ' "$FILE" > "$FILE.tmp" && mv "$FILE.tmp" "$FILE"
+            fi
+          }
+
+          stamp_file "OPERATIONS_GUIDE.md"
+          stamp_file "README.md"
+
+          # Configure git and stage all doc changes (avoid path-specific misses)
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Make sure we’re up to date to avoid non-fast-forward
+          git pull --rebase origin "$(git rev-parse --abbrev-ref HEAD)" || true
+
+          # Stage any changes we just made
+          git add -A
+
+          # Only commit if something is staged
+          if ! git diff --cached --quiet; then
+            git commit -m "docs: auto-stamp last updated date to ${DATE_STR}"
             git push
           else
             echo "No doc changes needed."
           fi
+
+          # Clean up helper flag if created
+          git reset .docstamp >/dev/null 2>&1 || true
+          rm -f .docstamp || true
