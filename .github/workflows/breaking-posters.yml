@@ -1,9 +1,10 @@
 name: TWD Breaking Posters (event-driven)
 
 on:
-  # For testing you can keep this frequent; for prod consider "0 */3 * * *"
+  # For testing, run every 10 minutes. For production, consider "0 */3 * * *" (every 3 hours).
   schedule:
     - cron: "*/10 * * * *"
+  # Manual run button in Actions tab
   workflow_dispatch:
 
 jobs:
@@ -28,14 +29,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install --upgrade yfinance pillow pandas numpy requests pytz urllib3
 
-      - name: Prepare output/state dirs (always create folder)
+      - name: Prepare output/state dirs (always create folder + heartbeat)
         run: |
           mkdir -p output/posters
           mkdir -p state
-          # write a heartbeat so branch always shows activity
           echo '{"status":"init","utc":"'$(date -u +%FT%TZ)'"}' > output/posters/status.json
 
-      # Restore dedupe/cooldown state from posters branch if it exists
+      # Pull prior dedupe/cooldown state from posters branch if it exists
       - name: Restore previous poster state
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -61,14 +61,20 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
           TWD_MODE: "posters"
-          TWD_DEBUG: "1"
+          TWD_DEBUG: "1"                      # verbose while stabilizing
           TWD_BREAKING_ON: "on"
-          TWD_BREAKING_RECENCY_MIN: "720"     # 12h window
-          TWD_BREAKING_MIN_SOURCES: "1"       # allow single-source
+          # ---- Filters (relaxed for testing; tighten later) ----
+          TWD_BREAKING_RECENCY_MIN: "720"     # look back 12h
+          TWD_BREAKING_MIN_SOURCES: "1"       # allow single-source headlines
           TWD_BREAKING_MIN_INTERVAL_MIN: "0"  # no cooldown
-          TWD_BREAKING_FALLBACK: "on"         # ensure a poster gets made
+          TWD_BREAKING_FALLBACK: "on"         # render newest if no clusters meet threshold
+          # ---- Optional override of watchlist (comma-separated)
           TWD_WATCHLIST: "AAPL,MSFT,NVDA,AMD,TSLA,SPY,QQQ,GLD,AMZN,META,GOOGL"
+          # ---- Assets
           BRAND_LOGO_PATH: "assets/brand_logo.png"
+        run: |
+          set -x
+          python -u main.py 2>&1 | tee run.log
 
       - name: Show run.log
         if: always()
@@ -91,12 +97,12 @@ jobs:
           COUNT=$(find output/posters -maxdepth 1 -type f -name "news_*.png" 2>/dev/null | wc -l | tr -d ' ')
           echo "posters_count=$COUNT" >> $GITHUB_OUTPUT
           echo "Generated posters: $COUNT"
-          # update heartbeat summary so branch shows activity even with 0 posters
+          # Update heartbeat so the branch shows activity even if 0 posters
           (jq -n --arg utc "$(date -u +%FT%TZ)" --arg count "$COUNT" \
             '{status:"ok", utc:$utc, posters_count:($count|tonumber)}' > output/posters/status.json) \
             || echo '{"status":"ok","posters_count":0}' > output/posters/status.json
 
-      - name: Publish to 'posters' branch (single-commit, always push heartbeat)
+      - name: Publish to 'posters' branch (single-commit; always push heartbeat)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
