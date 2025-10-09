@@ -137,7 +137,7 @@ _Last updated: 2025-10-09_
 <!-- TWD_STATUS:BEGIN -->
 
 ## Automation Status (auto-generated)
-- **Last run:** 2025-10-09 12:35:27 UTC
+- **Last run:** 2025-10-09 13:10:33 UTC
 - **Triggered by:** TWD Breaking Posters (event-driven)
 - **Mode:** `posters`   ·  **Timeframe:** `D`
 - **Breaking-posters knobs:** recency=720m, min_sources=1, fallback=on, rss=on
@@ -145,6 +145,7 @@ _Last updated: 2025-10-09_
 - **Publish targets:** charts → `charts`, posters → `posters`
 
 <!-- TWD_STATUS:END -->
+
 
 
 
