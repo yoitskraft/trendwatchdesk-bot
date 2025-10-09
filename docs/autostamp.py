@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, json, datetime, re, subprocess
+import os, datetime, re, subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -7,20 +7,20 @@ GUIDE = ROOT / "OPERATIONS_GUIDE.md"
 README = ROOT / "README.md"
 
 def _env(k, default=""):
-    return os.getenv(k, default)
+    v = os.getenv(k)
+    return v if v is not None and v != "" else default
 
 def stamp_block():
     now_utc = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-
     mode         = _env("TWD_MODE")                 # charts | posters | all
-    tf           = _env("TWD_TF")                   # D | W
+    tf           = _env("TWD_TF", "D")              # D | W
     recency      = _env("TWD_BREAKING_RECENCY_MIN")
     min_sources  = _env("TWD_BREAKING_MIN_SOURCES")
     fallback     = _env("TWD_BREAKING_FALLBACK")
     allow_rss    = _env("TWD_ALLOW_RSS")
     wl           = _env("TWD_WATCHLIST")
-    charts_branch   = _env("TWD_CHARTS_BRANCH", "charts")
-    posters_branch  = _env("TWD_POSTERS_BRANCH", "posters")
+    charts_br    = _env("TWD_CHARTS_BRANCH", "charts")
+    posters_br   = _env("TWD_POSTERS_BRANCH", "posters")
     trigger_name = _env("TWD_TRIGGER_NAME")
 
     lines = []
@@ -31,7 +31,7 @@ def stamp_block():
     if trigger_name:
         lines.append(f"- **Triggered by:** {trigger_name}")
     if mode:
-        lines.append(f"- **Mode:** `{mode}`   ·  **Timeframe:** `{tf or 'D'}`")
+        lines.append(f"- **Mode:** `{mode}`   ·  **Timeframe:** `{tf}`")
     knobs = []
     if recency:     knobs.append(f"recency={recency}m")
     if min_sources: knobs.append(f"min_sources={min_sources}")
@@ -43,7 +43,7 @@ def stamp_block():
         wl_list = [s.strip() for s in wl.split(",") if s.strip()]
         preview = ", ".join(wl_list[:20]) + (" …" if len(wl_list) > 20 else "")
         lines.append(f"- **Watchlist (preview):** {preview}")
-    lines.append(f"- **Publish targets:** charts → `{charts_branch}`, posters → `{posters_branch}`")
+    lines.append(f"- **Publish targets:** charts → `{charts_br}`, posters → `{posters_br}`")
     lines.append("")
     lines.append("<!-- TWD_STATUS:END -->")
     lines.append("")
@@ -81,7 +81,6 @@ def main():
 
     if changed:
         print("[info] docs updated")
-        # stage from repo root
         os.chdir(ROOT)
         subprocess.run(["git", "add", "OPERATIONS_GUIDE.md", "README.md"], check=False)
     else:
