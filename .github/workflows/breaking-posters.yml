@@ -64,7 +64,7 @@ jobs:
           TWD_DEBUG: "1"                      # verbose while stabilizing
           TWD_BREAKING_ON: "on"
           # ---- Filters (relaxed so you see a poster quickly; tighten later) ----
-          TWD_BREAKING_RECENCY_MIN: "720"     # scan last 12h (was 90)
+          TWD_BREAKING_RECENCY_MIN: "1440"     # scan last 12h (was 90)
           TWD_BREAKING_MIN_SOURCES: "1"       # allow single Yahoo source
           TWD_BREAKING_MIN_INTERVAL_MIN: "0"  # no cooldown
           TWD_BREAKING_FALLBACK: "on"         # render newest if no cluster
