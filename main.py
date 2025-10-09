@@ -211,8 +211,8 @@ def blue_gradient_bg(W: int, H: int) -> Image.Image:
     beams = beams.filter(ImageFilter.GaussianBlur(45))
     return Image.alpha_composite(bg, beams)
 
-def feathered_support(img, x1+6, min(y_top,y_bot), x2-6, max(y_top,y_bot),
-                  fill_alpha=34, blur_radius=16, outline_alpha=110):
+def feathered_support(img, x1:int, y1:int, x2:int, y2:int,
+                      fill_alpha: int = 34, blur_radius: int = 16, outline_alpha: int = 110):
     """Soft zone + a faint crisp outline so it’s visible over candles."""
     W, H = img.size
 
