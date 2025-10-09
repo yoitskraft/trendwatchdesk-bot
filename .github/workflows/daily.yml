@@ -32,27 +32,20 @@ jobs:
 
       - name: Ensure output folder
         run: |
-          mkdir -p output
+          mkdir -p output output/charts output/posters
           echo "Output dir:" && pwd && ls -la output || true
 
-      # ⬇️ New step: fetch all missing logos before running charts
+      # Fetch missing logos BEFORE running main
       - name: Fetch missing logos
         run: |
           python tools/download_logos.py
 
-      - name: Run charts mode (debug on)
+      - name: Run charts mode
         env:
           PYTHONUNBUFFERED: "1"
-          TWD_MODE: "charts"
-          TWD_TF: "W"
-          TWD_DEBUG: "1"
-          TWD_UI_SCALE: "0.90"
-          TWD_TEXT_SCALE: "0.78"
-          TWD_TLOGO_SCALE: "0.55"
-          BRAND_LOGO_PATH: "assets/brand_logo.png"
         run: |
           set -x
-          python -u main.py 2>&1 | tee run.log
+          python -u main.py --daily 2>&1 | tee run.log
 
       - name: Print run.log to console
         if: always()
@@ -61,27 +54,33 @@ jobs:
           (test -f run.log && cat run.log) || echo "run.log missing"
           echo "===== END run.log ====="
 
-      - name: Debug output folder
+      - name: Show output tree
         if: always()
         run: |
-          echo "== output listing =="
+          echo "== output =="
           ls -la output || true
-          echo "== any pngs =="
-          find output -maxdepth 1 -type f -name "*.png" -printf "%f\n" 2>/dev/null || true
-          echo "== any caption =="
+          echo "== output/charts =="
+          ls -la output/charts || true
+          echo "== output/posters =="
+          ls -la output/posters || true
+          echo "== caption files =="
           ls -la output/caption_* 2>/dev/null || true
 
+      # 🔒 Require charts: check the charts subfolder specifically
       - name: Require charts
         if: always()
         run: |
           set -e
-          COUNT=$(find output -maxdepth 1 -type f -name "*.png" 2>/dev/null | wc -l | tr -d ' ')
+          echo "== list charts =="
+          find output/charts -type f -name "*.png" -printf "%p\n" 2>/dev/null || true
+          COUNT=$(find output/charts -type f -name "*.png" 2>/dev/null | wc -l | tr -d ' ')
           echo "PNG count: $COUNT"
           if [ "$COUNT" = "0" ]; then
             echo "::error::No charts generated. Check run.log above for errors."
             exit 1
           fi
 
+      # Publish only generated outputs to a dedicated 'charts' branch
       - name: Publish to 'charts' branch (single-commit)
         if: success()
         env:
@@ -90,7 +89,7 @@ jobs:
         run: |
           set -e
           test -d output
-          ls output/*.png >/dev/null 2>&1
+          ls output/charts/*.png >/dev/null 2>&1
 
           rm -rf publish && mkdir publish
           cp -r output/* publish/
