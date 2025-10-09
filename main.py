@@ -212,28 +212,28 @@ def blue_gradient_bg(W: int, H: int) -> Image.Image:
     return Image.alpha_composite(bg, beams)
 
 def feathered_support(img: Image.Image, x1:int, y1:int, x2:int, y2:int,
-                      fill_alpha: int = 70, blur_radius: int = 5, outline_alpha: int = 100):
+                      fill_alpha: int = 96, blur_radius: int = 6, outline_alpha: int = 140):
     """
-    Draw a semi-transparent feathered support/resistance zone:
-    - white haze with slight transparency
-    - softer blur so it blends with candles
-    - faint outline for subtle definition
+    Semi-transparent feathered support zone drawn OVER candles:
+    - bright-ish white haze
+    - light blur so it doesn't wash out
+    - faint crisp outline for definition
     """
     W, H = img.size
 
-    # Blurred white base fill (slightly stronger alpha than before)
+    # Blurred white base fill (soft glow)
     base = Image.new("RGBA", (W, H), (0,0,0,0))
     bd = ImageDraw.Draw(base)
     bd.rectangle([x1, y1, x2, y2], fill=(255, 255, 255, fill_alpha))
     base = base.filter(ImageFilter.GaussianBlur(blur_radius))
     img.alpha_composite(base)
 
-    # Crisp faint outline (still blue-white so it doesn't dominate)
+    # Faint outline on top
     top = Image.new("RGBA", (W, H), (0,0,0,0))
     td = ImageDraw.Draw(top)
-    td.rectangle([x1, y1, x2, y2], outline=(200, 220, 255, outline_alpha), width=2)
+    td.rectangle([x1, y1, x2, y2], outline=(255, 255, 255, outline_alpha), width=2)
     img.alpha_composite(top)
-
+                          
 # -----------------------
 # Selection
 # -----------------------
@@ -325,22 +325,26 @@ def generate_chart(ticker: str) -> Optional[str]:
         # Candles (NO grid)
         render_candles(d, ohlc, (x1, y1, x2, y2))
 
-        # Logos: company (white mono) top-left, TWD forced white bottom-right
-        lg_col = load_logo_color(ticker, 170)
-        if lg_col is not None:
-            lg_white = to_white_mono(lg_col, alpha=255)
-            img.alpha_composite(lg_white, (x1, 16))
+# --- SUPPORT ZONE (draw OVER candles) ---
+close_s = ohlc["Close"]
+lo, hi = swing_levels(close_s, 10)
+if (lo is not None) and (hi is not None) and (hi >= lo):
+    pmin, pmax = float(ohlc["Low"].min()), float(ohlc["High"].max())
+    pr = max(1e-9, pmax - pmin)
+    def y(p): return y2 - (float(p) - pmin) / pr * (y2 - y1)
+    y_top, y_bot = int(y(hi)), int(y(lo))
 
-        twd = load_twd_white(160)
-        if twd is not None:
-            img.alpha_composite(twd, (W - twd.width - 18, H - twd.height - 14))
+    # Enforce a minimum visual thickness so it doesn't vanish
+    MIN_PX = 26
+    if (y_bot - y_top) < MIN_PX:
+        mid = (y_top + y_bot) // 2
+        pad = MIN_PX // 2
+        y_top = max(y1 + 4, mid - pad)
+        y_bot = min(y2 - 4, mid + pad)
 
-        out = os.path.join(CHART_DIR, f"{ticker}_chart.png")
-        img.convert("RGB").save(out, "PNG")
-        return out
-    except Exception as e:
-        log(f"[error] generate_chart({ticker}): {e}")
-        return None
+    # Feathered white zone over candles (now clearly visible)
+    feathered_support(img, x1 + 6, y_top, x2 - 6, y_bot,
+                      fill_alpha=96, blur_radius=6, outline_alpha=140)
 
 # -----------------------
 # Captions (same logic, CTA once at end)
