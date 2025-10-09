@@ -45,11 +45,12 @@ TWD_MODE=posters python main.py
 <!-- TWD_STATUS:BEGIN -->
 
 ## Automation Status (auto-generated)
-- **Last run:** 2025-10-09 02:11:08 UTC
-- **Triggered by:** manual
-- **Mode:** `charts`   ·  **Timeframe:** `D`
+- **Last run:** 2025-10-09 02:50:16 UTC
+- **Triggered by:** TWD Breaking Posters (event-driven)
+- **Mode:** `posters`   ·  **Timeframe:** `D`
 - **Breaking-posters knobs:** recency=720m, min_sources=1, fallback=on, rss=on
 - **Watchlist (preview):** AAPL, MSFT, NVDA, AMD, TSLA, SPY, QQQ, GLD, AMZN, META, GOOGL
 - **Publish targets:** charts → `charts`, posters → `posters`
 
 <!-- TWD_STATUS:END -->
+
