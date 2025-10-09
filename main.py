@@ -2,15 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-TrendWatchDesk – main.py (final, with Robotics & Quantum pools + SOFI)
-Charts: weekly candlesticks (blue bg, white logos), subtle feathered support zone (rectangle), no grid.
-Posters: blue bg, white logos on RIGHT, non-overlapping, market-aware subtext (stocks vs commodities), Yahoo headlines.
-Captions (charts): emojis by sector, show % (1D/5D/30D), NO PRICE, high variety.
-
-Outputs:
-  charts  → output/charts/{TICKER}_chart.png
-  caption → output/caption_YYYYMMDD.txt (daily charts)
-  posters → output/posters/{TICKER}_poster_YYYYMMDD.png (+ _caption.txt)
+TrendWatchDesk – main.py
+- Charts: weekly candlesticks, blue gradient bg, no grid, subtle feathered support zone (rectangle), white logos
+- Posters: blue bg, company logo top-right, TWD bottom-right, auto-fit headline, wrapped subtext
+- Captions (charts): sector-based emojis, show % (1D/5D/30D), NO price, high variety
+- News: Yahoo Finance headlines for posters
+- Outputs:
+    charts  → output/charts/{TICKER}_chart.png
+    caption → output/caption_YYYYMMDD.txt
+    posters → output/posters/{TICKER}_poster_YYYYMMDD.png (+ _caption.txt)
 """
 
 import os, re, random, hashlib, traceback, datetime
@@ -62,14 +62,16 @@ WATCHLIST = [
     "XOM","CVX","SLB","OXY","COP","GLD","SLV","USO","DBC","UNG",
     # Defense / Aerospace
     "LMT","RTX","NOC","GD","BA",
-    # Health / Biotech
+    # Health / Biotech / Medtech
     "LLY","REGN","MRK","PFE","JNJ","ISRG",
     # Retail / E-comm
     "SHOP","COST","WMT",
-    # Robotics (incl ETFs / names with robotics exposure)
+    # Robotics
     "BOTZ","ROBO","IRBT","FANUY","ISRG","TER",
-    # Quantum Computing
-    "IONQ","RGTI","QBTS","IBM"
+    # Quantum
+    "IONQ","RGTI","QBTS","IBM",
+    # Broad ETFs you mentioned before
+    "SPY","QQQ","DIA","IWM",
 ]
 
 POOLS = {
@@ -88,7 +90,6 @@ POOLS = {
     "Wildcards":   ["PLTR","SHOP","SMCI","ARM","SOFI","IONQ","RGTI","QBTS"],
 }
 
-# Commodities / ETFs labeling for poster tone
 COMMODITY_ETFS = {"GLD":"Gold", "SLV":"Silver", "USO":"Crude Oil", "UNG":"Nat Gas", "DBC":"Commodities"}
 
 # =========================
@@ -185,7 +186,6 @@ def fit_headline(draw, text, font_path, start_size, max_w, max_lines):
     return wrap_to_width(draw, text, f, max_w)[:max_lines], f
 
 def chart_background(W=1080, H=720) -> Image.Image:
-    """Blue gradient + soft beams (brand)."""
     base = Image.new("RGB", (W, H), "#0d3a66")
     grad = Image.new("RGB", (W, H))
     for y in range(H):
@@ -210,53 +210,36 @@ def poster_background(W=1080, H=1080) -> Image.Image:
 # ---- Sector mapping -----
 # =========================
 TICKER_SECTOR = {
-    # AI / Semis
     "NVDA":"Semis","AMD":"Semis","AVGO":"Semis","TSM":"Semis","ASML":"Semis","ARM":"Semis","SMCI":"Semis","INTC":"Semis","MU":"Semis","TER":"Robotics",
-    # Cloud / SaaS / Data
     "MSFT":"Cloud","GOOGL":"Cloud","AMZN":"Cloud","CRM":"Cloud","NOW":"Cloud","SNOW":"Cloud","DDOG":"Cloud","MDB":"Cloud","PLTR":"Cloud",
-    # Security
     "PANW":"Security","CRWD":"Security","ZS":"Security",
-    # Fintech
     "V":"Fintech","MA":"Fintech","PYPL":"Fintech","SQ":"Fintech","COIN":"Fintech","HOOD":"Fintech","SOFI":"Fintech",
-    # Energy / Commodities
     "XOM":"Energy","CVX":"Energy","SLB":"Energy","OXY":"Energy","COP":"Energy",
     "GLD":"Commodities","SLV":"Commodities","USO":"Commodities","DBC":"Commodities","UNG":"Commodities",
-    # Defense / Aerospace
     "LMT":"Defense","RTX":"Defense","NOC":"Defense","GD":"Defense","BA":"Defense",
-    # Health / Biotech / Robotics
     "LLY":"Biotech","REGN":"Biotech","MRK":"Biotech","PFE":"Biotech","JNJ":"Biotech","ISRG":"Robotics",
-    # Retail / BigTech / Auto
     "SHOP":"Retail","COST":"Retail","WMT":"Retail",
     "AAPL":"BigTech","META":"BigTech","NFLX":"BigTech","TSLA":"Auto",
-    # Robotics ETFs / names
     "BOTZ":"Robotics","ROBO":"Robotics","IRBT":"Robotics","FANUY":"Robotics",
-    # Quantum
-    "IONQ":"Quantum","RGTI":"Quantum","QBTS":"Quantum","IBM":"Quantum"
+    "IONQ":"Quantum","RGTI":"Quantum","QBTS":"Quantum","IBM":"Quantum",
+    "SPY":"Commodities","QQQ":"BigTech","DIA":"Commodities","IWM":"Commodities",
 }
 
-SECTOR_EMOJI = {
-    "Semis":"🧠", "Cloud":"☁️", "Security":"🛡️🔒", "Fintech":"💳", "Energy":"⛽️",
-    "Commodities":"🪙", "Defense":"🛡️", "Biotech":"🧪", "Retail":"🛍️",
-    "BigTech":"📡", "Auto":"🚗", "Robotics":"🤖", "Quantum":"🔮"
+EMO_MAP = {
+    "Semis":["🧠","⚡️","🚀"], "Cloud":["☁️","🖥️","🛰️"], "Security":["🛡️","🔒","🕵️"],
+    "Fintech":["💳","🏦","📲"], "Energy":["⛽️","🛢️","⚙️"], "Commodities":["🪙","📦","🏭"],
+    "Defense":["🛡️","✈️","🛰️"], "Biotech":["🧪","🧬","🩺"], "Retail":["🛍️","🛒","🏷️"],
+    "BigTech":["📡","📱","💾"], "Auto":["🚗","🔋","🛠️"], "Robotics":["🤖","🦾","🔧"], "Quantum":["🔮","🧲","🧠"]
 }
 
 def sector_for(tkr: str) -> str:
-    s = TICKER_SECTOR.get(tkr.upper())
-    if s: return s
-    for name, tickers in POOLS.items():
-        if tkr.upper() in tickers:
-            if name in ("AI_Semis",): return "Semis"
-            if name in ("Cloud",):    return "Cloud"
-            if name in ("Commodities",): return "Commodities"
-            return name
-    return "BigTech"
+    return TICKER_SECTOR.get(tkr.upper(), "BigTech")
 
 # =========================
 # ---- Ticker Selection ---
 # =========================
 def pick_tickers(n: int = 6) -> List[str]:
     picks = set()
-    # ensure hot sectors are represented
     def grab(pool, k):
         if pool not in POOLS: return
         cands = [t for t in POOLS[pool] if t not in picks]
@@ -274,7 +257,6 @@ def pick_tickers(n: int = 6) -> List[str]:
 # ---- Charts -------------
 # =========================
 def generate_chart(tkr: str) -> Optional[str]:
-    """Weekly candlestick chart on blue background; no grid; feathered support zone; white logos."""
     try:
         df = yf.download(tkr, period="1y", interval="1wk",
                          progress=False, auto_adjust=False, threads=False)
@@ -288,7 +270,6 @@ def generate_chart(tkr: str) -> Optional[str]:
         if c.size < 2:
             log(f"[warn] {tkr}: not enough points"); return None
 
-        # Canvas regions
         W,H = 1080,720
         margin = 40
         header_h = 140
@@ -296,12 +277,11 @@ def generate_chart(tkr: str) -> Optional[str]:
         x1,y1,x2,y2 = margin+30, margin+header_h, W-margin-30, H-margin-footer_h
         img = chart_background(W,H); d = ImageDraw.Draw(img)
 
-        # Price mapping
         minp,maxp = float(np.nanmin(l)), float(np.nanmax(h))
         prng = max(1e-8,maxp-minp)
         def y_from(p): return y2 - ((float(p)-minp)/prng)*(y2-y1)
 
-        # Subtle feathered support zone (rectangle)
+        # Feathered support rectangle
         s = pd.Series(c)
         hi = s.rolling(10).max().iloc[-1]
         lo = s.rolling(10).min().iloc[-1]
@@ -315,26 +295,25 @@ def generate_chart(tkr: str) -> Optional[str]:
             overlay = Image.new("RGBA", img.size, (0,0,0,0))
             od = ImageDraw.Draw(overlay)
             od.rectangle([x1, top, x2, bot],
-                         fill=(255,255,255,28),      # very transparent fill
-                         outline=(255,255,255,80),   # soft border
-                         width=2)
+                         fill=(255,255,255,28),
+                         outline=(255,255,255,80), width=2)
             overlay = overlay.filter(ImageFilter.GaussianBlur(1.0))
             img = Image.alpha_composite(img, overlay)
             d = ImageDraw.Draw(img)
 
-        # Candlesticks
+        # Candles
         xs = np.linspace(x1, x2, num=len(c))
         bar_w = max(3,int((x2-x1)/len(c)*0.5))
         for i in range(len(c)):
             cx = int(xs[i])
             op,cl,hi_,lo_ = float(o[i]),float(c[i]),float(h[i]),float(l[i])
-            col = (60,255,120,255) if cl>=op else (255,80,80,255)  # green/red
-            d.line([(cx,y_from(lo_)), (cx,y_from(hi_))], fill=col, width=2)  # wick
+            col = (60,255,120,255) if cl>=op else (255,80,80,255)
+            d.line([(cx,y_from(lo_)), (cx,y_from(hi_))], fill=col, width=2)
             y_op,y_cl = y_from(op),y_from(cl)
             top,bot = min(y_op,y_cl),max(y_op,y_cl)
             d.rectangle([cx-bar_w, top, cx+bar_w, bot], fill=col, outline=col)
 
-        # Logos (WHITE) — company top-left, TWD bottom-right
+        # Logos (white): company TL, TWD BR
         lg  = load_logo_white(tkr, 140)
         twd = twd_logo_white(160)
         if lg:  img.alpha_composite(lg, (margin+10, 24))
@@ -350,15 +329,7 @@ def generate_chart(tkr: str) -> Optional[str]:
 # =========================
 # ---- Chart Captions -----
 # =========================
-EMO_MAP = {
-    "Semis":["🧠","⚡️","🚀"], "Cloud":["☁️","🖥️","🛰️"], "Security":["🛡️","🔒","🕵️"],
-    "Fintech":["💳","🏦","📲"], "Energy":["⛽️","🛢️","⚙️"], "Commodities":["🪙","📦","🏭"],
-    "Defense":["🛡️","✈️","🛰️"], "Biotech":["🧪","🧬","🩺"], "Retail":["🛍️","🛒","🏷️"],
-    "BigTech":["📡","📱","💾"], "Auto":["🚗","🔋","🛠️"], "Robotics":["🤖","🦾","🔧"], "Quantum":["🔮","🧲","🧠"]
-}
-
 _used_templates = set()
-
 def _pick_unique(options: List[str]) -> str:
     rng.shuffle(options)
     for o in options:
@@ -415,8 +386,7 @@ def caption_daily(ticker: str, last: float, chg30: float, near_support: bool) ->
     ctx = fetch_price_context(ticker)
     line = _pct_line(ctx.get("chg1d"), ctx.get("chg5d"), ctx.get("chg30"))
     sec  = sector_for(ticker)
-    emo_choices = EMO_MAP.get(sec, ["📈"])
-    emo = rng.choice(emo_choices)
+    emo  = random.choice(EMO_MAP.get(sec, ["📈"]))
 
     cues=[]
     if ctx.get("chg30") is not None and ctx["chg30"] >= 10: cues.append("momentum in play")
@@ -432,7 +402,6 @@ def caption_daily(ticker: str, last: float, chg30: float, near_support: bool) ->
         f"{emo} {ticker} on the radar: {line} • {cue}",
         f"{emo} {ticker}: {line} • {cue}",
     ]
-    # avoid empty % line
     candidates = [t for t in templates if line] or templates
     return _pick_unique(candidates)
 
@@ -457,35 +426,10 @@ def poster_background(W=1080, H=1080) -> Image.Image:
     beams = beams.filter(ImageFilter.GaussianBlur(45))
     return Image.alpha_composite(base.convert("RGBA"), beams)
 
-def fit_headline(draw, text, font_path, start_size, max_w, max_lines):
-    size=start_size
-    while size>=56:
-        f=ImageFont.truetype(font_path, size)
-        lines=wrap_to_width(draw, text, f, max_w)
-        if len(lines)<=max_lines: return lines, f
-        size-=4
-    f=ImageFont.truetype(font_path, 56)
-    return wrap_to_width(draw, text, f, max_w)[:max_lines], f
-
-def wrap_to_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_w: int) -> list:
-    words = text.split(); lines=[]; line=""
-    for w in words:
-        test = (line+" "+w).strip()
-        tw = draw.textbbox((0,0), test, font=font)[2]
-        if tw>max_w and line:
-            lines.append(line); line=w
-        else:
-            line=test
-    if line: lines.append(line)
-    return lines
-
 def build_poster_subtext(ticker: str, headline: str, ctx: Dict) -> List[str]:
     is_commodity = ticker in COMMODITY_ETFS
     asset_name = COMMODITY_ETFS.get(ticker, ticker)
-    chg1d  = ctx.get("chg1d")
-    chg5d  = ctx.get("chg5d")
-    chg30  = ctx.get("chg30")
-    atrpct = ctx.get("atr_pct")
+    chg1d  = ctx.get("chg1d"); chg5d = ctx.get("chg5d"); chg30 = ctx.get("chg30"); atrpct = ctx.get("atr_pct")
 
     facts = []
     if chg1d is not None:  facts.append(f"{chg1d:+.2f}% (1D)")
@@ -528,13 +472,12 @@ def build_poster_subtext(ticker: str, headline: str, ctx: Dict) -> List[str]:
     return lines[:4]
 
 def generate_poster(ticker: str, headline: str, subtext_lines: List[str]) -> Optional[str]:
-    """Blue bg; white logos; auto-fit headline; wrapped subtext; logos on RIGHT (company TR, TWD BR)."""
     try:
         W,H = 1080,1080
         PAD, GAP = 44, 22
         img = poster_background(W,H); d = ImageDraw.Draw(img)
 
-        # Logos (white)
+        # Logos white (right side)
         tlogo = load_logo_white(ticker, 180)
         twd   = twd_logo_white(200)
 
@@ -545,21 +488,20 @@ def generate_poster(ticker: str, headline: str, subtext_lines: List[str]) -> Opt
         d.rounded_rectangle(tag_rect, radius=12, fill=(0,36,73,210))
         d.text((PAD+14, PAD+10), tag_text, font=tag_font, fill="white")
 
-        # Place logos on RIGHT
         right_x = W - PAD
         top_used = PAD + th_tag + 20 + GAP
         bottom_reserved = PAD
         tlogo_pos = None
         if tlogo is not None:
-            tlogo_pos = (right_x - tlogo.width, PAD)  # top-right
+            tlogo_pos = (right_x - tlogo.width, PAD)
             img.alpha_composite(tlogo, tlogo_pos)
             top_used = max(top_used, PAD + tlogo.height + GAP)
         if twd is not None:
-            twd_pos = (right_x - twd.width, H - PAD - twd.height)  # bottom-right
+            twd_pos = (right_x - twd.width, H - PAD - twd.height)
             img.alpha_composite(twd, twd_pos)
             bottom_reserved = max(bottom_reserved, twd.height + GAP)
 
-        # Headline (max 2 lines, auto-fit) left area (avoid TR logo)
+        # Headline (avoid TR logo)
         left = PAD
         right = min(W - PAD, (tlogo_pos[0] - GAP) if tlogo_pos else (W - PAD))
         head_max_w = max(320, right - left)
@@ -586,7 +528,8 @@ def generate_poster(ticker: str, headline: str, subtext_lines: List[str]) -> Opt
 
         out = os.path.join(POSTER_DIR, f"{ticker}_poster_{DATESTAMP}.png")
         img.convert("RGB").save(out, "PNG")
-        # Poster caption: sector emoji + % facts, not a duplicate of poster body
+
+        # Poster caption: sector emoji + % facts
         capfile = os.path.splitext(out)[0] + "_caption.txt"
         try:
             ctx = fetch_price_context(ticker)
@@ -595,7 +538,7 @@ def generate_poster(ticker: str, headline: str, subtext_lines: List[str]) -> Opt
             if ctx.get("chg5d") is not None:  bits.append(f"{ctx['chg5d']:+.2f}% 5D")
             if ctx.get("chg30") is not None:  bits.append(f"{ctx['chg30']:+.2f}% 30D")
             facts = " · ".join(bits) if bits else ""
-            sec = sector_for(ticker); emo = rng.choice(EMO_MAP.get(sec, ["📈"]))
+            sec = sector_for(ticker); emo = random.choice(EMO_MAP.get(sec, ["📈"]))
             with open(capfile, "w", encoding="utf-8") as f:
                 f.write(f"{emo} {ticker} — {facts}\n{headline}\nWatching levels and follow-through.")
         except Exception as e:
@@ -606,7 +549,7 @@ def generate_poster(ticker: str, headline: str, subtext_lines: List[str]) -> Opt
         return None
 
 # =========================
-# ---- News (Yahoo) -------
+# ---- News ---------------
 # =========================
 def fetch_yahoo_headlines(tickers: List[str], max_items: int = 40) -> List[Dict]:
     items=[]
@@ -619,7 +562,7 @@ def fetch_yahoo_headlines(tickers: List[str], max_items: int = 40) -> List[Dict]
                 if title: items.append({"ticker": t, "title": title})
         except Exception as e:
             log(f"[warn] yahoo fetch {t}: {e}")
-    # dedupe by normalized title
+    # dedupe
     seen=set(); uniq=[]
     for it in items:
         key = re.sub(r"[^a-z0-9 ]+","", it["title"].lower()).strip()
@@ -649,7 +592,6 @@ def run_daily_charts() -> int:
                 if close.size > 31 and close[-31] != 0:
                     chg30 = (last - float(close[-31])) / float(close[-31]) * 100.0
 
-                # Near-support tag (for caption variety)
                 wk = yf.download(t, period="1y", interval="1wk",
                                  progress=False, auto_adjust=False, threads=False)
                 warr = _to_1d_float_array(wk.get("Close"))
@@ -699,7 +641,6 @@ def run_posters() -> int:
             out = generate_poster(tkr, title, sub_lines)
             if out: generated.append(out)
     else:
-        # Fallback: pick 2 and fabricate neutral headlines
         tickers = rng.sample(WATCHLIST, 2)
         for t in tickers:
             title = f"{COMMODITY_ETFS.get(t, t)} moves on flows and positioning"
