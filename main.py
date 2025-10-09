@@ -1,195 +1,201 @@
 #!/usr/bin/env python3
-# TrendWatchDesk – CHARTS + BREAKING-NEWS POSTERS (stable)
-
-import os, random, datetime, traceback, re, json, hashlib
+import os, sys, io, math, json, random, datetime, traceback
 import numpy as np
 import pandas as pd
 import yfinance as yf
 from PIL import Image, ImageDraw, ImageFont
 
-# =========================
-# Paths & Dates
-# =========================
-OUTPUT_DIR  = os.path.abspath("output")
-POSTER_DIR  = os.path.join(OUTPUT_DIR, "posters")
-TODAY       = datetime.date.today()
-DATESTR     = TODAY.strftime("%Y%m%d")
-DATESTR_HM  = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M")  # unique per run
+# ------------------ Config & knobs ------------------
+OUTPUT_DIR = os.path.abspath("output")
+TODAY = datetime.date.today()
+DATESTR = TODAY.strftime("%Y%m%d")
 
-# =========================
-# Env knobs
-# =========================
-# What to run this invocation: "all" | "charts" | "posters"
-TWD_MODE = (os.getenv("TWD_MODE", "all") or "all").lower()
+# Env knobs (tweak via workflow env)
+TWD_MODE = os.getenv("TWD_MODE", "charts").lower()            # charts | posters | all (charts)
+TWD_TF = os.getenv("TWD_TF", "D").upper()                     # D or W (render timeframe)
+TWD_DEBUG = os.getenv("TWD_DEBUG", "0").lower() in ("1","true","on","yes")
 
-# UI scaling
-TWD_UI_SCALE    = float(os.getenv("TWD_UI_SCALE", "0.90"))
-TWD_TEXT_SCALE  = float(os.getenv("TWD_TEXT_SCALE", "0.78"))
-TWD_TLOGO_SCALE = float(os.getenv("TWD_TLOGO_SCALE","0.55"))
+# UI scales
+TWD_UI_SCALE = float(os.getenv("TWD_UI_SCALE", "0.90"))
+TWD_TEXT_SCALE = float(os.getenv("TWD_TEXT_SCALE", "0.78"))
+TWD_TLOGO_SCALE = float(os.getenv("TWD_TLOGO_SCALE", "0.55"))
 
-# Brand logo (bottom-right)
-BRAND_LOGO_PATH = os.getenv("BRAND_LOGO_PATH", "assets/brand_logo.png")
+# brand assets
+BRAND_LOGO_PATH = os.getenv("BRAND_LOGO_PATH", "assets/brand_logo.png").strip()
 
-# Chart timeframe: "D" or "W"
-TWD_TF = (os.getenv("TWD_TF", "D") or "D").upper().strip()
+# ------------------ Logging ------------------
+def _dbg(msg: str):
+    if TWD_DEBUG:
+        print(f"[debug] {msg}")
 
-# Breaking posters (event-driven)
-BREAKING_ON = (os.getenv("TWD_BREAKING_ON", "on").lower() in ("on","1","true","yes"))
-BREAKING_RECENCY_MIN   = int(os.getenv("TWD_BREAKING_RECENCY_MIN", "90"))   # lookback window (minutes)
-BREAKING_MIN_SOURCES   = int(os.getenv("TWD_BREAKING_MIN_SOURCES", "3"))    # require N+ publishers
-BREAKING_MIN_INTERVAL  = int(os.getenv("TWD_BREAKING_MIN_INTERVAL_MIN", "30"))  # cooldown between posters
-
-# State for dedupe
-STATE_DIR   = os.path.abspath("state")
-SEEN_STORIES_PATH = os.path.join(STATE_DIR, "seen_stories.json")
-
-# =========================
-# Pools / Tickers
-# =========================
-COMPANY_QUERY = {
-    "META":"Meta Platforms","AMD":"Advanced Micro Devices","GOOG":"Google Alphabet","GOOGL":"Alphabet",
-    "AAPL":"Apple","MSFT":"Microsoft","TSM":"Taiwan Semiconductor","TSLA":"Tesla",
-    "JNJ":"Johnson & Johnson","MA":"Mastercard","V":"Visa","NVDA":"NVIDIA",
-    "AMZN":"Amazon","SNOW":"Snowflake","SQ":"Block Inc","PYPL":"PayPal","UNH":"UnitedHealth"
-}
-
-def choose_tickers_somehow():
-    """Stable, date-seeded variety — replace with your weighted logic if needed."""
-    rnd = random.Random(DATESTR)
-    pool = list(COMPANY_QUERY.keys())
-    k = min(6, len(pool))
-    return rnd.sample(pool, k)
-
-# =========================
-# Data helpers
-# =========================
-def _find_col(df: pd.DataFrame, name: str):
+# ------------------ Utilities (columns, fonts) ------------------
+def _find_col(df: pd.DataFrame, key: str):
     if df is None or df.empty: return None
-    if name in df.columns:
-        ser = df[name]
-        if isinstance(ser, pd.DataFrame): ser = ser.iloc[:, 0]
-        return pd.to_numeric(ser, errors="coerce")
-    if isinstance(df.columns, pd.MultiIndex):
-        if name in df.columns.get_level_values(-1):
-            sub = df.xs(name, axis=1, level=-1)
-            ser = sub.iloc[:, 0] if isinstance(sub, pd.DataFrame) else sub
-            return pd.to_numeric(ser, errors="coerce")
-    try:
-        norm = {str(c).lower().replace(" ",""): c for c in df.columns}
-        key = name.lower().replace(" ","")
-        if key in norm:
-            ser = df[norm[key]]
-            if isinstance(ser, pd.DataFrame): ser = ser.iloc[:, 0]
-            return pd.to_numeric(ser, errors="coerce")
-    except Exception:
-        pass
+    cols = df.columns
+    if key in cols: return df[key]
+    if isinstance(cols, pd.MultiIndex):
+        for lvl in reversed(range(cols.nlevels)):
+            try:
+                sub = df.xs(key, axis=1, level=lvl, drop_level=False)
+                if isinstance(sub, pd.DataFrame) and sub.shape[1] >= 1:
+                    return sub.iloc[:, 0]
+            except Exception:
+                pass
     return None
 
+def _load_font(size, bold=False):
+    # Try Grift → Roboto → default
+    font_candidates = []
+    if bold:
+        font_candidates += ["assets/fonts/Grift-Bold.ttf", "assets/fonts/Roboto-Bold.ttf"]
+    else:
+        font_candidates += ["assets/fonts/Grift-Regular.ttf", "assets/fonts/Roboto-Regular.ttf"]
+    for p in font_candidates:
+        if os.path.exists(p):
+            try: return ImageFont.truetype(p, size)
+            except Exception: pass
+    return ImageFont.load_default()
+
+# ------------------ Ticker selection (keep your pools later) ------------------
+DEFAULT_TICKERS = [
+    "AAPL","MSFT","META","AMZN","GOOGL","TSLA","NVDA",
+    "AMD","TSM","ASML","QCOM","INTC","MU","TXN",
+    "JNJ","UNH","LLY","ABBV","MRK",
+    "MA","V","PYPL","SQ","SOFI",
+    "SNOW","CRM","NOW","PLTR",
+    "NFLX","ADBE","NKE","COST","PEP","KO","XOM","CVX"
+]
+
+def choose_tickers_somehow(n=6, seed=None):
+    rnd = random.Random(seed or DATESTR)
+    return rnd.sample(DEFAULT_TICKERS, k=n)
+
+# ------------------ OHLC normalization ------------------
 def _get_ohlc_df(df: pd.DataFrame):
-    if df is None or df.empty: return None
+    if df is None or df.empty:
+        return None
+    _dbg(f"_get_ohlc_df in: cols={list(df.columns)} len={len(df)}")
+
     o = _find_col(df,"Open"); h = _find_col(df,"High"); l = _find_col(df,"Low")
     c = _find_col(df,"Close")
-    if c is None or c.dropna().empty:
+    if c is None or (hasattr(c, "dropna") and c.dropna().empty):
         c = _find_col(df,"Adj Close")
-    if c is None or c.dropna().empty: return None
+
+    if c is None or (hasattr(c, "dropna") and c.dropna().empty):
+        _dbg("Close/Adj Close missing; _get_ohlc_df -> None")
+        return None
+
     idx = c.index
-    def _al(x): return pd.to_numeric(x, errors="coerce").reindex(idx) if x is not None else None
-    o, h, l, c = _al(o), _al(h), _al(l), _al(c).astype(float)
-    if o is None: o = c.copy()
-    if h is None: h = c.copy()
-    if l is None: l = c.copy()
+    def _al(x):
+        return pd.to_numeric(x, errors="coerce").reindex(idx) if x is not None else None
+
+    c = _al(c).astype(float)
+    # Synthesize missing from Close so we can still render
+    o = _al(o) if o is not None else c.copy()
+    h = _al(h) if h is not None else c.copy()
+    l = _al(l) if l is not None else c.copy()
+
     out = pd.DataFrame({"Open":o,"High":h,"Low":l,"Close":c}).dropna()
-    return out if not out.empty else None
+    if out.empty:
+        _dbg("_get_ohlc_df constructed empty")
+        return None
+    _dbg(f"_get_ohlc_df out len={len(out)}")
+    return out
 
-def atr(df: pd.DataFrame, n=14):
-    h, l, c = df["High"], df["Low"], df["Close"]
-    prev = c.shift(1)
-    tr = pd.concat([(h-l).abs(), (h-prev).abs(), (l-prev).abs()], axis=1).max(axis=1)
-    return tr.rolling(n, min_periods=1).mean()
-
-def swing_points(df: pd.DataFrame, w=3):
+# ------------------ Swings & support (4H driven) ------------------
+def _swing_points(series: pd.Series, w=3):
+    s = series.values
+    idxs = series.index.to_list()
     highs, lows = [], []
-    h, l = df["High"], df["Low"]
-    for i in range(w, len(df)-w):
-        if h.iloc[i] >= h.iloc[i-w:i].max() and h.iloc[i] >= h.iloc[i+1:i+1+w].max():
-            highs.append((i, float(h.iloc[i])))
-        if l.iloc[i] <= l.iloc[i-w:i].min() and l.iloc[i] <= l.iloc[i+1:i+1+w].min():
-            lows.append((i, float(l.iloc[i])))
+    for i in range(w, len(s)-w):
+        left = s[i-w:i]; right = s[i+1:i+1+w]
+        if s[i] >= max(left) and s[i] >= max(right): highs.append((idxs[i], s[i]))
+        if s[i] <= min(left) and s[i] <= min(right): lows.append((idxs[i], s[i]))
     return highs, lows
 
-def pick_support_level_from_4h(df4h, trend_bullish, w=3, pct_tol=0.004, atr_len=14):
-    """One blue support zone:
-       - Bullish: nearest prior swing HIGH ≤ last price (potential pullback level)
-       - Bearish: last swing LOW (possible bounce)
-    """
-    if df4h is None or df4h.empty: return (None, None)
-    highs, lows = swing_points(df4h, w)
-    last_px = float(df4h["Close"].iloc[-1])
-    atrv = float(atr(df4h, atr_len).iloc[-1]) if len(df4h) > 1 else 0.0
-    tol_abs = max(atrv, last_px * pct_tol)
+def pick_support_level_from_4h(df_4h: pd.DataFrame, trend_bullish: bool, w=3, pct_tol=0.004, atr_len=14):
+    if df_4h is None or df_4h.empty: return (None, None)
+    cl = pd.to_numeric(df_4h["Close"], errors="coerce").dropna()
+    if cl.empty: return (None, None)
+
+    last = float(cl.iloc[-1])
+    H, L = _swing_points(cl, w=w)  # swing points based on close
+    swing_highs = sorted([v for (_, v) in H if v <= last], reverse=True)
+    swing_lows  = sorted([v for (_, v) in L if v <= last], reverse=True)
+
+    # ATR-ish zone thickness
+    rng = (pd.to_numeric(df_4h["High"], errors="coerce") - pd.to_numeric(df_4h["Low"], errors="coerce")).rolling(atr_len).mean().dropna()
+    atr = float(rng.iloc[-1]) if not rng.empty else last * pct_tol
+    thickness = max(atr, last * pct_tol)
 
     if trend_bullish:
-        candidates = [(i, v) for (i, v) in highs if v <= last_px]
-        if not candidates: return (None, None)
-        i_sel, v_sel = sorted(candidates, key=lambda t: (abs(last_px - t[1]), -t[0]))[0]
-        level = float(v_sel)
+        if swing_highs:
+            lvl = swing_highs[0]
+            return (lvl - thickness*0.5, lvl + thickness*0.5)
     else:
-        if not lows: return (None, None)
-        i_sel, v_sel = max(lows, key=lambda t: t[0])
-        level = float(v_sel)
+        # bearish: last swing low as possible bounce
+        if swing_lows:
+            lvl = swing_lows[0]
+            return (lvl - thickness*0.5, lvl + thickness*0.5)
 
-    return (level - tol_abs, level + tol_abs)
+    return (None, None)
 
-# =========================
-# Fetcher (chart payload)
-# =========================
+# ------------------ Fetch pack ------------------
 def fetch_one(ticker):
-    """Return payload: (df_render, last, chg30, sup_low, sup_high, tf_tag, chg1d)"""
-    # Daily 1y for render
+    # Daily 1y
     try:
         df_d = yf.Ticker(ticker).history(period="1y", interval="1d", auto_adjust=True)
-    except Exception:
+    except Exception as e:
+        _dbg(f"{ticker} history daily exception: {e}")
         df_d = None
     if df_d is None or df_d.empty:
+        _dbg(f"{ticker} history empty; download fallback")
         df_d = yf.download(ticker, period="1y", interval="1d", auto_adjust=True)
 
+    _dbg(f"{ticker}: daily len={0 if df_d is None else len(df_d)}")
     ohlc_d = _get_ohlc_df(df_d)
-    if ohlc_d is None or ohlc_d.empty: return None
+    if ohlc_d is None or ohlc_d.empty:
+        _dbg(f"{ticker}: ohlc_d empty → skip")
+        return None
 
     close_d = ohlc_d["Close"].dropna()
-    if close_d.shape[0] < 2: return None
+    if close_d.shape[0] < 2:
+        _dbg(f"{ticker}: too few daily closes")
+        return None
 
     last = float(close_d.iloc[-1])
     base_val = float(close_d.iloc[-31]) if close_d.shape[0] > 30 else float(close_d.iloc[0])
     chg30 = 100.0 * (last - base_val) / base_val if base_val != 0 else 0.0
-
     prev = float(close_d.iloc[-2])
     chg1d = 100.0 * (last - prev) / prev if prev != 0 else 0.0
 
-    # Build 4H from 60m for support
+    # 60m → 4H for support
+    sup_low, sup_high = (None, None)
     try:
         df_60 = yf.Ticker(ticker).history(period="6mo", interval="60m", auto_adjust=True)
-    except Exception:
-        df_60 = None
-    if df_60 is None or df_60.empty:
-        df_60 = yf.download(ticker, period="6mo", interval="60m", auto_adjust=True)
+        if df_60 is None or df_60.empty:
+            _dbg(f"{ticker}: 60m empty; download fallback")
+            df_60 = yf.download(ticker, period="6mo", interval="60m", auto_adjust=True)
 
-    sup_low, sup_high = (None, None)
-    if df_60 is not None and not df_60.empty:
-        ohlc_60 = _get_ohlc_df(df_60)
-        if ohlc_60 is not None and not ohlc_60.empty:
-            cutoff = ohlc_60.index.max() - pd.Timedelta(days=120)
-            df_60_clip = ohlc_60.loc[ohlc_60.index >= cutoff].copy()
-            if not df_60_clip.empty:
-                df_4h = df_60_clip.resample("4H").agg(
-                    {"Open":"first","High":"max","Low":"min","Close":"last"}
-                ).dropna()
-                if not df_4h.empty:
-                    trend_bullish = (chg30 > 0)
-                    sup_low, sup_high = pick_support_level_from_4h(
-                        df_4h, trend_bullish, w=3, pct_tol=0.004, atr_len=14
-                    )
+        if df_60 is not None and not df_60.empty:
+            ohlc_60 = _get_ohlc_df(df_60)
+            if ohlc_60 is not None and not ohlc_60.empty:
+                cutoff = ohlc_60.index.max() - pd.Timedelta(days=120)
+                df_60_clip = ohlc_60.loc[ohlc_60.index >= cutoff].copy()
+                if not df_60_clip.empty:
+                    df_4h = df_60_clip.resample("4H").agg(
+                        {"Open":"first","High":"max","Low":"min","Close":"last"}
+                    ).dropna()
+                    _dbg(f"{ticker}: 4H len={len(df_4h)}")
+                    if not df_4h.empty:
+                        trend_bullish = (chg30 > 0)
+                        sup_low, sup_high = pick_support_level_from_4h(
+                            df_4h, trend_bullish, w=3, pct_tol=0.004, atr_len=14
+                        )
+    except Exception as e:
+        _dbg(f"{ticker}: support calc error (ignored): {e}")
 
+    # Render timeframe
     if TWD_TF == "W":
         df_render = ohlc_d.resample("W-FRI").agg(
             {"Open":"first","High":"max","Low":"min","Close":"last"}
@@ -199,548 +205,249 @@ def fetch_one(ticker):
         df_render = ohlc_d.dropna().tail(260)
         tf_tag = "D"
 
-    if df_render is None or df_render.empty: return None
+    if df_render is None or df_render.empty:
+        _dbg(f"{ticker}: df_render empty after timeframe transform")
+        return None
+
     return (df_render, last, float(chg30), sup_low, sup_high, tf_tag, float(chg1d))
 
-# =========================
-# Chart Renderer (clean white, no card)
-# =========================
+# ------------------ Caption builder ------------------
+SECTOR_EMOJI = {
+    "AMD":"🖥️","NVDA":"🧠","TSM":"🔧","ASML":"🔬","QCOM":"📶","INTC":"💾","MU":"💽","TXN":"📟",
+    "META":"🤖","GOOG":"🔎","GOOGL":"🔎","AAPL":"📱","MSFT":"☁️","AMZN":"📦","NFLX":"🎬","ADBE":"🎨",
+    "JNJ":"💊","UNH":"🏥","LLY":"🧪","ABBV":"🧬","MRK":"🧫",
+    "MA":"💳","V":"💳","PYPL":"💸","SQ":"💸","SOFI":"🏦",
+    "SNOW":"🧊","CRM":"📇","NOW":"🛠️","PLTR":"🛰️"
+}
+
+CTA_POOL = [
+    "Save for later 📌 · Comment your levels 💬 · See charts in carousel ➡️",
+    "Tap save 📌 · Drop your take below 💬 · Full charts in carousel ➡️",
+    "Bookmark 📌 · What did we miss? 💬 · More charts inside ➡️"
+]
+
+def caption_line(ticker, last, chg30, chg1d, sup_low, sup_high, seed=None):
+    rnd = random.Random(seed or DATESTR)
+    cues = []
+    if chg30 >= 8: cues.append("momentum looks strong 🔥")
+    elif chg30 <= -8: cues.append("recent pullback showing ⚠️")
+
+    # proximity heuristic to support
+    def near_sup(l, h, p):
+        if l is None or h is None: return False
+        mid = 0.5*(l+h); rng=(h-l)+1e-8
+        return abs(p-mid) <= 0.6*rng
+    if near_sup(sup_low, sup_high, last): cues.append("buyers defended support 🛡️")
+
+    if not cues:
+        cues = rnd.sample([
+            "price action is steady", "range bound but coiling",
+            "watching for a decisive move soon", "tightening ranges on the daily"
+        ], k=1)
+
+    endings_bull = [
+        "could have more room if momentum sticks ✅",
+        "setups lean constructive here 📈",
+        "watch for follow-through on strength 🔎"
+    ]
+    endings_bear = [
+        "risk of rejection—watch reactions at key levels 👀",
+        "tone is cautious; patience helps here 🧊",
+        "relief bounces possible, trend still mixed ⚖️"
+    ]
+    ending = random.choice(endings_bull if chg30 > 0 else endings_bear)
+
+    emj = SECTOR_EMOJI.get(ticker, "📈")
+    parts = [
+        f"{emj} {ticker}",
+        f"{last:,.2f} USD",
+        f"{chg30:+.2f}% (30d)"
+    ]
+    head = " — ".join(parts)
+    cue_txt = rnd.choice(["; ".join(cues), ", ".join(cues), " · ".join(cues)])
+    return f"{head} — {cue_txt}; {ending}"
+
+# ------------------ Rendering ------------------
 def render_single_post(out_path, ticker, payload):
-    (df, last, chg30, sup_low, sup_high, tf_tag, _chg1d) = payload
+    (df, last, chg30, sup_low, sup_high, tf_tag, chg1d) = payload
 
-    def sp(x: float) -> int: return int(round(x * TWD_UI_SCALE))
-    def st(x: float) -> int: return int(round(x * TWD_TEXT_SCALE))
-
+    # canvas
     W, H = 1080, 1080
-    BG       = (255,255,255,255)
-    TEXT_DK  = (23,23,23,255)
-    TEXT_MD  = (55,65,81,255)
-    TEXT_LT  = (120,128,140,255)
-    GRID_MAJ = (232,236,240,255)
-    GRID_MIN = (242,244,247,255)
-    GREEN    = (22,163,74,255)
-    RED      = (239, 68,68,255)
-    WICK     = (140,140,140,255)
+    canvas = Image.new("RGBA", (W, H), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(canvas)
 
-    base = Image.new("RGBA", (W, H), BG)
-    draw = ImageDraw.Draw(base)
+    # scaled layout
+    margin = int(40 * TWD_UI_SCALE)
+    header_h = int(190 * TWD_UI_SCALE)
+    footer_h = int(90 * TWD_UI_SCALE)
+    pad_l, pad_r = int(58 * TWD_UI_SCALE), int(52 * TWD_UI_SCALE)
+
+    card = [margin, margin, W - margin, H - margin]
+    chart = [card[0] + pad_l, card[1] + header_h, card[2] - pad_r, card[3] - footer_h]
+    cx1, cy1, cx2, cy2 = chart
 
     # fonts
-    def _try_font(path, size):
-        try: return ImageFont.truetype(path, size)
-        except: return None
-    def _font(size, bold=False):
-        sz = st(size)
-        grift_b = _try_font("assets/fonts/Grift-Bold.ttf", sz)
-        grift_r = _try_font("assets/fonts/Grift-Regular.ttf", sz)
-        robo_b  = _try_font("assets/fonts/Roboto-Bold.ttf", sz) or _try_font("Roboto-Bold.ttf", sz)
-        robo_r  = _try_font("assets/fonts/Roboto-Regular.ttf", sz) or _try_font("Roboto-Regular.ttf", sz)
-        if bold: return grift_b or robo_b or ImageFont.load_default()
-        return grift_r or robo_r or ImageFont.load_default()
+    f_ticker = _load_font(int(76 * TWD_TEXT_SCALE), bold=True)
+    f_price  = _load_font(int(44 * TWD_TEXT_SCALE), bold=False)
+    f_delta  = _load_font(int(38 * TWD_TEXT_SCALE), bold=True)
+    f_sub    = _load_font(int(26 * TWD_TEXT_SCALE), bold=False)
+    f_sm     = _load_font(int(24 * TWD_TEXT_SCALE), bold=False)
 
-    f_ticker = _font(58, True)
-    f_price  = _font(32, True)
-    f_delta  = _font(28, True)
-    f_sub    = _font(22)
-    f_axis   = _font(18)
+    # header text block (left)
+    title_x = card[0] + int(22 * TWD_UI_SCALE)
+    title_y = card[1] + int(20 * TWD_UI_SCALE)
 
-    # layout
-    outer_top = sp(50); outer_lr = sp(60); outer_bot = sp(50)
-    header_h = sp(150); footer_h = sp(100)
-    cx1, cy1, cx2, cy2 = (
-        outer_lr,
-        outer_top + header_h,
-        W - outer_lr,
-        H - outer_bot - footer_h
-    )
+    draw.text((title_x, title_y), ticker, fill=(20,20,20,255), font=f_ticker)
+    dy = title_y + int(70 * TWD_TEXT_SCALE) + int(12 * TWD_UI_SCALE)
+    draw.text((title_x, dy), f"{last:,.2f} USD", fill=(30,30,30,255), font=f_price)
+    dy2 = dy + int(44 * TWD_TEXT_SCALE)
+    sign_col = (18, 161, 74, 255) if chg30 >= 0 else (200, 60, 60, 255)
+    draw.text((title_x, dy2), f"{chg30:+.2f}% past 30d", fill=sign_col, font=f_delta)
+    dy3 = dy2 + int(40 * TWD_TEXT_SCALE)
+    sub_txt = "Weekly chart • key zones" if tf_tag == "W" else "Daily chart • key zones"
+    draw.text((title_x, dy3), sub_txt, fill=(140,140,140,255), font=f_sub)
 
-    # header (left aligned, equal spacing)
-    title_x, title_y = outer_lr, outer_top
-    GAP = st(8)
-    def draw_line(x, y, text, font, fill):
-        draw.text((x, y), text, fill=fill, font=font)
-        bbox = draw.textbbox((x, y), text, font=font)
-        return y + (bbox[3] - bbox[1]) + GAP
-
-    y_cur = draw_line(title_x, title_y, ticker, f_ticker, TEXT_DK)
-    y_cur = draw_line(title_x, y_cur, f"{last:,.2f} USD", f_price, TEXT_MD)
-    delta_col = GREEN if chg30 >= 0 else RED
-    y_cur = draw_line(title_x, y_cur, f"{chg30:+.2f}% past 30d", f_delta, delta_col)
-    sub_label = "Daily chart • last ~1 year" if tf_tag == "D" else "Weekly chart • last 52 weeks"
-    _ = draw_line(title_x, y_cur, sub_label, f_sub, TEXT_LT)
-
-    # ticker logo top-right (smaller)
-    tlogo_path = os.path.join("assets", "logos", f"{ticker}.png")
+    # ticker logo (optional)
+    tlogo_path = os.path.join("assets","logos",f"{ticker}.png")
     if os.path.exists(tlogo_path):
         try:
             tlogo = Image.open(tlogo_path).convert("RGBA")
-            hmax = int(sp(64) * TWD_TLOGO_SCALE)
-            hmax = max(36, hmax)
-            scl = min(1.0, hmax / max(1, tlogo.height))
-            tlogo = tlogo.resize((int(tlogo.width * scl), int(tlogo.height * scl)), Image.LANCZOS)
-            base.alpha_composite(tlogo, (W - outer_lr - tlogo.width, title_y))
+            hmax = int(72 * TWD_TLOGO_SCALE)
+            scale = min(1.0, hmax / max(1, tlogo.height))
+            tlogo = tlogo.resize((int(tlogo.width*scale), int(tlogo.height*scale)))
+            lx = card[2] - int(24 * TWD_UI_SCALE) - tlogo.width
+            ly = title_y + 4
+            canvas.alpha_composite(tlogo, (lx, ly))
         except Exception:
             pass
 
-    # data
-    df2 = df[["Open","High","Low","Close"]].dropna()
-    if df2.shape[0] < 2:
-        base.convert("RGB").save(out_path, quality=95); return
-    # show ~160–190 candles max
-    if len(df2) > 190: df2 = df2.tail(190)
+    # grid
+    grid = Image.new("RGBA", (W, H), (0,0,0,0))
+    g = ImageDraw.Draw(grid)
+    for i in range(1, 5):
+        y = cy1 + i * (cy2 - cy1) / 5.0
+        g.line([(cx1, y), (cx2, y)], fill=(238,238,238,255), width=1)
+    for i in range(1, 6):
+        x = cx1 + i * (cx2 - cx1) / 6.0
+        g.line([(x, cy1), (x, cy2)], fill=(238,238,238,255), width=1)
+    canvas = Image.alpha_composite(canvas, grid)
+    draw = ImageDraw.Draw(canvas)
 
+    # OHLC to draw
+    df2 = df[["Open","High","Low","Close"]].dropna()
+    if df2.empty:
+        out = canvas.convert("RGB"); os.makedirs(os.path.dirname(out_path), exist_ok=True); out.save(out_path, quality=92); return
+
+    # y-range
     ymin = float(np.nanmin(df2["Low"])); ymax = float(np.nanmax(df2["High"]))
-    if not np.isfinite(ymin) or not np.isfinite(ymax) or abs(ymax - ymin) < 1e-6:
+    if not np.isfinite(ymin) or not np.isfinite(ymax) or abs(ymax-ymin) < 1e-9:
         ymin, ymax = (ymin - 0.5, ymax + 0.5) if np.isfinite(ymin) else (0, 1)
-    yr = ymax - ymin; ymin -= 0.02*yr; ymax += 0.02*yr
 
     def sx(i): return cx1 + (i / max(1, len(df2)-1)) * (cx2 - cx1)
     def sy(v): return cy2 - ((float(v) - ymin) / (ymax - ymin)) * (cy2 - cy1)
 
-    # grid (soft)
-    grid = Image.new("RGBA", (W, H), (0,0,0,0)); g = ImageDraw.Draw(grid)
-    for i in range(1, 7):
-        y = cy1 + i * (cy2 - cy1) / 7.0
-        g.line([(cx1, y), (cx2, y)], fill=GRID_MIN, width=sp(1))
-    for frac in (0.33, 0.66):
-        y = cy1 + frac * (cy2 - cy1)
-        g.line([(cx1, y), (cx2, y)], fill=GRID_MAJ, width=sp(1))
-    for i in range(1, 9):
-        x = cx1 + i * (cx2 - cx1) / 9.0
-        g.line([(x, cy1), (x, cy2)], fill=GRID_MIN, width=sp(1))
-    base = Image.alpha_composite(base, grid); draw = ImageDraw.Draw(base)
-
-    # support zone (one blue box)
-    if sup_low is not None and sup_high is not None and np.isfinite(sup_low) and np.isfinite(sup_high):
+    # support zone (blue), only if present & inside y-range
+    if (sup_low is not None) and (sup_high is not None):
+        sup_y1, sup_y2 = sy(sup_high), sy(sup_low)
+        sup_rect = [cx1, min(sup_y1, sup_y2), cx2, max(sup_y1, sup_y2)]
         sup_layer = Image.new("RGBA", (W, H), (0,0,0,0))
-        y1, y2 = sy(sup_high), sy(sup_low)
-        rect = [cx1, min(y1,y2), cx2, max(y1,y2)]
-        ImageDraw.Draw(sup_layer).rectangle(rect, fill=(120,162,255,50), outline=(120,162,255,120), width=sp(2))
-        base = Image.alpha_composite(base, sup_layer)
-        draw = ImageDraw.Draw(base)
+        ImageDraw.Draw(sup_layer).rectangle(sup_rect, fill=(120,160,255,60), outline=(120,160,255,120), width=2)
+        canvas = Image.alpha_composite(canvas, sup_layer)
+        draw = ImageDraw.Draw(canvas)
 
-    # candles
+    # candlesticks
+    up_col, dn_col, wick_col = (26,172,93,255), (214,76,76,255), (150,150,150,255)
     n = len(df2)
-    body_px = max(1, int(((cx2 - cx1) / max(160, n * 1.05)) * TWD_UI_SCALE))
-    half = max(1, body_px // 2)
-    wick_w = max(1, sp(1))
+    body_px = max(3, int((cx2 - cx1) / max(60, n * 1.35)))
+    half = body_px // 2
     for i, row in enumerate(df2.itertuples(index=False)):
-        O, Hh, Ll, C = row
-        xx = sx(i)
-        draw.line([(xx, sy(Hh)), (xx, sy(Ll))], fill=WICK, width=wick_w)
-        col = (22,163,74,255) if C >= O else (239,68,68,255)
+        O, Hh, Ll, C = float(row[0]), float(row[1]), float(row[2]), float(row[3])
+        x = sx(i)
+        draw.line([(x, sy(Hh)), (x, sy(Ll))], fill=wick_col, width=1)
+        col = up_col if C >= O else dn_col
         y1 = sy(max(O, C)); y2 = sy(min(O, C))
         if abs(y2 - y1) < 1: y2 = y1 + 1
-        draw.rectangle([xx - half, y1, xx + half, y2], fill=col, outline=None)
+        draw.rectangle([x - half, y1, x + half, y2], fill=col, outline=col)
 
-    # right axis ticks
-    ticks = np.linspace(ymin, ymax, 5)
-    for tval in ticks:
-        y = sy(tval); label = f"{tval:,.2f}"
-        bbox = draw.textbbox((0,0), label, font=f_axis)
-        draw.text((cx2 + sp(8), y - (bbox[3]-bbox[1])/2), label, fill=(140,145,150,255), font=f_axis)
-
-    # footer
-    foot_x = outer_lr; foot_y = 1080 - 56 - 70
-    draw.text((foot_x, foot_y), "Support zone highlighted", fill=(120,120,120,255), font=f_sub)
-    draw.text((foot_x, foot_y + st(20)), "Not financial advice", fill=(160,160,160,255), font=f_sub)
-
-    # brand logo bottom-right
-    if BRAND_LOGO_PATH and os.path.exists(BRAND_LOGO_PATH):
-        try:
-            blogo = Image.open(BRAND_LOGO_PATH).convert("RGBA")
-            brand_maxh = 220
-            scale = min(1.0, brand_maxh / max(1, blogo.height))
-            new_w = max(1, int(round(blogo.width * scale)))
-            new_h = max(1, int(round(blogo.height * scale)))
-            blogo = blogo.resize((new_w, new_h), Image.LANCZOS)
-            x = 1080 - 56 - new_w
-            y = 1080 - 56 - new_h
-            base.alpha_composite(blogo, (x, y))
-        except Exception:
-            pass
-
-    base.convert("RGB").save(out_path, quality=95)
-
-# =========================
-# Captions (for charts)
-# =========================
-def _compute_recent_changes(df_render: pd.DataFrame, tf_tag: str):
-    try:
-        c = df_render["Close"].dropna()
-        if len(c) < 2: return (0.0, 0.0)
-        chg1d = 100.0 * (c.iloc[-1] - c.iloc[-2]) / c.iloc[-2] if c.iloc[-2] else 0.0
-        if tf_tag == "D" and len(c) >= 6:
-            chg5d = 100.0 * (c.iloc[-1] - c.iloc[-6]) / c.iloc[-6] if c.iloc[-6] else 0.0
-        elif tf_tag == "W" and len(c) >= 2:
-            chg5d = 100.0 * (c.iloc[-1] - c.iloc[-2]) / c.iloc[-2] if c.iloc[-2] else 0.0
-        else:
-            chg5d = chg1d
-        return (float(chg1d), float(chg5d))
-    except Exception:
-        return (0.0, 0.0)
-
-def caption_line(ticker, payload, seed=None):
-    (df_render, last, chg30, sup_low, sup_high, tf_tag, _chg1d_payload) = payload
-    rnd = random.Random((seed or DATESTR) + ticker)
-    chg1d, chg5d = _compute_recent_changes(df_render, tf_tag)
-    if abs(chg1d) >= 2:
-        lead = f"{'Up' if chg1d>0 else 'Down'} ~{abs(chg1d):.0f}% {('today' if tf_tag=='D' else 'this week')}"
-    else:
-        lead = rnd.choice(["steady tape","watchlist update","levels in focus"])
-    cues = []
-    if chg30 >= 12:
-        cues.append(rnd.choice(["momentum looks strong 🔥","breakout pressure building 🚀","uptrend intact ✅"]))
-    elif chg30 >= 4:
-        cues.append(rnd.choice(["tone constructive 📈","buyers stepping in 🛒","watch pullbacks for bids 👀"]))
-    elif chg30 <= -10:
-        cues.append(rnd.choice(["recent pullback ⚠️","bearish lean 🐻","mixed tape—respect risk ⚖️"]))
-    else:
-        cues.append(rnd.choice(["price action steady","range-bound but coiling","neutral—let price confirm 🎯"]))
+    # footer left (simple)
+    foot_x = card[0] + int(18 * TWD_UI_SCALE)
+    foot_y = card[3] - int(70 * TWD_UI_SCALE)
     if (sup_low is not None) and (sup_high is not None):
-        cues.append(rnd.choice(["support zone in play 📍","buyers defended support 🛡️","watch reactions near support 👀"]))
-    random.shuffle(cues); cues = cues[:2]
-    joiner = rnd.choice([" · ", " — "])
-    return f"• {ticker} — {lead}{joiner}{'; '.join(cues)}"
-
-# =========================
-# Breaking News (posters)
-# =========================
-GLOBAL_NEWS_SYMBOLS = [
-    "^GSPC","^NDX","^DJI","SPY","QQQ","DIA","^TNX","DX-Y.NYB",
-    "GLD","SI=F","GC=F","CL=F","USO","UNG","DBC",
-    "AAPL","MSFT","AMZN","NVDA","META","GOOGL","TSLA","AMD","TSM",
-    "XLF","XLE","XLK","XLI"
-]
-
-def _normalize_title_key(t: str) -> str:
-    t = (t or "").lower().strip()
-    t = re.split(r"[-–—:]\s+", t, maxsplit=1)[0]
-    t = re.sub(r"[^a-z0-9\s]", " ", t)
-    t = re.sub(r"\s+", " ", t).strip()
-    return " ".join(t.split()[:10])
-
-def _collect_global_news(symbols):
-    items = []
-    for sym in symbols:
-        try:
-            for it in getattr(yf.Ticker(sym), "news", []) or []:
-                items.append({
-                    "symbol": sym,
-                    "title": it.get("title") or "",
-                    "publisher": (it.get("publisher") or "").strip(),
-                    "url": it.get("link") or "",
-                    "published_ts": it.get("providerPublishTime"),
-                    "desc": it.get("summary",""),
-                })
-        except Exception:
-            continue
-    # de-dup by full title
-    out, seen = [], set()
-    for it in items:
-        t = (it["title"] or "").strip()
-        if not t or t in seen: 
-            continue
-        seen.add(t); out.append(it)
-    out.sort(key=lambda x: x.get("published_ts") or 0, reverse=True)
-    return out
-
-def _cluster_and_pick_breaking(items, recency_min=90, min_sources=3):
-    """Group by normalized title; require >=min_sources pubs and recency."""
-    if not items: return None
-    now = datetime.datetime.utcnow().timestamp()
-    groups = {}
-    for it in items:
-        key = _normalize_title_key(it["title"])
-        if not key: continue
-        groups.setdefault(key, []).append(it)
-
-    cands = []
-    for key, lst in groups.items():
-        pubs = { (x.get("publisher") or "").lower() for x in lst if x.get("publisher") }
-        newest = max((x.get("published_ts") or 0) for x in lst)
-        age_min = (now - newest) / 60.0
-        if len(pubs) >= min_sources and age_min <= recency_min:
-            cands.append((len(pubs), newest, key, lst))
-    if not cands: return None
-    cands.sort(key=lambda t: (t[0], t[1]), reverse=True)  # most pubs, then freshest
-    _, _, key, lst = cands[0]
-
-    # prefer high-cred publishers, then newest
-    pref = ["reuters","financial times","wall street journal","wsj","bloomberg",
-            "cnbc","marketwatch","yahoo finance","barron's"]
-    def score(it):
-        p = (it.get("publisher") or "").lower()
-        for i, name in enumerate(pref[::-1]):
-            if name in p: return 100 + i
-        return 0
-    best = sorted(lst, key=lambda x: (score(x), x.get("published_ts") or 0), reverse=True)[0]
-    best["cluster_key"] = key
-    return best
-
-def _hash_story_key(title: str) -> str:
-    return hashlib.sha1((title or "").strip().lower().encode("utf-8")).hexdigest()
-
-def _load_seen(path: str):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return set(data.get("seen", [])), float(data.get("last_ts", 0))
-    except Exception:
-        return set(), 0.0
-
-def _save_seen(path: str, seen: set, last_ts: float):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump({"seen": sorted(list(seen)), "last_ts": float(last_ts)}, f, ensure_ascii=False, indent=2)
-
-def _headline_caps_short(title: str) -> str:
-    t = (title or "").strip()
-    t = re.split(r"[-–—:]\s+", t, maxsplit=1)[0]
-    t = re.sub(r"\s+", " ", t)
-    if len(t) > 64: t = t[:61] + "…"
-    return t.upper()
-
-def _pick_story_background_path(symbol_or_theme: str, story: dict) -> str | None:
-    # symbol folder first
-    base_dir = os.path.join("assets", "backgrounds", symbol_or_theme)
-    if os.path.isdir(base_dir):
-        cand = [os.path.join(base_dir, f) for f in os.listdir(base_dir)
-                if f.lower().endswith((".jpg",".jpeg",".png"))]
-        if cand: return sorted(cand)[0]
-    # theme by keywords
-    title = (story.get("title") or "").lower()
-    theme = None
-    if any(k in title for k in ["gold","bullion","xau","gld","gc=f"]): theme = "GOLD"
-    elif any(k in title for k in ["oil","crude","wti","brent","cl=f","uso"]): theme = "OIL"
-    elif any(k in title for k in ["ai","gpu","chip","semi","nvidia","amd","tsm"]): theme = "CHIPS"
-    elif any(k in title for k in ["iphone","android","cloud","google","microsoft","meta"]): theme = "TECH"
-    elif any(k in title for k in ["tesla","ev","auto","factory"]): theme = "AUTO"
-    elif any(k in title for k in ["drug","vaccine","health","pharma"]): theme = "HEALTH"
-    if theme:
-        tdir = os.path.join("assets", "backgrounds", theme)
-        if os.path.isdir(tdir):
-            cand = [os.path.join(tdir, f) for f in os.listdir(tdir)
-                    if f.lower().endswith((".jpg",".jpeg",".png"))]
-            if cand: return sorted(cand)[0]
-    return None
-
-def render_news_poster(out_path, symbol_for_visual, story):
-    """Square 1080 poster: NEWS label, ALL-CAPS headline, short paragraph, faint background, brand logo."""
-    W, H = 1080, 1080
-    BG       = (255,255,255,255)
-    TEXT_DK  = (23,23,23,255)
-    TEXT_MD  = (55,65,81,255)
-    TEXT_LT  = (120,128,140,255)
-
-    def sp(x: float) -> int: return int(round(x * TWD_UI_SCALE))
-    def st(x: float) -> int: return int(round(x * TWD_TEXT_SCALE))
-
-    base = Image.new("RGBA", (W, H), BG)
-    draw = ImageDraw.Draw(base)
-
-    # faint background
-    bg_path = _pick_story_background_path(symbol_for_visual, story)
-    if bg_path and os.path.exists(bg_path):
-        try:
-            bg_img = Image.open(bg_path).convert("RGBA")
-            r = max(W / bg_img.width, H / bg_img.height)
-            bg_img = bg_img.resize((int(bg_img.width * r), int(bg_img.height * r)), Image.LANCZOS)
-            bx = (bg_img.width - W) // 2
-            by = (bg_img.height - H) // 2
-            bg_img = bg_img.crop((bx, by, bx + W, by + H))
-            white = Image.new("RGBA", (W, H), (255,255,255,255))
-            bg_faint = Image.blend(bg_img, white, 0.85)  # ~15% visible
-            base = Image.alpha_composite(base, bg_faint)
-        except Exception:
-            pass
-
-    # fonts
-    def _try_font(path, size):
-        try: return ImageFont.truetype(path, size)
-        except: return None
-    def _font(size, bold=False):
-        sz = st(size)
-        grift_b = _try_font("assets/fonts/Grift-Bold.ttf", sz)
-        grift_r = _try_font("assets/fonts/Grift-Regular.ttf", sz)
-        robo_b  = _try_font("assets/fonts/Roboto-Bold.ttf", sz) or _try_font("Roboto-Bold.ttf", sz)
-        robo_r  = _try_font("assets/fonts/Roboto-Regular.ttf", sz) or _try_font("Roboto-Regular.ttf", sz)
-        if bold: return grift_b or robo_b or ImageFont.load_default()
-        return grift_r or robo_r or ImageFont.load_default()
-
-    f_news  = _font(28, True)
-    f_head  = _font(56, True)
-    f_meta  = _font(26)
-    f_para  = _font(30)
-
-    PAD = sp(60)
-    x1, y1, x2, y2 = PAD, PAD, W - PAD, H - PAD
-
-    draw.text((x1, y1), "NEWS", fill=(90,90,90,255), font=f_news)
-
-    # headline
-    raw_title = (story.get("title") or "").strip()
-    head_txt  = _headline_caps_short(raw_title)
-    head_y = y1 + st(52)
-
-    def wrap_lines(text, font, max_w, max_lines):
-        words = text.split(); lines, cur = [], []
-        for w in words:
-            cur.append(w); test = " ".join(cur)
-            bb = draw.textbbox((0,0), test, font=font)
-            if bb[2]-bb[0] > max_w:
-                cur.pop(); lines.append(" ".join(cur)); cur=[w]
-                if len(lines) == max_lines: break
-        if cur and len(lines) < max_lines: lines.append(" ".join(cur))
-        return lines
-
-    for ln in wrap_lines(head_txt, f_head, x2 - x1, 3):
-        draw.text((x1, head_y), ln, fill=TEXT_DK, font=f_head)
-        bb = draw.textbbox((x1, head_y), ln, font=f_head)
-        head_y += (bb[3]-bb[1]) + st(6)
-
-    # meta
-    pub = (story.get("publisher") or "").strip()
-    def _relative_phrase(ts_sec: float) -> str:
-        if not ts_sec: return ""
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc)
-        t   = datetime.fromtimestamp(float(ts_sec), tz=timezone.utc)
-        d   = now - t
-        if d.days <= 0: return "today"
-        if d.days == 1: return "yesterday"
-        if d.days <= 3: return f"on {t.strftime('%a')}"
-        if d.days <= 7: return "earlier this week"
-        return t.strftime("%d %b")
-    rel = _relative_phrase(story.get("published_ts"))
-    meta_txt = " · ".join([p for p in (pub, rel) if p])
-    if meta_txt:
-        draw.text((x1, head_y + st(8)), meta_txt, fill=TEXT_LT, font=f_meta)
-        head_y += st(46)
-
-    # paragraph
-    desc = (story.get("desc") or "").strip()
-    if not desc:
-        desc = "Markets react as traders watch key levels and look for follow-through."
-    body = re.sub(r"\s+", " ", f"{raw_title.rstrip('.')}. {desc}").strip()
-    if len(body) > 480: body = body[:477] + "…"
-
-    body_y = head_y + st(16); max_w = x2 - x1
-    words = body.split(); cur = ""; lines_p = []
-    for w in words:
-        test = (cur + " " + w).strip()
-        bb = draw.textbbox((0,0), test, font=f_para)
-        if bb[2]-bb[0] > max_w and cur:
-            lines_p.append(cur); cur = w
-        else:
-            cur = test
-    if cur: lines_p.append(cur)
-
-    for ln in lines_p:
-        draw.text((x1, body_y), ln, fill=TEXT_MD, font=f_para)
-        bb = draw.textbbox((x1, body_y), ln, font=f_para)
-        body_y += (bb[3]-bb[1]) + st(8)
-        if body_y > (H - 56 - 200):
-            draw.text((x1, body_y), "…", fill=TEXT_MD, font=f_para)
-            break
+        draw.text((foot_x, foot_y), f"Support zone shown", fill=(120,120,120,255), font=f_sm)
+    else:
+        draw.text((foot_x, foot_y), f"Support zone n/a", fill=(160,160,160,255), font=f_sm)
+    draw.text((foot_x, foot_y + int(26*TWD_UI_SCALE)), "Not financial advice", fill=(160,160,160,255), font=f_sm)
 
     # brand logo bottom-right
     if BRAND_LOGO_PATH and os.path.exists(BRAND_LOGO_PATH):
         try:
             blogo = Image.open(BRAND_LOGO_PATH).convert("RGBA")
-            brand_maxh = 220
-            scale = min(1.0, brand_maxh / max(1, blogo.height))
-            blogo = blogo.resize((int(blogo.width*scale), int(blogo.height*scale)), Image.LANCZOS)
-            base.alpha_composite(blogo, (W - 56 - blogo.width, H - 56 - blogo.height))
+            maxh = int(120 * TWD_UI_SCALE)
+            scale = min(1.0, maxh / max(1, blogo.height))
+            blogo = blogo.resize((int(blogo.width*scale), int(blogo.height*scale)))
+            bx = card[2] - int(22*TWD_UI_SCALE) - blogo.width
+            by = card[3] - int(22*TWD_UI_SCALE) - blogo.height
+            canvas.alpha_composite(blogo, (bx, by))
         except Exception:
             pass
 
-    base.convert("RGB").save(out_path, quality=95)
+    # save
+    out = canvas.convert("RGB")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    out.save(out_path, quality=92)
 
-# =========================
-# Main
-# =========================
+# ------------------ Main ------------------
 def main():
-    print("[info] TWD starting…")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    os.makedirs(POSTER_DIR, exist_ok=True)
 
-    # ------------- Charts -------------
-    if TWD_MODE in ("all","charts"):
-        saved = 0
-        captions = []
-        tickers = choose_tickers_somehow()
-        print("[info] selected tickers:", tickers)
-        for t in tickers:
-            try:
-                payload = fetch_one(t)
-                if not payload:
-                    print(f"[warn] no data for {t}, skipping")
-                    continue
-                out_path = os.path.join(OUTPUT_DIR, f"twd_{t}_{DATESTR}.png")
-                render_single_post(out_path, t, payload)
-                print("done:", out_path)
-                saved += 1
-                captions.append(caption_line(t, payload, seed=DATESTR))
-            except Exception as e:
-                print(f"Error: failed for {t}: {e}")
-                traceback.print_exc()
+    # pick 6 (seeded by date for variety + reproducibility)
+    tickers = choose_tickers_somehow(n=6, seed=DATESTR)
+    print("[info] selected tickers:", tickers)
 
-        print(f"[info] saved chart images: {saved}")
-        if saved > 0:
-            caption_path = os.path.join(OUTPUT_DIR, f"caption_{DATESTR}.txt")
-            now_str = TODAY.strftime("%d %b %Y")
-            header = f"Ones to Watch – {now_str}\n\n"
-            CTA = [
-                "Save for later 📌 · Comment your levels 💬 · See charts in carousel ➡️",
-                "Tap save 📌 · What’s your take? 💬 · Swipe for charts ➡️",
-                "Midweek check-in ✅ · Drop your view 💬 · Swipe for setups ➡️",
-                "Save 📌 · Agree or disagree? 💬 · See full charts ➡️",
-                "Wrap the week 🎯 · Comment your plan 💬 · Swipe for charts ➡️",
-            ]
-            footer = f"\n\n{random.choice(CTA)}\n\nIdeas only — not financial advice"
-            with open(caption_path, "w", encoding="utf-8") as f:
-                f.write(header)
-                f.write("\n\n".join(captions))
-                f.write(footer)
-            print("[info] wrote caption:", caption_path)
-
-    # ------------- Breaking Posters -------------
-    if TWD_MODE in ("all","posters") and BREAKING_ON:
+    saved = 0
+    captions = []
+    for t in tickers:
         try:
-            os.makedirs(STATE_DIR, exist_ok=True)
-            seen, last_ts = _load_seen(SEEN_STORIES_PATH)
+            payload = fetch_one(t)
+            if not payload:
+                print(f"[warn] no data for {t}, skipping")
+                continue
+            out_path = os.path.join(OUTPUT_DIR, f"twd_{t}_{DATESTR}.png")
+            _dbg(f"saving {out_path}")
+            try:
+                render_single_post(out_path, t, payload)
+            except Exception as re:
+                # Diagnostic image if render fails
+                _dbg(f"render error for {t}: {re}")
+                img = Image.new("RGB", (1080,1080), "white")
+                d = ImageDraw.Draw(img)
+                d.text((40,40), f"Render error: {t}\n{re}", fill="black")
+                os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                img.save(out_path, quality=85)
+            saved += 1
 
-            items = _collect_global_news(GLOBAL_NEWS_SYMBOLS)
-            story = _cluster_and_pick_breaking(items,
-                                               recency_min=BREAKING_RECENCY_MIN,
-                                               min_sources=BREAKING_MIN_SOURCES)
-
-            should_emit = False
-            if story:
-                keyhash   = _hash_story_key(story["title"])
-                newest_ts = float(story.get("published_ts") or 0)
-                now_ts    = datetime.datetime.utcnow().timestamp()
-                cooldown_ok = (now_ts - last_ts) / 60.0 >= BREAKING_MIN_INTERVAL
-                if keyhash not in seen and cooldown_ok:
-                    should_emit = True
-
-            if story and should_emit:
-                symbol_for_visual = story.get("symbol") or "NEWS"
-                poster_path = os.path.join(POSTER_DIR, f"news_{DATESTR_HM}.png")
-                render_news_poster(poster_path, symbol_for_visual, story)
-                print(f"[info] BREAKING poster created: {poster_path} — {story.get('publisher')} — {story.get('title')}")
-                seen.add(_hash_story_key(story["title"]))
-                _save_seen(SEEN_STORIES_PATH, seen, story.get("published_ts") or datetime.datetime.utcnow().timestamp())
-            else:
-                if not story:
-                    print("[info] No cross-confirmed breaking news in window.")
-                else:
-                    print("[info] Story skipped (already seen or within cooldown).")
+            # caption
+            (df, last, chg30, sup_low, sup_high, tf_tag, chg1d) = payload
+            line = caption_line(t, last, chg30, chg1d, sup_low, sup_high, seed=DATESTR)
+            captions.append(line)
 
         except Exception as e:
-            print(f"[warn] breaking-poster generation failed: {e}")
+            print(f"Error: failed for {t}: {e}")
             traceback.print_exc()
+
+    print(f"[info] saved images: {saved}")
+
+    # caption file
+    if saved > 0:
+        caption_path = os.path.join(OUTPUT_DIR, f"caption_{DATESTR}.txt")
+        now_str = TODAY.strftime("%d %b %Y")
+        header = f"Ones to Watch – {now_str}\n\n"
+        footer = f"\n\n{random.choice(CTA_POOL)}\n\nIdeas only — not financial advice"
+        with open(caption_path, "w", encoding="utf-8") as f:
+            f.write(header)
+            f.write("\n\n".join(captions))
+            f.write(footer)
+        print("[info] wrote caption:", caption_path)
 
 if __name__ == "__main__":
     main()
