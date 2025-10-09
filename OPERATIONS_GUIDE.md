@@ -65,3 +65,18 @@ The **docs-guard** workflow enforces compliance; the **docs-autostamp** workflow
 
 - **docs-guard.yml**  
   Blocks merge if guide/README drift from spec.
+
+
+---
+
+<!-- TWD_STATUS:BEGIN -->
+
+## Automation Status (auto-generated)
+- **Last run:** 2025-10-09 13:42:21 UTC
+- **Triggered by:** TWD Breaking Posters (event-driven)
+- **Mode:** `posters`   ·  **Timeframe:** `D`
+- **Breaking-posters knobs:** recency=720m, min_sources=1, fallback=on, rss=on
+- **Watchlist (preview):** AAPL, MSFT, NVDA, AMD, TSLA, SPY, QQQ, GLD, AMZN, META, GOOGL
+- **Publish targets:** charts → `charts`, posters → `posters`
+
+<!-- TWD_STATUS:END -->
