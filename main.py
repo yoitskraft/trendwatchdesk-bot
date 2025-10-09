@@ -15,6 +15,7 @@ UTC_NOW = datetime.datetime.utcnow()
 TWD_MODE = os.getenv("TWD_MODE", "charts").lower()            # charts | posters | all (charts+posters)
 TWD_TF = os.getenv("TWD_TF", "D").upper()                     # D or W (render timeframe for charts)
 TWD_DEBUG = os.getenv("TWD_DEBUG", "0").lower() in ("1","true","on","yes")
+TWD_BREAKING_FALLBACK = os.getenv("TWD_BREAKING_FALLBACK", "off").lower() in ("on","1","true","yes")
 
 # UI scales (charts)
 TWD_UI_SCALE = float(os.getenv("TWD_UI_SCALE", "0.90"))
@@ -634,27 +635,27 @@ def run_posters_once():
     os.makedirs(POSTERS_DIR, exist_ok=True)
     os.makedirs(STATE_DIR, exist_ok=True)
 
-    # load seen
     seen = load_seen()
     last_post_ts = seen.get("last_post_ts", 0)
     mins_since_last = (UTC_NOW - datetime.datetime.utcfromtimestamp(last_post_ts)).total_seconds()/60.0 if last_post_ts else 1e9
     _dbg(f"mins since last poster: {mins_since_last:.1f}")
 
-    # collect & cluster
     items = collect_news_candidates()
-    if not items:
-        print("[info] No recent items to consider.")
-        return 0
-    clusters = cluster_and_filter(items)
-    if not clusters:
-        print("[info] No cross-confirmed breaking news in window.")
-        return 0
+    print(f"[info] news items within window: {len(items)}")
+    if TWD_DEBUG:
+        for it in items[:10]:
+            print(f"[debug] item: {it.get('publisher')} | {it.get('symbol')} | {it.get('title')[:90]}... age={it.get('age'):.1f}m")
 
-    # iterate top clusters, pick first that passes dedupe & cooldown
+    clusters = cluster_and_filter(items)
+    print(f"[info] clusters (>= {TWD_BREAKING_MIN_SOURCES} sources): {len(clusters)}")
+
+    # Try cross-confirmed first
     for key, best, arr in clusters:
         h = headline_hash(key)
+        pubs = sorted(list(set([a.get("publisher","") for a in arr if a.get("publisher")])))
+        print(f"[info] candidate cluster: pubs={len(pubs)} key='{key}' best_pub={best.get('publisher')}")
         if h in set(seen.get("hashes", [])):
-            _dbg("skip: already seen")
+            print("[info]  -> skipped (already seen)")
             continue
         if mins_since_last < TWD_BREAKING_MIN_INTERVAL_MIN:
             print(f"[info] Cooldown active ({mins_since_last:.1f}m < {TWD_BREAKING_MIN_INTERVAL_MIN}m). No poster.")
@@ -663,11 +664,8 @@ def run_posters_once():
         symbol = best.get("symbol") or "MARKET"
         title = best.get("title") or "MARKET UPDATE"
         pub = best.get("publisher") or "Multiple"
-        # build a short paragraph from cluster members (avoid links)
-        pubs = sorted(list(set([a.get("publisher","") for a in arr if a.get("publisher")])))
         paragraph = f"{title}. Coverage from {', '.join(pubs[:5])}" + (" and others." if len(pubs) > 5 else ".")
 
-        # render
         ts_str = datetime.datetime.utcfromtimestamp(best["ts"]).strftime("%Y%m%d_%H%M%S")
         out_path = os.path.join(POSTERS_DIR, f"news_{ts_str}.png")
         try:
@@ -678,13 +676,41 @@ def run_posters_once():
             traceback.print_exc()
             return 0
 
-        # update state
         seen.setdefault("hashes", []).append(h)
         seen["last_post_ts"] = best["ts"]
         save_seen(seen)
         return 1
 
-    print("[info] All clusters were duplicates or blocked by cooldown.")
+    # Fallback: render top single-source item if allowed
+    if TWD_BREAKING_FALLBACK and items:
+        best = sorted(items, key=lambda x: -x["ts"])[0]
+        symbol = best.get("symbol") or "MARKET"
+        title = best.get("title") or "MARKET UPDATE"
+        pub = best.get("publisher") or "Source"
+        paragraph = f"{title}. Reported by {pub}."
+
+        key = _norm_headline(title)
+        h = headline_hash(key)
+        if h in set(seen.get("hashes", [])):
+            print("[info] fallback skipped (already seen)")
+            return 0
+
+        ts_str = datetime.datetime.utcfromtimestamp(best["ts"]).strftime("%Y%m%d_%H%M%S")
+        out_path = os.path.join(POSTERS_DIR, f"news_{ts_str}.png")
+        try:
+            render_news_poster(out_path, symbol, title, paragraph, publisher=pub)
+            print("poster (fallback):", out_path)
+        except Exception as e:
+            print(f"[warn] fallback poster render failed: {e}")
+            traceback.print_exc()
+            return 0
+
+        seen.setdefault("hashes", []).append(h)
+        seen["last_post_ts"] = best["ts"]
+        save_seen(seen)
+        return 1
+
+    print("[info] No cross-confirmed clusters and fallback disabled or no items.")
     return 0
 
 # ------------------ charts driver ------------------
