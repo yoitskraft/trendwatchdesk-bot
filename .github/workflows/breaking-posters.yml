@@ -61,14 +61,13 @@ jobs:
           PYTHONUNBUFFERED: "1"
           TWD_MODE: "posters"
           TWD_DEBUG: "1"
+          # 🔧 TEMP: make it easier to trigger during testing
           TWD_BREAKING_ON: "on"
-          TWD_BREAKING_RECENCY_MIN: "90"     # consider stories from last 90 min
-          TWD_BREAKING_MIN_SOURCES: "3"      # require 3 distinct publishers
-          TWD_BREAKING_MIN_INTERVAL_MIN: "30"  # cooldown (mins) since last poster
+          TWD_BREAKING_RECENCY_MIN: "360"   # was 90 (allow last 6 hours)
+          TWD_BREAKING_MIN_SOURCES: "2"     # was 3
+          TWD_BREAKING_MIN_INTERVAL_MIN: "0"  # was 30 (disable cooldown)
+          TWD_BREAKING_FALLBACK: "on"       # new: render top single-source story if none cross-confirmed
           BRAND_LOGO_PATH: "assets/brand_logo.png"
-        run: |
-          set -x
-          python -u main.py 2>&1 | tee run.log
 
       - name: Show run.log
         if: always()
