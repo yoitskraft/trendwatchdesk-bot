@@ -212,17 +212,23 @@ def blue_gradient_bg(W: int, H: int) -> Image.Image:
     return Image.alpha_composite(bg, beams)
 
 def feathered_support(img: Image.Image, x1:int, y1:int, x2:int, y2:int,
-                      fill_alpha: int = 18, blur_radius: int = 18, outline_alpha: int = 70):
-    """Draw a barely-visible, feathered rectangle onto img."""
-    W,H = img.size
-    layer = Image.new("RGBA", (W,H), (0,0,0,0))
-    d = ImageDraw.Draw(layer)
-    # soft fill
-    d.rectangle([x1,y1,x2,y2], fill=(255,255,255,fill_alpha))
-    # thin outline before blur so the edge remains hinted
-    d.rectangle([x1,y1,x2,y2], outline=(255,255,255,outline_alpha), width=2)
-    layer = layer.filter(ImageFilter.GaussianBlur(blur_radius))
-    img.alpha_composite(layer)
+                      fill_alpha: int = 34, blur_radius: int = 16, outline_alpha: int = 110):
+    """Soft zone + a faint crisp outline so it’s visible over candles."""
+    W, H = img.size
+
+    # blurred base (soft glow)
+    base = Image.new("RGBA", (W, H), (0,0,0,0))
+    bd = ImageDraw.Draw(base)
+    bd.rectangle([x1, y1, x2, y2], fill=(255,255,255,fill_alpha))
+    bd.rectangle([x1, y1, x2, y2], outline=(255,255,255,outline_alpha), width=2)
+    base = base.filter(ImageFilter.GaussianBlur(blur_radius))
+    img.alpha_composite(base)
+
+    # crisp hairline on top (very faint, keeps the edge readable)
+    top = Image.new("RGBA", (W, H), (0,0,0,0))
+    td = ImageDraw.Draw(top)
+    td.rectangle([x1, y1, x2, y2], outline=(255,255,255,70), width=1)
+    img.alpha_composite(top)
 
 # -----------------------
 # Selection
