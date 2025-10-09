@@ -45,7 +45,7 @@ TWD_MODE=posters python main.py
 <!-- TWD_STATUS:BEGIN -->
 
 ## Automation Status (auto-generated)
-- **Last run:** 2025-10-09 02:50:16 UTC
+- **Last run:** 2025-10-09 03:19:45 UTC
 - **Triggered by:** TWD Breaking Posters (event-driven)
 - **Mode:** `posters`   ·  **Timeframe:** `D`
 - **Breaking-posters knobs:** recency=720m, min_sources=1, fallback=on, rss=on
@@ -53,4 +53,5 @@ TWD_MODE=posters python main.py
 - **Publish targets:** charts → `charts`, posters → `posters`
 
 <!-- TWD_STATUS:END -->
+
 
