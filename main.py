@@ -211,23 +211,27 @@ def blue_gradient_bg(W: int, H: int) -> Image.Image:
     beams = beams.filter(ImageFilter.GaussianBlur(45))
     return Image.alpha_composite(bg, beams)
 
-def feathered_support(img, x1:int, y1:int, x2:int, y2:int,
-                      fill_alpha: int = 60, blur_radius: int = 10, outline_alpha: int = 110):
-    """Soft zone + a faint crisp outline so it’s visible over candles."""
+def feathered_support(img: Image.Image, x1:int, y1:int, x2:int, y2:int,
+                      fill_alpha: int = 70, blur_radius: int = 10, outline_alpha: int = 100):
+    """
+    Draw a semi-transparent feathered support/resistance zone:
+    - white haze with slight transparency
+    - softer blur so it blends with candles
+    - faint outline for subtle definition
+    """
     W, H = img.size
 
-    # blurred base (soft glow)
+    # Blurred white base fill (slightly stronger alpha than before)
     base = Image.new("RGBA", (W, H), (0,0,0,0))
     bd = ImageDraw.Draw(base)
-    bd.rectangle([x1, y1, x2, y2], fill=(255,255,255,fill_alpha))
-    bd.rectangle([x1, y1, x2, y2], outline=(255,255,255,outline_alpha), width=2)
+    bd.rectangle([x1, y1, x2, y2], fill=(255, 255, 255, fill_alpha))
     base = base.filter(ImageFilter.GaussianBlur(blur_radius))
     img.alpha_composite(base)
 
-    # crisp hairline on top (very faint, keeps the edge readable)
+    # Crisp faint outline (still blue-white so it doesn't dominate)
     top = Image.new("RGBA", (W, H), (0,0,0,0))
     td = ImageDraw.Draw(top)
-    td.rectangle([x1, y1, x2, y2], outline=(255,255,255,70), width=1)
+    td.rectangle([x1, y1, x2, y2], outline=(200, 220, 255, outline_alpha), width=2)
     img.alpha_composite(top)
 
 # -----------------------
