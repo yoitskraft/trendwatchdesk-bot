@@ -19,6 +19,7 @@ Features
     --once TKR                        One-off chart for a single ticker
     --poster-demo TKR "HEADLINE..."   Legacy tester (kept for parity)
     --poster-mockup [TKR "HEADLINE"]  New: easy local poster test (defaults to AAPL if omitted)
+    --ci                              CI mode: run daily, exit 0 if charts>0 else exit 2
 """
 
 import os, re, math, random, hashlib, traceback, datetime
@@ -99,34 +100,27 @@ def log(msg: str):
 # ---- Pandas-safe helpers
 # =========================
 def _as_float(x):
-    """Safely get a Python float from numpy/pandas scalars (no FutureWarnings)."""
     try:
         return float(x.item())
     except AttributeError:
         return float(x)
 
 def _ensure_series_1d(x: Union[pd.Series, pd.DataFrame, np.ndarray, list, tuple]) -> pd.Series:
-    """
-    Convert any reasonable input into a 1-D numeric pandas Series (no NaNs).
-    Handles yfinance quirks where Close may be a DataFrame (multi-index).
-    """
     if isinstance(x, pd.DataFrame):
-        # squeeze to 1 column if possible; otherwise first column
         if x.shape[1] == 1:
             s = x.iloc[:, 0]
         else:
-            s = x.select_dtypes(include=[np.number]).iloc[:, 0] if not x.select_dtypes(include=[np.number]).empty else x.iloc[:, 0]
+            num = x.select_dtypes(include=[np.number])
+            s = (num.iloc[:, 0] if not num.empty else x.iloc[:, 0])
     elif isinstance(x, pd.Series):
         s = x
     else:
         s = pd.Series(x)
-    s = pd.to_numeric(s, errors="coerce")
-    s = s.dropna()
+    s = pd.to_numeric(s, errors="coerce").dropna()
     s.name = "Close"
     return s
 
 def _close_to_array(x: Union[pd.Series, pd.DataFrame, np.ndarray, list, tuple]) -> np.ndarray:
-    """Force a 1-D float64 ndarray from any Close-like input."""
     s = _ensure_series_1d(x)
     return s.astype("float64").to_numpy()
 
@@ -207,7 +201,6 @@ def pct_change(series_like, days: int = 30) -> float:
         return 0.0
 
 def generate_chart(ticker: str) -> Optional[str]:
-    """Weekly ‘clean’ chart with support zone, logos, and text (Pandas-safe)."""
     try:
         df = yf.download(ticker, period="1y", interval="1wk",
                          progress=False, auto_adjust=False, threads=False)
@@ -225,25 +218,21 @@ def generate_chart(ticker: str) -> Optional[str]:
         chg30 = pct_change(close_s, 30)
         sup_low, sup_high = swing_levels(close_s, lookback=10)
 
-        # Canvas
         W,H = 1080, 720
         img = Image.new("RGBA", (W,H), (255,255,255,255))
         d   = ImageDraw.Draw(img)
 
-        # Regions
         margin = 40
         header_h = 150
         footer_h = 70
         x1,y1,x2,y2 = margin+30, margin+header_h, W-margin-30, H-margin-footer_h
 
-        # Titles
         f_ticker = font_bold(76)
         f_meta   = font_reg(38)
         d.text((margin+30, margin+30), ticker, fill=(0,0,0,255), font=f_ticker)
         d.text((margin+30, margin+100), f"{last:,.2f} • {chg30:+.2f}% (30d)",
                fill=(30,30,30,255), font=f_meta)
 
-        # Plot
         n = close_arr.size
         xs = np.linspace(x1, x2, num=n)
         minp = float(np.nanmin(close_arr)); maxp = float(np.nanmax(close_arr))
@@ -254,11 +243,9 @@ def generate_chart(ticker: str) -> Optional[str]:
         for i in range(1, n):
             d.line([pts[i-1], pts[i]], fill=(0,0,0,255), width=3)
 
-        # Subtle grid
         for gy in np.linspace(y1, y2, 5):
             d.line([(x1, gy),(x2, gy)], fill=(0,0,0,30), width=1)
 
-        # Support zone (translucent)
         if (sup_low is not None) and (sup_high is not None):
             y_lo = y_from_price(sup_high)
             y_hi = y_from_price(sup_low)
@@ -266,7 +253,6 @@ def generate_chart(ticker: str) -> Optional[str]:
             d.rectangle([x1+2, top, x2-2, bot],
                         fill=(40,120,255,48), outline=(40,120,255,160), width=2)
 
-        # Logos
         lg = load_logo(ticker, 140)
         if lg is not None:
             img.alpha_composite(lg, (W - lg.width - 26, 24))
@@ -274,7 +260,6 @@ def generate_chart(ticker: str) -> Optional[str]:
         if twd is not None:
             img.alpha_composite(twd, (W - twd.width - 26, H - twd.height - 24))
 
-        # Subheading
         f_sub = font_reg(32)
         d.text((x1, y1-56), "Weekly chart • key support zone", fill=(40,40,40,255), font=f_sub)
 
@@ -442,10 +427,11 @@ def cluster_by_popularity(items: List[Dict]) -> List[Dict]:
 # =========================
 # ---- Workflows ----------
 # =========================
-def run_daily_charts():
+def run_daily_charts() -> Tuple[List[str], Optional[str]]:
+    """Generate 6 charts + daily captions file. Returns (chart_paths, caption_path_or_None)."""
     tickers = pick_tickers(6)
     log(f"[info] selected tickers: {tickers}")
-    generated = []
+    generated: List[str] = []
     cap_lines = []
     for t in tickers:
         path = generate_chart(t)
@@ -493,6 +479,8 @@ def run_daily_charts():
         print("⚠️ No charts generated")
     print("Caption file:", cap_file_written or "(none)")
     print("==============================\n")
+
+    return generated, cap_file_written
 
 def run_posters():
     news = fetch_yahoo_headlines(WATCHLIST, max_items=40)
@@ -604,7 +592,7 @@ def run_poster_mockup(args: Optional[List[str]] = None):
 # ---- CLI ----------------
 # =========================
 def main():
-    import argparse
+    import argparse, sys
     ap = argparse.ArgumentParser()
     ap.add_argument("--daily", action="store_true", help="Generate 6 charts + daily caption file")
     ap.add_argument("--posters", action="store_true", help="Generate news-driven posters")
@@ -612,9 +600,19 @@ def main():
     ap.add_argument("--once", type=str, help="Generate a single chart for one ticker")
     ap.add_argument("--poster-demo", nargs="*", help='Legacy: --poster-demo TKR "HEADLINE..."')
     ap.add_argument("--poster-mockup", nargs="*", help='New: --poster-mockup [TKR "HEADLINE..."]')
+    ap.add_argument("--ci", action="store_true", help="CI mode: run daily, exit 0 if any charts else exit 2")
     args = ap.parse_args()
 
     try:
+        if args.ci:
+            log("[info] CI mode → daily charts")
+            charts, cap = run_daily_charts()
+            if not charts:
+                print("CI: No charts generated → exiting with code 2")
+                sys.exit(2)
+            print(f"CI: charts={len(charts)} caption={'yes' if cap else 'no'}")
+            sys.exit(0)
+
         if args.daily:
             log("[info] running daily charts")
             run_daily_charts()
@@ -645,6 +643,7 @@ def main():
     except Exception as e:
         log(f"[fatal] {e}")
         traceback.print_exc()
+        raise SystemExit(1)
 
 if __name__ == "__main__":
     main()
