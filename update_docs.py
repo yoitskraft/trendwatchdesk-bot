@@ -1,24 +1,131 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+# scripts/update_docs.py
+import os, re, subprocess, sys
+from datetime import datetime
 
-"""
-update_docs.py
-Regenerates OPERATIONS_GUIDE.md and README.md with the current canonical content.
-Run locally or from CI to keep docs fresh.
-"""
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+README = os.path.join(ROOT, "README.md")
+OPS    = os.path.join(ROOT, "OPERATIONS_GUIDE.md")
+MAIN   = os.path.join(ROOT, "main.py")
+LOGOS  = os.path.join(ROOT, "assets", "logos")
 
-from pathlib import Path
-import datetime
+def sh(cmd: str) -> str:
+    return subprocess.check_output(cmd, shell=True, cwd=ROOT, text=True).strip()
 
-TODAY = datetime.date.today().strftime("%Y-%m-%d")
+def repo_slug() -> str:
+    return os.environ.get("GITHUB_REPOSITORY", "your/repo")
 
-OPERATIONS_GUIDE = '# TrendWatchDesk – Operations Guide (Single Source of Truth)\n\n_Last updated: 2025-10-09 (UTC)_\n\nThis guide defines the **canonical behavior** of the TrendWatchDesk automation system.  \nIt is the **source of truth** for charts, posters, captions, workflows, branches, and assets.  \nThe **docs-guard** workflow enforces compliance; the **docs-autostamp** workflow keeps this date updated automatically.\n\n---\n\n## 1. Repository Branches\n\n- **`main`**  \n  Source of truth for all code, workflows, and documentation. PRs must target this branch.  \n\n- **`charts`**  \n  Auto-published artifacts branch. Contains only the generated outputs (`output/*`) from CI runs.  \n  - Rewritten each run (force-pushed, single commit).  \n  - Used for external access, IG-ready visuals, and archiving runs.\n\n- **`docs`** (optional)  \n  For static site/docs builds. Syncs automatically from `OPERATIONS_GUIDE.md` and `README.md`.  \n\n---\n\n## 2. Directory Structure\n\n```text\n.\n├── assets/                 # Static resources\n│   ├── logos/              # Per-ticker logo PNGs (color, transparent)\n│   ├── fonts/              # Grift fonts\n│   └── brand_logo.png      # White TrendWatchDesk logo\n│\n├── output/                 # Auto-generated files (cleaned per run)\n│   ├── charts/             # Daily candlestick charts\n│   ├── posters/            # News-driven poster PNGs\n│   ├── caption_YYYYMMDD.txt# Captions per run\n│   └── run.log             # Execution log\n│\n├── .github/workflows/      # CI/CD automation\n│   ├── daily.yml           # Generates charts on cron/dispatch\n│   ├── docs-autostamp.yml  # Updates dates in docs\n│   ├── docs-guard.yml      # Enforces docspec compliance\n│   └── ci.yml              # Optional combined charts + posters job\n│\n├── main.py                 # Core logic (charts + posters)\n├── OPERATIONS_GUIDE.md     # This file (single source of truth)\n├── README.md               # Project overview\n└── update_docs.py          # Script to regenerate docs\n```\n\n---\n\n## 3. Workflows Overview\n\n- **daily.yml**  \n  Runs charts on Mon/Wed/Fri (07:10 UTC). Saves outputs, enforces chart presence.\n\n- **ci.yml**  \n  Extended run (charts + posters). Optional but recommended.\n\n- **docs-autostamp.yml**  \n  Updates `_Last updated:` automatically when code/docs change.\n\n- **docs-guard.yml**  \n  Blocks merge if guide/README drift from spec.\n\n---\n\n## 4. Charts\n\n- 6 tickers selected per run from **watchlist pools** (`AI`, `MAG7`, `Semis`, `Fintech`, `Healthcare`, `Quantum`, `Wildcards`).  \n- Data source: Yahoo Finance via `yfinance`.  \n- Interval: weekly (`1wk`) for clarity, candlesticks style.  \n- Support zone: translucent rectangle (barely visible, but useful).  \n- Layout: blue gradient background, white percentage/metadata bottom-left.  \n- Logos: ticker logo (color, transparent background).  \n- Branding: TrendWatchDesk logo bottom-right.  \n\nOutputs → `output/charts/TICKER_chart.png`\n\n---\n\n## 5. Posters\n\n- Source: Yahoo Finance news polling (lightweight endpoint).  \n- Selection: clustered by popularity (same headline ≥2 mentions).  \n- Design:  \n  - Blue gradient + light beams background.  \n  - Headline: Grift-Bold, wrapped to 2–3 lines.  \n  - Subtext: Grift-Regular, 3–4 lines, news context + sector sentiment.  \n  - Logos: ticker logo top-right, TWD logo bottom-right.  \n- Variety: ticker sector-aware emojis, no overlap.  \n- Caption file alongside each poster: `output/posters/TICKER_poster_DATE_caption.txt`\n\nOutputs → `output/posters/TICKER_poster_DATE.png`\n\n---\n\n## 6. Captions\n\n- **Daily captions** (charts): summarize ticker momentum, support, % changes.  \n  - Must include emojis (sector-aware).  \n  - No repetitive structures.  \n  - Avoid raw price quoting unless meaningful.  \n\n- **Poster captions**: headline context + investor sentiment + forward guidance.  \n\nStored in → `output/caption_YYYYMMDD.txt` (daily run)  \nand alongside each poster.  \n\n---\n\n## 7. Logging\n\n- Every run logs to `output/run.log`  \n- Includes ticker selection, errors, saved paths.  \n- Warnings logged but do not halt CI unless no charts are generated.\n\n---\n\n## 8. CI/CD Rules\n\n- Workflows must **fail** if:  \n  - No charts generated.  \n  - No posters generated when news is available.  \n\n- Artifacts branch (`charts`) always force-pushed with last run results.  \n\n- Docs must always be in sync (guard + autostamp).  \n\n---\n\n## 9. Assets\n\n- Logos → `assets/logos/TICKER.png` (transparent background, color logo).  \n- Fonts → Grift-Bold + Grift-Regular (`assets/fonts/`).  \n- Brand logo → `assets/brand_logo.png` (white).  \n\n---\n\n## 10. Governance\n\n- **Single source of truth** → this file (`OPERATIONS_GUIDE.md`).  \n- Updates here cascade to CI/CD and enforce compliance.  \n- All contributors must update this guide for any feature change.  \n\n---\n'
-README = '# TrendWatchDesk 📊\n\nAutomated system for generating **stock market visuals** — candlestick charts and news-driven posters — optimized for **Instagram engagement**.\n\n_Last updated: 2025-10-09 (UTC)_\n\n---\n\n## 🚀 Features\n\n- **Candlestick charts** (weekly, 6 tickers per run) with support zones  \n- **News-driven posters** (Yahoo Finance headlines + clustering)  \n- **Captions** — natural, IG-native, emoji-rich, sector-aware  \n- **Deterministic selection** of tickers (daily seed)  \n- **Blue gradient visuals** with branded layout  \n- **Auto CI publishing** → artifacts on `charts` branch  \n- **Docs compliance** → enforced by `docs-guard` and `docs-autostamp`  \n\n---\n\n## 📂 Repository Structure\n\n```text\n.\n├── assets/                 # Logos, fonts, brand identity\n│   ├── logos/              # Per-ticker logos (PNG, transparent)\n│   ├── fonts/              # Grift-Bold, Grift-Regular\n│   └── brand_logo.png      # White TrendWatchDesk logo\n│\n├── output/                 # CI artifacts (cleaned per run)\n│   ├── charts/             # Candlestick chart PNGs\n│   ├── posters/            # News poster PNGs\n│   ├── caption_YYYYMMDD.txt# Captions per run\n│   └── run.log             # Execution log\n│\n├── .github/workflows/      # Automation configs\n│   ├── daily.yml           # Daily chart generation (cron + dispatch)\n│   ├── docs-autostamp.yml  # Auto-updates dates in docs\n│   ├── docs-guard.yml      # Blocks merge if docs drift\n│   └── ci.yml              # Extended charts + posters\n│\n├── main.py                 # Core logic (charts + posters)\n├── OPERATIONS_GUIDE.md     # Canonical spec (single source of truth)\n├── README.md               # This file\n└── update_docs.py          # Script to regenerate docs\n```\n\n---\n\n## 🖼️ Outputs\n\n- **Charts** → `output/charts/TICKER_chart.png`  \n- **Posters** → `output/posters/TICKER_poster_DATE.png`  \n- **Captions** → `output/caption_YYYYMMDD.txt`  \n- **Logs** → `output/run.log`  \n\nAll outputs are published to the **`charts` branch** as a clean single commit.  \n\n---\n\n## ⚙️ Workflows\n\n- **daily.yml**  \n  - Runs Mon/Wed/Fri 07:10 UTC  \n  - Generates charts + caption file  \n  - Publishes artifacts to `charts` branch  \n\n- **ci.yml**  \n  - Extended run (charts + posters)  \n  - Optional for testing / combined runs  \n\n- **docs-autostamp.yml**  \n  - Updates `_Last updated:` in docs automatically  \n\n- **docs-guard.yml**  \n  - Blocks merge if README or Operations Guide are out of sync  \n\n---\n\n## 📖 Operations Guide\n\nFor canonical details, see [OPERATIONS_GUIDE.md](OPERATIONS_GUIDE.md).  \nAll workflows, captions, outputs, and branches must conform to this guide.\n\n---\n\n## 🛠️ Governance\n\n- **Single source of truth** → `OPERATIONS_GUIDE.md`  \n- PRs must update docs if behavior changes  \n- Guard workflows enforce compliance  \n'
+def branch_list():
+    try:
+        out = sh("git branch -r | sed 's#origin/##' | sort -u")
+        return [b for b in out.splitlines() if b]
+    except Exception:
+        return []
+
+def repo_tree():
+    try:
+        out = sh(r"""git ls-files | sed 's|^\./||' | awk -F/ '{
+            d=""; for(i=1;i<NF;i++){d=(d?d"/":"")$i; a[d]=1}
+        } END{
+            print "."; for (k in a) print k
+        }' | sort""")
+        return out
+    except Exception:
+        return "."
+
+def read(p): 
+    return open(p, "r", encoding="utf-8").read() if os.path.exists(p) else ""
+
+def write_if_changed(p, new_text) -> bool:
+    old = read(p)
+    if old == new_text:
+        return False
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(new_text)
+    return True
+
+def patch_block(full_text: str, block: str, new_body: str) -> str:
+    start = f"<!-- AUTOGEN:{block}:START -->"
+    end   = f"<!-- AUTOGEN:{block}:END -->"
+    if start not in full_text or end not in full_text:
+        add = f"\n\n{start}\n{new_body.rstrip()}\n{end}\n"
+        return (full_text.rstrip() + add) if full_text else (start + "\n" + new_body.rstrip() + "\n" + end + "\n")
+    import re as _re
+    pat = _re.compile(re.escape(start) + r".*?" + re.escape(end), _re.S)
+    return pat.sub(start + "\n" + new_body.rstrip() + "\n" + end, full_text, count=1)
+
+def parse_pools_watchlist():
+    pools = {}
+    watch = set()
+    txt = read(MAIN)
+    if not txt:
+        return pools, sorted(watch)
+    m = re.search(r"POOLS\s*=\s*\{(.*?)\}\s*", txt, flags=re.S)
+    if m:
+        body = m.group(1)
+        for k, arr in re.findall(r"['\"]([^'\"]+)['\"]\s*:\s*\[([^\]]*)\]", body):
+            syms = re.findall(r"['\"]([A-Za-z0-9\.\-]+)['\"]", arr)
+            pools[k] = sorted(list(dict.fromkeys(syms)))
+            watch.update(syms)
+    mw = re.search(r"WATCHLIST\s*=\s*\[([^\]]*)\]", txt)
+    if mw:
+        syms = re.findall(r"['\"]([A-Za-z0-9\.\-]+)['\"]", mw.group(1))
+        watch.update(syms)
+    return pools, sorted(watch)
+
+def logo_coverage(tickers):
+    have = set()
+    if os.path.isdir(LOGOS):
+        for f in os.listdir(LOGOS):
+            if f.lower().endswith(".png"):
+                have.add(os.path.splitext(f)[0].upper())
+    missing = [t for t in tickers if t.upper() not in have]
+    return sorted(have), missing
 
 def main():
-    Path("OPERATIONS_GUIDE.md").write_text(OPERATIONS_GUIDE, encoding="utf-8")
-    Path("README.md").write_text(README, encoding="utf-8")
-    print("✅ Wrote OPERATIONS_GUIDE.md and README.md (date:", TODAY + ")")
+    repo = repo_slug()
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
+
+    branches = branch_list()
+    tree     = repo_tree()
+    pools, watch = parse_pools_watchlist()
+    have, missing = logo_coverage(watch)
+
+    # Build blocks
+    badges = " ".join([
+        f"![Daily](https://github.com/{repo}/actions/workflows/daily.yml/badge.svg)",
+        f"![Docs](https://github.com/{repo}/actions/workflows/docs-autostamp.yml/badge.svg)"
+    ])
+    branches_md = "\n".join(f"- `{b}`" for b in branches) or "_(no remote branches found)_"
+    pools_md = "\n".join(f"- **{k}**: {', '.join(v)}" for k,v in sorted(pools.items())) or "_(no pools found)_"
+    logos_md = (
+        f"**Have ({len(have)})**: {', '.join(have) if have else '—'}\n\n"
+        f"**Missing ({len(missing)})**: {', '.join(missing) if missing else '—'}"
+    )
+    tree_md = f"```\n{tree}\n```"
+    stamp = f"_Last updated: **{now}**_"
+
+    # README
+    readme = read(README) or "# TrendWatchDesk\n"
+    readme = patch_block(readme, "BADGES", badges)
+    readme = patch_block(readme, "BRANCHES", branches_md)
+    readme = patch_block(readme, "POOLS", pools_md)
+    readme = patch_block(readme, "LOGOS", logos_md)
+    readme = patch_block(readme, "TREE", tree_md)
+    readme = patch_block(readme, "STAMP", stamp)
+
+    # OPS
+    ops = read(OPS) or "# TrendWatchDesk Operations Guide\n"
+    ops = patch_block(ops, "STRUCTURE", tree_md)
+    ops = patch_block(ops, "BRANCHES", branches_md)
+    ops = patch_block(ops, "POOLS", pools_md)
+    ops = patch_block(ops, "LOGOS", logos_md)
+    ops = patch_block(ops, "STAMP", f"_Doc auto-stamped: **{now}**_")
+
+    ch_readme = write_if_changed(README, readme)
+    ch_ops    = write_if_changed(OPS, ops)
+    print(f"[docs] README updated: {ch_readme}, OPERATIONS_GUIDE updated: {ch_ops}")
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()
