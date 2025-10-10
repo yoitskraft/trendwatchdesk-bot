@@ -1,0 +1,32 @@
+name: Changelog Autogen
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  changelog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Generate CHANGELOG
+        run: python scripts/gen_changelog.py
+      - name: Commit CHANGELOG (if changed)
+        run: |
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add CHANGELOG.md
+            git commit -m "chore: update CHANGELOG [skip ci]"
+            git push
+          else
+            echo "No changelog changes."
+          fi
