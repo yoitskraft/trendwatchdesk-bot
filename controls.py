@@ -4,14 +4,14 @@ TrendWatchDesk controls — safe config overrides for charts & posters.
 """
 
 SETTINGS = {
-    # ---- Chart canvas ----
-    "CHART_WIDTH": 1080,
-    "CHART_HEIGHT": 720,
+    # scale both W & H together
+    "CHART_SCALE": 0.9,        # 1.0 = normal, <1 smaller, >1 larger
+    "POSTER_SCALE": None,      # None = follow CHART_SCALE, or set e.g. 1.0
 
-    # ---- Logo scaling ----
-    "CHART_LOGO_SCALE": 0.8,     # 1.0 = normal, <1 = smaller, >1 = larger
-    "POSTER_LOGO_SCALE": 0.9,    # same idea for posters
-
+    # fine-tune logo sizes independently
+    "CHART_LOGO_SCALE": 0.8,
+    "POSTER_LOGO_SCALE": 0.9,
+}
     # ---- Support zone ----
     "SUPPORT_FILL_ALPHA": 110,   # whiter/stronger
     "SUPPORT_BLUR_RADIUS": 5,    # crisper
