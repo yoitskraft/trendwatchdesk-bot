@@ -327,6 +327,74 @@ def render_candles(draw: ImageDraw.ImageDraw, ohlc: pd.DataFrame, box: Tuple[int
 # ---- Chart generator ----
 # =========================
 
+def pivots(series: pd.Series, kind: str = "high", window: int = 3) -> List[Tuple[int,float]]:
+    """Return list of (index, price) for local extrema over the whole series."""
+    s = _series_f64(series); n = len(s)
+    out = []
+    if n == 0: return out
+    for i in range(window, n - window):
+        seg = s.iloc[i - window:i + window + 1]
+        val = float(s.iloc[i])
+        if kind == "high":
+            if np.isclose(val, float(seg.max())):
+                out.append((i, val))
+        else:
+            if np.isclose(val, float(seg.min())):
+                out.append((i, val))
+    return out
+
+def cluster_levels(points: List[Tuple[int,float]], atr: float,
+                   bin_atr: float = 0.5, min_touches: int = 3,
+                   decay: float = 0.995, total_len: Optional[int] = None) -> List[Dict]:
+    """
+    Histogram-like clustering of pivot prices with ATR-sized bins.
+    Returns list of clusters: [{"price": level, "score": score, "count": k}]
+    """
+    if not points or atr <= 0: return []
+    bin_size = max(1e-9, atr * bin_atr)
+    buckets: Dict[int, Dict[str, float]] = {}
+    N = total_len if total_len is not None else (max(i for i,_ in points) + 1)
+
+    for idx, price in points:
+        key = int(round(price / bin_size))
+        age = max(0, (N - 1) - idx)          # bars since pivot
+        w   = (decay ** age)                 # recency weight
+        b   = buckets.get(key)
+        if b is None:
+            buckets[key] = {"w": w, "sum_pw": price * w, "count": 1}
+        else:
+            b["w"] += w; b["sum_pw"] += price * w; b["count"] += 1
+
+    clusters = []
+    for key, b in buckets.items():
+        if b["count"] >= min_touches:
+            level = b["sum_pw"] / max(1e-9, b["w"])
+            clusters.append({"price": float(level), "score": float(b["w"]), "count": int(b["count"])})
+    # strongest first by (touches, score)
+    clusters.sort(key=lambda c: (c["count"], c["score"]), reverse=True)
+    return clusters
+
+def choose_revisit_level(bias: str, last: float, clusters: List[Dict], atr: float,
+                         max_dist_atr: float = 2.5) -> Optional[float]:
+    """Pick nearest strong level consistent with bias (above for bullish highs, below for bearish lows)."""
+    if not clusters or atr <= 0 or last <= 0:
+        return None
+    # Filter by distance (in ATR)
+    filt = [c for c in clusters if abs(c["price"] - last) / atr <= max_dist_atr]
+    if not filt:
+        filt = clusters[:]  # fallback: any cluster
+
+    if bias == "bullish":
+        above = [c for c in filt if c["price"] >= last]
+        cand  = above if above else filt
+    else:
+        below = [c for c in filt if c["price"] <= last]
+        cand  = below if below else filt
+
+    # Prefer nearest; break ties by stronger cluster
+    cand.sort(key=lambda c: (abs(c["price"] - last), -c["count"], -c["score"]))
+    return float(cand[0]["price"]) if cand else None
+
 def atr14(df: pd.DataFrame) -> float:
     o = df["Open"].to_numpy()
     h = df["High"].to_numpy()
@@ -415,36 +483,51 @@ def generate_chart(ticker: str) -> Optional[str]:
         # --- Candles first ---
         render_candles(d, ohlc, (x1, y1, x2, y2))
 
-        # --- Tight Swing Zone: last swing HIGH if bullish, last swing LOW if bearish ---
-        close_s = ohlc["Close"]
-        bias    = trend_bias(close_s)  # 'bullish' or 'bearish'
-        atr     = atr14(ohlc)
+                # --- Revisit Zone from clustered swings over 1y (precise + realistic) ---
+        close_s = ohlc["Close"]; high_s = ohlc["High"]; low_s = ohlc["Low"]
+        last = float(close_s.iloc[-1])
+        bias = trend_bias(close_s)                 # 'bullish' or 'bearish'
+        atr  = atr14(ohlc)
 
-        # knobs (optional: add to controls.py if you want to tweak)
-        ATR_K        = float(globals().get("SUPPORT_ATR_MULT", 0.5))  # band half-height in ATRs
-        PIV_WIN      = int(globals().get("PIVOT_WINDOW", 3))          # pivot sensitivity
-        PIV_LOOKBACK = int(globals().get("PIVOT_LOOKBACK", 120))      # how far back to search
-        inset        = int(globals().get("SUPPORT_INSET", 6) * CHART_SCALE)
+        # Controls (fallbacks if not in controls.py)
+        BIN_ATR   = float(globals().get("LEVEL_BIN_ATR",   0.5))   # cluster bin size (in ATRs)
+        MIN_TOUCH = int(globals().get("LEVEL_MIN_TOUCHES", 3))     # min pivots per cluster
+        DECAY     = float(globals().get("LEVEL_DECAY",     0.995)) # recency weight
+        MAX_DATR  = float(globals().get("LEVEL_MAX_DIST_ATR", 2.5))# max distance from last (in ATRs)
+        Z_ATR     = float(globals().get("ZONE_ATR_MULT",   0.40))  # half-height of zone (in ATRs)
+        PIV_WIN   = int(globals().get("PIVOT_WINDOW", 3))          # pivot sensitivity
+        inset     = int(globals().get("SUPPORT_INSET", 6) * CHART_SCALE)
 
+        # Build pivot sets across the year
+        highs = pivots(high_s, kind="high", window=PIV_WIN)
+        lows  = pivots(low_s,  kind="low",  window=PIV_WIN)
+
+        # Cluster pivots into levels using ATR-sized bins
+        n_bars    = len(close_s)
+        high_lvls = cluster_levels(highs, atr, BIN_ATR, MIN_TOUCH, DECAY, total_len=n_bars)
+        low_lvls  = cluster_levels(lows,  atr, BIN_ATR, MIN_TOUCH, DECAY, total_len=n_bars)
+
+        # Choose the nearest strong level consistent with bias:
+        #  - bullish → last swing HIGH cluster (likely revisit above)
+        #  - bearish → last swing LOW  cluster (likely revisit below)
         if bias == "bullish":
-            level = find_last_swing(ohlc["High"], kind="high", window=PIV_WIN, lookback=PIV_LOOKBACK)
+            level = choose_revisit_level("bullish", last, high_lvls, atr, MAX_DATR)
         else:
-            level = find_last_swing(ohlc["Low"],  kind="low",  window=PIV_WIN, lookback=PIV_LOOKBACK)
+            level = choose_revisit_level("bearish", last, low_lvls,  atr, MAX_DATR)
 
-        if level is not None and atr > 0:
-            # Build a tight zone centered on that swing level
-            half = max(1e-6, atr * ATR_K * 0.5)
+        if (level is not None) and (atr > 0):
+            half = max(1e-6, atr * Z_ATR) * 0.5      # tight ATR-based band
             lo_price = level - half
             hi_price = level + half
 
-            pmin = float(ohlc["Low"].min())
-            pmax = float(ohlc["High"].max())
+            # Map prices → y
+            pmin = float(low_s.min()); pmax = float(high_s.max())
             pr   = max(1e-9, pmax - pmin)
             def y_from(p: float) -> int:
                 return int(y2 - (float(p) - pmin) / pr * (y2 - y1))
             y_top, y_bot = y_from(hi_price), y_from(lo_price)
 
-            # enforce minimum visible thickness in pixels
+            # Enforce minimum visible thickness (px)
             MIN_PX = int(SUPPORT_MIN_PX)
             if (y_bot - y_top) < MIN_PX:
                 mid = (y_top + y_bot) // 2
