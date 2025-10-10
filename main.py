@@ -319,13 +319,64 @@ def render_candles(draw: ImageDraw.ImageDraw, ohlc: pd.DataFrame, box: Tuple[int
 # =========================
 # ---- Chart generator ----
 # =========================
+
+def atr14(df: pd.DataFrame) -> float:
+    o = df["Open"].to_numpy()
+    h = df["High"].to_numpy()
+    l = df["Low"].to_numpy()
+    c = df["Close"].to_numpy()
+    tr = []
+    for i in range(len(c)):
+        if i == 0:
+            tr.append(h[i] - l[i])
+        else:
+            tr.append(max(h[i]-l[i], abs(h[i]-c[i-1]), abs(l[i]-c[i-1])))
+    if len(tr) < 14:
+        return max(1e-6, float(np.nanmean(tr)))
+    return max(1e-6, float(pd.Series(tr).rolling(14).mean().iloc[-1]))
+
+def find_nearest_pivot(series: pd.Series, kind: str = "low",
+                       window: int = 3, lookback: int = 60) -> Optional[Tuple[int, float]]:
+    """
+    kind='low'  → nearest swing low (local minimum)
+    kind='high' → nearest swing high (local maximum)
+    Returns (index, price) scanning backward within lookback bars.
+    """
+    s = _series_f64(series)
+    n = len(s)
+    if n == 0:
+        return None
+    start = max(0, n - lookback - 1)
+    end   = n - 2  # ignore very last bar for stability
+    for i in range(end, start - 1, -1):
+        lo = max(0, i - window)
+        hi = min(n - 1, i + window)
+        seg = s.iloc[lo:hi+1]
+        val = float(s.iloc[i])
+        if kind == "low":
+            if np.isclose(val, float(seg.min())):
+                return (i, val)
+        else:
+            if np.isclose(val, float(seg.max())):
+                return (i, val)
+    return None
+
+def trend_bias(close: pd.Series) -> str:
+    """Simple bias: price vs 20dma and 5-bar momentum."""
+    s = _series_f64(close)
+    if len(s) < 25:
+        return "bullish" if len(s) >= 2 and s.iloc[-1] >= s.iloc[-2] else "bearish"
+    ma20 = float(pd.Series(s).rolling(20).mean().iloc[-1])
+    mom5 = float(s.iloc[-1] - s.iloc[-6]) if len(s) >= 6 else 0.0
+    return "bullish" if (float(s.iloc[-1]) >= ma20 and mom5 >= 0) else "bearish"
+
 def generate_chart(ticker: str) -> Optional[str]:
-    """Weekly chart: gradient, candles (no grid), feathered support zone OVER candles, white logos.
-       Layout is controlled by CHART_SCALE, PLOT_SCALE, CHART_MARGIN, PLOT_TOP_OFFSET, SUPPORT_INSET.
+    """Daily chart: gradient, candles, precise pivot zone (ATR-sized), white logos.
+       Layout via CHART_SCALE, PLOT_SCALE, CHART_MARGIN, PLOT_TOP_OFFSET, SUPPORT_INSET.
     """
     try:
-        # --- Data ---
-        df = yf.download(ticker, period="1y", interval="1wk",
+        # --- Data: DAILY ---
+        df = yf.download(ticker, period="6mo", interval="1d",
                          progress=False, auto_adjust=False, threads=False)
         if df is None or df.empty:
             log(f"[warn] no data for {ticker}")
@@ -341,42 +392,60 @@ def generate_chart(ticker: str) -> Optional[str]:
         img  = blue_gradient_bg(W, H)
         d    = ImageDraw.Draw(img)
 
-        # --- Plot area (scaled inner box for more negative space) ---
+        # --- Plot area (scaled inner box) ---
         outer   = int(CHART_MARGIN * CHART_SCALE)
         top_off = int(PLOT_TOP_OFFSET * CHART_SCALE)
-
-        # available canvas after outer margins
         avail_w = W - 2 * outer
         avail_h = H - 2 * outer
-
-        # shrink inner plot by PLOT_SCALE, center it
         plot_w  = int(avail_w * float(PLOT_SCALE))
         plot_h  = int(avail_h * float(PLOT_SCALE))
         pad_x   = (avail_w - plot_w) // 2
         pad_y   = (avail_h - plot_h) // 2
-
         x1 = outer + pad_x
         y1 = outer + top_off + pad_y
         x2 = x1 + plot_w
         y2 = y1 + plot_h
 
-        # --- Candles first (no grid) ---
+        # --- Candles first ---
         render_candles(d, ohlc, (x1, y1, x2, y2))
 
-        # --- SUPPORT ZONE (draw OVER candles so it's visible) ---
+        # --- Precise Pivot Zone (ATR-sized) ---
         close_s = ohlc["Close"]
-        lo, hi = swing_levels(close_s, lookback=10)
-        if (lo is not None) and (hi is not None) and (hi >= lo):
+        bias    = trend_bias(close_s)  # 'bullish' or 'bearish'
+        atr     = atr14(ohlc)
+
+        # Controls (safe defaults if not in controls.py)
+        ATR_K         = float(globals().get("SUPPORT_ATR_MULT", 0.6))  # height of band
+        PIV_WIN       = int(globals().get("PIVOT_WINDOW", 3))          # pivot detection half-window
+        PIV_LOOKBACK  = int(globals().get("PIVOT_LOOKBACK", 60))       # how far back to search
+        inset         = int(globals().get("SUPPORT_INSET", 6) * CHART_SCALE)
+
+        if bias == "bullish":
+            pivot = find_nearest_pivot(ohlc["Low"], kind="low", window=PIV_WIN, lookback=PIV_LOOKBACK)
+            if pivot is not None:
+                _, p = pivot
+                lo_price = p
+                hi_price = p + atr * ATR_K
+            else:
+                lo_price, hi_price = None, None
+        else:
+            pivot = find_nearest_pivot(ohlc["High"], kind="high", window=PIV_WIN, lookback=PIV_LOOKBACK)
+            if pivot is not None:
+                _, p = pivot
+                lo_price = p - atr * ATR_K
+                hi_price = p
+            else:
+                lo_price, hi_price = None, None
+
+        if (lo_price is not None) and (hi_price is not None) and (hi_price >= lo_price):
             pmin = float(ohlc["Low"].min())
             pmax = float(ohlc["High"].max())
             pr   = max(1e-9, pmax - pmin)
-
             def y_from(p: float) -> int:
                 return int(y2 - (float(p) - pmin) / pr * (y2 - y1))
+            y_top, y_bot = y_from(hi_price), y_from(lo_price)
 
-            y_top, y_bot = y_from(hi), y_from(lo)
-
-            # ensure minimum visible thickness so the band never vanishes
+            # enforce minimum visible thickness in pixels
             MIN_PX = int(SUPPORT_MIN_PX)
             if (y_bot - y_top) < MIN_PX:
                 mid = (y_top + y_bot) // 2
@@ -384,7 +453,6 @@ def generate_chart(ticker: str) -> Optional[str]:
                 y_top = max(y1 + 4, mid - pad)
                 y_bot = min(y2 - 4, mid + pad)
 
-            inset = int(SUPPORT_INSET * CHART_SCALE)
             feathered_support(
                 img,
                 x1 + inset, min(y_top, y_bot),
