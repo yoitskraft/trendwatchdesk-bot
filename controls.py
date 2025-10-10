@@ -22,9 +22,9 @@ SETTINGS = {
     "SUPPORT_OUTLINE_ALPHA": 140,
     "SUPPORT_MIN_PX": 26,
     "SUPPORT_INSET": 6,         # horizontal inset for zone rectangle
-    "SUPPORT_ATR_MULT": 0.6,  # band height in ATRs (0.4–0.8 is typical)
+    "SUPPORT_ATR_MULT": 0.5,  # band height in ATRs (0.4–0.8 is typical)
     "PIVOT_WINDOW": 3,        # pivot sensitivity (3–5)
-    "PIVOT_LOOKBACK": 60,     # how far back to search for nearest pivot
+    "PIVOT_LOOKBACK": 120,     # how far back to search for nearest pivot
 
     # ---- Candles ----
     "CANDLE_BODY_RATIO": 0.35,
