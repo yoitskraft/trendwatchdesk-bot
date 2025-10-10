@@ -26,6 +26,13 @@ SETTINGS = {
     "PIVOT_WINDOW": 3,        # pivot sensitivity (3–5)
     "PIVOT_LOOKBACK": 120,     # how far back to search for nearest pivot
 
+    # Level clustering & zone tightness
+    "LEVEL_BIN_ATR": 0.5,       # cluster bin size = ATR * this
+    "LEVEL_MIN_TOUCHES": 3,     # require at least this many pivots in a cluster
+    "LEVEL_DECAY": 0.995,       # recency decay per bar (1.0 = no decay)
+    "LEVEL_MAX_DIST_ATR": 2.5,  # ignore clusters farther than this (in ATRs)
+    "ZONE_ATR_MULT": 0.40,      # half-height of zone = ATR * this
+
     # ---- Candles ----
     "CANDLE_BODY_RATIO": 0.35,
     "CANDLE_BODY_MAX": 12,
