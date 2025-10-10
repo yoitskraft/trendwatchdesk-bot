@@ -320,8 +320,11 @@ def render_candles(draw: ImageDraw.ImageDraw, ohlc: pd.DataFrame, box: Tuple[int
 # ---- Chart generator ----
 # =========================
 def generate_chart(ticker: str) -> Optional[str]:
-    """Weekly chart: gradient, candles, feathered support OVER candles, white logos."""
+    """Weekly chart: gradient, candles (no grid), feathered support zone OVER candles, white logos.
+       Layout is controlled by CHART_SCALE, PLOT_SCALE, CHART_MARGIN, PLOT_TOP_OFFSET, SUPPORT_INSET.
+    """
     try:
+        # --- Data ---
         df = yf.download(ticker, period="1y", interval="1wk",
                          progress=False, auto_adjust=False, threads=False)
         if df is None or df.empty:
@@ -333,31 +336,47 @@ def generate_chart(ticker: str) -> Optional[str]:
             log(f"[warn] no ohlc for {ticker}")
             return None
 
-        # Canvas
+        # --- Canvas ---
         W, H = CHART_W, CHART_H
-        img = blue_gradient_bg(W, H)
-        d   = ImageDraw.Draw(img)
+        img  = blue_gradient_bg(W, H)
+        d    = ImageDraw.Draw(img)
 
-        # Plot area
-        margin = int(40 * CHART_SCALE)
-        x1, y1 = margin, margin + int(30 * CHART_SCALE)
-        x2, y2 = W - margin, H - margin
+        # --- Plot area (scaled inner box for more negative space) ---
+        outer   = int(CHART_MARGIN * CHART_SCALE)
+        top_off = int(PLOT_TOP_OFFSET * CHART_SCALE)
 
-        # Candles first
+        # available canvas after outer margins
+        avail_w = W - 2 * outer
+        avail_h = H - 2 * outer
+
+        # shrink inner plot by PLOT_SCALE, center it
+        plot_w  = int(avail_w * float(PLOT_SCALE))
+        plot_h  = int(avail_h * float(PLOT_SCALE))
+        pad_x   = (avail_w - plot_w) // 2
+        pad_y   = (avail_h - plot_h) // 2
+
+        x1 = outer + pad_x
+        y1 = outer + top_off + pad_y
+        x2 = x1 + plot_w
+        y2 = y1 + plot_h
+
+        # --- Candles first (no grid) ---
         render_candles(d, ohlc, (x1, y1, x2, y2))
 
-        # Support zone OVER candles
+        # --- SUPPORT ZONE (draw OVER candles so it's visible) ---
         close_s = ohlc["Close"]
         lo, hi = swing_levels(close_s, lookback=10)
         if (lo is not None) and (hi is not None) and (hi >= lo):
             pmin = float(ohlc["Low"].min())
             pmax = float(ohlc["High"].max())
             pr   = max(1e-9, pmax - pmin)
+
             def y_from(p: float) -> int:
                 return int(y2 - (float(p) - pmin) / pr * (y2 - y1))
+
             y_top, y_bot = y_from(hi), y_from(lo)
 
-            # ensure minimum visible thickness
+            # ensure minimum visible thickness so the band never vanishes
             MIN_PX = int(SUPPORT_MIN_PX)
             if (y_bot - y_top) < MIN_PX:
                 mid = (y_top + y_bot) // 2
@@ -365,16 +384,17 @@ def generate_chart(ticker: str) -> Optional[str]:
                 y_top = max(y1 + 4, mid - pad)
                 y_bot = min(y2 - 4, mid + pad)
 
+            inset = int(SUPPORT_INSET * CHART_SCALE)
             feathered_support(
                 img,
-                x1 + int(6*CHART_SCALE), min(y_top, y_bot),
-                x2 - int(6*CHART_SCALE), max(y_top, y_bot),
+                x1 + inset, min(y_top, y_bot),
+                x2 - inset, max(y_top, y_bot),
                 fill_alpha=int(SUPPORT_FILL_ALPHA),
                 blur_radius=int(SUPPORT_BLUR_RADIUS),
                 outline_alpha=int(SUPPORT_OUTLINE_ALPHA)
             )
 
-        # Logos (charts: white mono)
+        # --- Logos (charts: white mono top-left; TWD white bottom-right) ---
         lg = load_logo_color(ticker, int(170 * CHART_LOGO_SCALE * CHART_SCALE))
         if lg is not None:
             lg_white = to_white_mono(lg, alpha=255)
@@ -385,6 +405,7 @@ def generate_chart(ticker: str) -> Optional[str]:
             img.alpha_composite(twd, (W - twd.width - int(18 * CHART_SCALE),
                                       H - twd.height - int(14 * CHART_SCALE)))
 
+        # --- Save ---
         out = os.path.join(CHART_DIR, f"{ticker}_chart.png")
         img.convert("RGB").save(out, "PNG")
         return out
