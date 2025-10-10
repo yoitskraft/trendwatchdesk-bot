@@ -4,20 +4,24 @@
 
 SETTINGS = {
     # ---- Global scale (resizes EVERYTHING) ----
-    # 1.0 = default size, <1 smaller, >1 larger
-    "CHART_SCALE": 1.0,
-    # Posters follow CHART_SCALE if None; set a number to override (e.g., 1.0)
-    "POSTER_SCALE": None,
+    "CHART_SCALE": 1.0,         # 1.0 = default, <1 smaller, >1 larger
+    "POSTER_SCALE": None,       # Posters follow CHART_SCALE if None
 
-    # ---- Logo scaling (multiplies on top of the canvas scale) ----
+    # ---- Logo scaling ----
     "CHART_LOGO_SCALE": 0.80,
     "POSTER_LOGO_SCALE": 0.90,
 
-    # ---- Support zone look ----
-    "SUPPORT_FILL_ALPHA": 96,
+    # ---- Plot layout (shrinks whole chart box inside canvas) ----
+    "PLOT_SCALE": 0.82,         # shrink factor for plot area (try 0.82–0.90)
+    "CHART_MARGIN": 40,         # outer canvas margin
+    "PLOT_TOP_OFFSET": 30,      # breathing room above candles
+
+    # ---- Support zone ----
+    "SUPPORT_FILL_ALPHA": 112,  # bump higher = more visible
     "SUPPORT_BLUR_RADIUS": 6,
     "SUPPORT_OUTLINE_ALPHA": 140,
     "SUPPORT_MIN_PX": 26,
+    "SUPPORT_INSET": 6,         # horizontal inset for zone rectangle
 
     # ---- Candles ----
     "CANDLE_BODY_RATIO": 0.35,
@@ -27,7 +31,7 @@ SETTINGS = {
     "CANDLE_DN_RGBA": (245, 110, 110, 255),
     "WICK_RGBA":      (245, 250, 255, 170),
 
-    # ---- Posters behavior ----
+    # ---- Posters ----
     "POSTER_COUNT": 2,
     "POSTERS_ENABLED": True,
 
@@ -48,11 +52,17 @@ def apply_overrides(g):
     g["CHART_LOGO_SCALE"]  = float(S.get("CHART_LOGO_SCALE",  g.get("CHART_LOGO_SCALE", 1.0)))
     g["POSTER_LOGO_SCALE"] = float(S.get("POSTER_LOGO_SCALE", g.get("POSTER_LOGO_SCALE", 1.0)))
 
+    # Plot layout
+    g["PLOT_SCALE"]      = float(S.get("PLOT_SCALE",      g.get("PLOT_SCALE", 0.86)))
+    g["CHART_MARGIN"]    = int(S.get("CHART_MARGIN",      g.get("CHART_MARGIN", 40)))
+    g["PLOT_TOP_OFFSET"] = int(S.get("PLOT_TOP_OFFSET",   g.get("PLOT_TOP_OFFSET", 30)))
+    g["SUPPORT_INSET"]   = int(S.get("SUPPORT_INSET",     g.get("SUPPORT_INSET", 6)))
+
     # Support zone
-    g["SUPPORT_FILL_ALPHA"]     = int(S.get("SUPPORT_FILL_ALPHA",     g.get("SUPPORT_FILL_ALPHA", 96)))
-    g["SUPPORT_BLUR_RADIUS"]    = int(S.get("SUPPORT_BLUR_RADIUS",    g.get("SUPPORT_BLUR_RADIUS", 6)))
-    g["SUPPORT_OUTLINE_ALPHA"]  = int(S.get("SUPPORT_OUTLINE_ALPHA",  g.get("SUPPORT_OUTLINE_ALPHA", 140)))
-    g["SUPPORT_MIN_PX"]         = int(S.get("SUPPORT_MIN_PX",         g.get("SUPPORT_MIN_PX", 26)))
+    g["SUPPORT_FILL_ALPHA"]    = int(S.get("SUPPORT_FILL_ALPHA",    g.get("SUPPORT_FILL_ALPHA", 96)))
+    g["SUPPORT_BLUR_RADIUS"]   = int(S.get("SUPPORT_BLUR_RADIUS",   g.get("SUPPORT_BLUR_RADIUS", 6)))
+    g["SUPPORT_OUTLINE_ALPHA"] = int(S.get("SUPPORT_OUTLINE_ALPHA", g.get("SUPPORT_OUTLINE_ALPHA", 140)))
+    g["SUPPORT_MIN_PX"]        = int(S.get("SUPPORT_MIN_PX",        g.get("SUPPORT_MIN_PX", 26)))
 
     # Candles
     g["CANDLE_BODY_RATIO"] = float(S.get("CANDLE_BODY_RATIO", g.get("CANDLE_BODY_RATIO", 0.35)))
