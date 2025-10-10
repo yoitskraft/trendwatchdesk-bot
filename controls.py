@@ -5,7 +5,7 @@
 SETTINGS = {
     # ---- Global scale (resizes EVERYTHING) ----
     # 1.0 = default size, <1 smaller, >1 larger
-    "CHART_SCALE": 1.0,
+    "CHART_SCALE": 0.8,
     # Posters follow CHART_SCALE if None; set a number to override (e.g., 1.0)
     "POSTER_SCALE": None,
 
