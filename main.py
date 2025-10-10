@@ -287,19 +287,26 @@ def render_candles(draw: ImageDraw.ImageDraw, ohlc: pd.DataFrame, box: Tuple[int
     x1,y1,x2,y2 = box
     data = ohlc[["Open","High","Low","Close"]].dropna()
     if data.empty: return
+
     n = len(data)
     lows, highs = data["Low"].to_numpy(), data["High"].to_numpy()
     opens, closes = data["Open"].to_numpy(), data["Close"].to_numpy()
     pmin, pmax = float(np.nanmin(lows)), float(np.nanmax(highs))
-    pr = max(1e-9, pmax-pmin)
+    pr = max(1e-9, pmax - pmin)
 
-    xs = np.linspace(x1+int(12*CHART_SCALE), x2-int(12*CHART_SCALE), n)
-    dx = (xs[-1] - xs[0]) / (n - 1) if n > 1 else (x2 - x1)
+    # X positions across plot area
+    pad_inner = int(12 * CHART_SCALE)
+    xs = np.linspace(x1 + pad_inner, x2 - pad_inner, n)
 
-    body_half = max(3,
-        min(int(CANDLE_BODY_MAX * CHART_SCALE),
-            int(dx * float(CANDLE_BODY_RATIO))))
-    wick_w = max(2, int(dx * float(CANDLE_WICK_RATIO)))
+    # Compute spacing and ensure a visible gap so bodies never overlap
+    if n > 1:
+        dx = (xs[-1] - xs[0]) / (n - 1)
+    else:
+        dx = (x2 - x1)
+    gap = max(1.0, dx * 0.18)                       # ~18% gap between candles
+    body_full = max(1, int(min(dx - gap, CANDLE_BODY_MAX * CHART_SCALE)))
+    body_half = max(1, body_full // 2)
+    wick_w = max(1, int(dx * max(0.06, CANDLE_WICK_RATIO)))  # thin wicks
 
     def y(p): return y2 - (float(p)-pmin)/pr*(y2-y1)
 
@@ -335,34 +342,35 @@ def atr14(df: pd.DataFrame) -> float:
         return max(1e-6, float(np.nanmean(tr)))
     return max(1e-6, float(pd.Series(tr).rolling(14).mean().iloc[-1]))
 
-def find_nearest_pivot(series: pd.Series, kind: str = "low",
-                       window: int = 3, lookback: int = 60) -> Optional[Tuple[int, float]]:
+def find_last_swing(series: pd.Series, kind: str = "high",
+                    window: int = 3, lookback: int = 250) -> Optional[float]:
     """
-    kind='low'  → nearest swing low (local minimum)
-    kind='high' → nearest swing high (local maximum)
-    Returns (index, price) scanning backward within lookback bars.
+    kind='high' → last local maximum; kind='low' → last local minimum.
+    Scans backward over up to `lookback` bars, ignores very last bar for stability.
+    Returns the swing price or None.
     """
     s = _series_f64(series)
     n = len(s)
-    if n == 0:
-        return None
+    if n == 0: return None
     start = max(0, n - lookback - 1)
-    end   = n - 2  # ignore very last bar for stability
+    end   = n - 2  # ignore current bar
     for i in range(end, start - 1, -1):
         lo = max(0, i - window)
         hi = min(n - 1, i + window)
         seg = s.iloc[lo:hi+1]
         val = float(s.iloc[i])
-        if kind == "low":
-            if np.isclose(val, float(seg.min())):
-                return (i, val)
-        else:
+        if kind == "high":
             if np.isclose(val, float(seg.max())):
-                return (i, val)
+                return val
+        else:
+            if np.isclose(val, float(seg.min())):
+                return val
     return None
 
 def trend_bias(close: pd.Series) -> str:
-    """Simple bias: price vs 20dma and 5-bar momentum."""
+    """
+    Simple bias: bullish if above 20DMA AND 5-bar momentum >= 0, else bearish.
+    """
     s = _series_f64(close)
     if len(s) < 25:
         return "bullish" if len(s) >= 2 and s.iloc[-1] >= s.iloc[-2] else "bearish"
@@ -371,12 +379,10 @@ def trend_bias(close: pd.Series) -> str:
     return "bullish" if (float(s.iloc[-1]) >= ma20 and mom5 >= 0) else "bearish"
 
 def generate_chart(ticker: str) -> Optional[str]:
-    """Daily chart: gradient, candles, precise pivot zone (ATR-sized), white logos.
-       Layout via CHART_SCALE, PLOT_SCALE, CHART_MARGIN, PLOT_TOP_OFFSET, SUPPORT_INSET.
-    """
+    """Daily chart (1y): gradient, non-overlapping candles, tight swing-level zone, white logos."""
     try:
-        # --- Data: DAILY ---
-        df = yf.download(ticker, period="6mo", interval="1d",
+        # --- Data: DAILY for 1 year ---
+        df = yf.download(ticker, period="1y", interval="1d",
                          progress=False, auto_adjust=False, threads=False)
         if df is None or df.empty:
             log(f"[warn] no data for {ticker}")
@@ -409,35 +415,28 @@ def generate_chart(ticker: str) -> Optional[str]:
         # --- Candles first ---
         render_candles(d, ohlc, (x1, y1, x2, y2))
 
-        # --- Precise Pivot Zone (ATR-sized) ---
+        # --- Tight Swing Zone: last swing HIGH if bullish, last swing LOW if bearish ---
         close_s = ohlc["Close"]
         bias    = trend_bias(close_s)  # 'bullish' or 'bearish'
         atr     = atr14(ohlc)
 
-        # Controls (safe defaults if not in controls.py)
-        ATR_K         = float(globals().get("SUPPORT_ATR_MULT", 0.6))  # height of band
-        PIV_WIN       = int(globals().get("PIVOT_WINDOW", 3))          # pivot detection half-window
-        PIV_LOOKBACK  = int(globals().get("PIVOT_LOOKBACK", 60))       # how far back to search
-        inset         = int(globals().get("SUPPORT_INSET", 6) * CHART_SCALE)
+        # knobs (optional: add to controls.py if you want to tweak)
+        ATR_K        = float(globals().get("SUPPORT_ATR_MULT", 0.5))  # band half-height in ATRs
+        PIV_WIN      = int(globals().get("PIVOT_WINDOW", 3))          # pivot sensitivity
+        PIV_LOOKBACK = int(globals().get("PIVOT_LOOKBACK", 120))      # how far back to search
+        inset        = int(globals().get("SUPPORT_INSET", 6) * CHART_SCALE)
 
         if bias == "bullish":
-            pivot = find_nearest_pivot(ohlc["Low"], kind="low", window=PIV_WIN, lookback=PIV_LOOKBACK)
-            if pivot is not None:
-                _, p = pivot
-                lo_price = p
-                hi_price = p + atr * ATR_K
-            else:
-                lo_price, hi_price = None, None
+            level = find_last_swing(ohlc["High"], kind="high", window=PIV_WIN, lookback=PIV_LOOKBACK)
         else:
-            pivot = find_nearest_pivot(ohlc["High"], kind="high", window=PIV_WIN, lookback=PIV_LOOKBACK)
-            if pivot is not None:
-                _, p = pivot
-                lo_price = p - atr * ATR_K
-                hi_price = p
-            else:
-                lo_price, hi_price = None, None
+            level = find_last_swing(ohlc["Low"],  kind="low",  window=PIV_WIN, lookback=PIV_LOOKBACK)
 
-        if (lo_price is not None) and (hi_price is not None) and (hi_price >= lo_price):
+        if level is not None and atr > 0:
+            # Build a tight zone centered on that swing level
+            half = max(1e-6, atr * ATR_K * 0.5)
+            lo_price = level - half
+            hi_price = level + half
+
             pmin = float(ohlc["Low"].min())
             pmax = float(ohlc["High"].max())
             pr   = max(1e-9, pmax - pmin)
