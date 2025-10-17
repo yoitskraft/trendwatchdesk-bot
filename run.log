@@ -1,0 +1,26 @@
+[2025-10-17 07:27:38Z] [info] legacy --ci → daily charts
+[2025-10-17 07:27:38Z] [info] selected tickers: ['META', 'AMZN', 'NVDA', 'AAPL', 'AMD', 'NIO']
+[2025-10-17 07:27:46Z] [info] caption file written: output/caption_20251017.txt
+
+==============================
+✅ Daily charts generated:
+ - output/charts/META_chart.png
+ - output/charts/AMZN_chart.png
+ - output/charts/NVDA_chart.png
+ - output/charts/AAPL_chart.png
+ - output/charts/AMD_chart.png
+ - output/charts/NIO_chart.png
+Caption file: output/caption_20251017.txt
+==============================
+
+[2025-10-17 07:27:47Z] [info] legacy --ci-posters → posters
+[2025-10-17 07:27:47Z] [info] legacy --ci-posters → posters
+[2025-10-17 07:27:54Z] [info] poster saved: output/posters/AAPL_poster_20251017.png
+[2025-10-17 07:27:54Z] [info] poster saved: output/posters/AAPL_poster_20251017.png
+[2025-10-17 07:27:56Z] [info] poster saved: output/posters/AAPL_poster_20251017.png
+[2025-10-17 07:27:56Z] [info] poster saved: output/posters/AAPL_poster_20251017.png
+
+==============================
+Posters generated: 2
+==============================
+
