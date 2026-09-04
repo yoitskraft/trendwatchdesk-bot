@@ -1,0 +1,26 @@
+[2026-09-04 12:05:33Z] [info] legacy --ci → daily charts
+[2026-09-04 12:05:33Z] [info] selected tickers: ['GOOGL', 'NVDA', 'TSLA', 'MSFT', 'TSM', 'ROK']
+[2026-09-04 12:05:44Z] [info] caption file written: output/caption_20260904.txt
+
+==============================
+✅ Daily charts generated:
+ - output/charts/GOOGL_chart.png
+ - output/charts/NVDA_chart.png
+ - output/charts/TSLA_chart.png
+ - output/charts/MSFT_chart.png
+ - output/charts/TSM_chart.png
+ - output/charts/ROK_chart.png
+Caption file: output/caption_20260904.txt
+==============================
+
+[2026-09-04 12:05:44Z] [info] legacy --ci-posters → posters
+[2026-09-04 12:05:44Z] [info] legacy --ci-posters → posters
+[2026-09-04 12:05:52Z] [info] poster saved: output/posters/AAPL_poster_20260904.png
+[2026-09-04 12:05:52Z] [info] poster saved: output/posters/AAPL_poster_20260904.png
+[2026-09-04 12:05:53Z] [info] poster saved: output/posters/AAPL_poster_20260904.png
+[2026-09-04 12:05:53Z] [info] poster saved: output/posters/AAPL_poster_20260904.png
+
+==============================
+Posters generated: 2
+==============================
+
