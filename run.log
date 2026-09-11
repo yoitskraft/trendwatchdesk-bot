@@ -1,0 +1,31 @@
+[2026-09-11 12:09:59Z] [info] legacy --ci → daily charts
+[2026-09-11 12:09:59Z] [info] selected tickers: ['NVDA', 'META', 'GOOGL', 'TSLA', 'AVGO', 'SQ']
+$SQ: No data found, symbol may be delisted
+
+1 Failed download:
+['SQ']: No data found, symbol may be delisted
+[2026-09-11 12:10:09Z] [warn] no data for SQ
+[2026-09-11 12:10:09Z] [warn] chart failed for SQ
+[2026-09-11 12:10:09Z] [info] caption file written: output/caption_20260911.txt
+
+==============================
+✅ Daily charts generated:
+ - output/charts/NVDA_chart.png
+ - output/charts/META_chart.png
+ - output/charts/GOOGL_chart.png
+ - output/charts/TSLA_chart.png
+ - output/charts/AVGO_chart.png
+Caption file: output/caption_20260911.txt
+==============================
+
+[2026-09-11 12:10:09Z] [info] legacy --ci-posters → posters
+[2026-09-11 12:10:09Z] [info] legacy --ci-posters → posters
+[2026-09-11 12:10:15Z] [info] poster saved: output/posters/AAPL_poster_20260911.png
+[2026-09-11 12:10:15Z] [info] poster saved: output/posters/AAPL_poster_20260911.png
+[2026-09-11 12:10:17Z] [info] poster saved: output/posters/AAPL_poster_20260911.png
+[2026-09-11 12:10:17Z] [info] poster saved: output/posters/AAPL_poster_20260911.png
+
+==============================
+Posters generated: 2
+==============================
+
