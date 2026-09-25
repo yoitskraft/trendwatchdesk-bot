@@ -1,0 +1,26 @@
+[2026-09-25 12:43:22Z] [info] legacy --ci → daily charts
+[2026-09-25 12:43:23Z] [info] selected tickers: ['GOOGL', 'AMZN', 'META', 'TSLA', 'AMD', 'IONQ']
+[2026-09-25 12:43:31Z] [info] caption file written: output/caption_20260925.txt
+
+==============================
+✅ Daily charts generated:
+ - output/charts/GOOGL_chart.png
+ - output/charts/AMZN_chart.png
+ - output/charts/META_chart.png
+ - output/charts/TSLA_chart.png
+ - output/charts/AMD_chart.png
+ - output/charts/IONQ_chart.png
+Caption file: output/caption_20260925.txt
+==============================
+
+[2026-09-25 12:43:31Z] [info] legacy --ci-posters → posters
+[2026-09-25 12:43:31Z] [info] legacy --ci-posters → posters
+[2026-09-25 12:43:41Z] [info] poster saved: output/posters/AAPL_poster_20260925.png
+[2026-09-25 12:43:41Z] [info] poster saved: output/posters/AAPL_poster_20260925.png
+[2026-09-25 12:43:42Z] [info] poster saved: output/posters/AAPL_poster_20260925.png
+[2026-09-25 12:43:42Z] [info] poster saved: output/posters/AAPL_poster_20260925.png
+
+==============================
+Posters generated: 2
+==============================
+
