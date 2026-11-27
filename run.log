@@ -1,0 +1,26 @@
+[2026-11-27 17:24:53Z] [info] legacy --ci → daily charts
+[2026-11-27 17:24:53Z] [info] selected tickers: ['AMZN', 'NVDA', 'TSLA', 'MSFT', 'TSM', 'ISRG']
+[2026-11-27 17:25:01Z] [info] caption file written: output/caption_20261127.txt
+
+==============================
+✅ Daily charts generated:
+ - output/charts/AMZN_chart.png
+ - output/charts/NVDA_chart.png
+ - output/charts/TSLA_chart.png
+ - output/charts/MSFT_chart.png
+ - output/charts/TSM_chart.png
+ - output/charts/ISRG_chart.png
+Caption file: output/caption_20261127.txt
+==============================
+
+[2026-11-27 17:25:02Z] [info] legacy --ci-posters → posters
+[2026-11-27 17:25:02Z] [info] legacy --ci-posters → posters
+[2026-11-27 17:25:10Z] [info] poster saved: output/posters/AAPL_poster_20261127.png
+[2026-11-27 17:25:10Z] [info] poster saved: output/posters/AAPL_poster_20261127.png
+[2026-11-27 17:25:11Z] [info] poster saved: output/posters/AAPL_poster_20261127.png
+[2026-11-27 17:25:11Z] [info] poster saved: output/posters/AAPL_poster_20261127.png
+
+==============================
+Posters generated: 2
+==============================
+
